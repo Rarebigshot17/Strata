@@ -6,6 +6,7 @@
 // position, so tools/glm53_compare.py compares it with llama.cpp's directly. --dump-layers writes, per position,
 // the residual streams after every layer: n_layer x hc x n_embd float32.
 #include "strata/glm/cpu_ref.hpp"
+#include "strata/glm/serve_loop.hpp"
 
 #include <chrono>
 #include <cstdio>
@@ -33,10 +34,26 @@ bool read_ids(const std::string& path, std::vector<int32_t>& out) {
     return is.eof() && !out.empty();
 }
 
+struct RefEvaluator : strata::glm::Evaluator {
+    strata::glm::CpuRef& r;
+    explicit RefEvaluator(strata::glm::CpuRef& ref) : r(ref) {}
+    void reset() override { r.reset(); }
+    const std::vector<float>& eval(int32_t t) override { return r.eval(t); }
+};
+
+std::vector<int32_t> parse_ids_list(const std::string& s) {
+    std::vector<int32_t> out;
+    std::stringstream ss(s);
+    std::string item;
+    while (std::getline(ss, item, ',')) out.push_back((int32_t) std::atoi(item.c_str()));
+    return out;
+}
+
 int usage() {
     std::fprintf(stderr,
                  "usage: strata-glm-ref -m MODEL.gguf --tokens-file IDS.txt --out LOGITS.bin\n"
-                 "                      [--threads N] [--dump-layers PATH] [--max-tokens N]\n");
+                 "                      [--threads N] [--dump-layers PATH] [--max-tokens N]\n"
+                 "       strata-glm-ref -m MODEL.gguf --serve [--ctx N] [--eos-ids A,B] [--threads N]\n");
     return 2;
 }
 
@@ -45,7 +62,9 @@ int usage() {
 int main(int argc, char** argv) {
     std::string model_path, ids_path, out_path, layers_path;
     int threads = (int) std::thread::hardware_concurrency();
-    long long max_tokens = 0;
+    long long max_tokens = 0, ctx = 4096;
+    bool serve = false;
+    std::vector<int32_t> eos;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : nullptr; };
@@ -56,7 +75,25 @@ int main(int argc, char** argv) {
         else if (a == "--dump-layers" && (v = next())) layers_path = v;
         else if ((a == "--threads" || a == "-t") && (v = next())) threads = std::atoi(v);
         else if (a == "--max-tokens" && (v = next())) max_tokens = std::atoll(v);
+        else if (a == "--serve") serve = true;
+        else if (a == "--ctx" && (v = next())) ctx = std::atoll(v);
+        else if (a == "--eos-ids" && (v = next())) eos = parse_ids_list(v);
         else return usage();
+    }
+    if (serve && !model_path.empty()) {
+        try {
+            strata::glm::Model model(model_path);
+            strata::glm::CpuRef ref(model, ctx, threads);
+            RefEvaluator ev(ref);
+            strata::glm::ServeOptions so;
+            so.max_ctx = ctx;
+            so.eos_ids = eos;
+            so.info.push_back("backend=cpu-reference");
+            return strata::glm::serve_loop(ev, so);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "strata-glm-ref: %s\n", e.what());
+            return 1;
+        }
     }
     if (model_path.empty() || ids_path.empty() || out_path.empty()) return usage();
 

@@ -1654,7 +1654,7 @@ endif()
 # every GPU kernel is checked against.  strata-glm-ref writes its logits in the --dump-logits layout for
 # tools/glm53_compare.py.  Needs ggml-cpu (STRATA_NATIVE_EXPERTS, on by default); no CUDA.
 if(STRATA_NATIVE_EXPERTS)
-  add_library(strata_glm STATIC src/glm/model.cpp src/glm/cpu_ref.cpp src/glm/cpu_experts.cpp)
+  add_library(strata_glm STATIC src/glm/model.cpp src/glm/cpu_ref.cpp src/glm/cpu_experts.cpp src/glm/sampler.cpp src/glm/serve_loop.cpp)
   target_include_directories(strata_glm PUBLIC include)
   target_link_libraries(strata_glm PUBLIC ggml-cpu ggml-base Threads::Threads)
   target_compile_features(strata_glm PUBLIC cxx_std_17)

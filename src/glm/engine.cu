@@ -370,6 +370,10 @@ double GpuEngine::cache_hit_rate() const {
 
 std::string GpuEngine::cache_summary() const { return impl_->cache->summary(); }
 
+int64_t GpuEngine::cache_hits() const { return impl_->cache->hits(); }
+
+int64_t GpuEngine::cache_lookups() const { return impl_->cache->lookups(); }
+
 void GpuEngine::save_profile() const { impl_->cache->save_profile(); }
 
 GpuEngine::~GpuEngine() {

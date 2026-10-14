@@ -41,6 +41,8 @@ public:
     const std::vector<std::string>& placement() const { return placement_; }
     /// The VRAM expert cache's hit rate so far, and a one-line description.
     double cache_hit_rate() const;
+    int64_t cache_hits() const;
+    int64_t cache_lookups() const;
     std::string cache_summary() const;
     /// Writes the expert use profile (when --expert-profile names a file).
     void save_profile() const;
