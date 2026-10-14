@@ -17,6 +17,8 @@
 
 namespace strata::glm {
 
+class CpuExperts;
+
 /// A fixed set of worker threads for `parallel_for`.
 class ThreadPool {
 public:
@@ -66,6 +68,7 @@ private:
     int64_t max_ctx_;
     int64_t pos_ = 0;
     std::unique_ptr<ThreadPool> pool_;
+    std::unique_ptr<CpuExperts> experts_;
     std::vector<std::unique_ptr<LayerState>> st_;
     std::vector<int32_t> sel_;        ///< the selected cells of the last full indexer layer, this token
     std::vector<float> logits_;

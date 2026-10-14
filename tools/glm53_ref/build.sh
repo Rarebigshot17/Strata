@@ -26,8 +26,8 @@ grep -q "add_subdirectory(strata-ref)" examples/CMakeLists.txt || { echo "could 
 
 CUDA_FLAG="-DGGML_CUDA=ON"
 [ "${NO_CUDA:-0}" = "1" ] && CUDA_FLAG="-DGGML_CUDA=OFF"
-cmake -B build -DCMAKE_BUILD_TYPE=Release $CUDA_FLAG
-cmake --build build -j"$(nproc)" --target llama-strata-ref llama-cli llama-server llama-quantize
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DLLAMA_BUILD_TESTS=ON $CUDA_FLAG
+cmake --build build -j"$(nproc)" --target llama-strata-ref llama-cli llama-server llama-quantize test-llama-archs
 
 echo
 echo "built: $LLAMA_DIR/build/bin/llama-strata-ref (llama.cpp $(git rev-parse --short HEAD))"

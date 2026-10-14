@@ -86,29 +86,46 @@ Two things found while writing the reference, both checked against llama.cpp's c
 - Below 2,048 tokens of context the indexer selects every pool, so attention is plain causal there. The
   indexer only changes results on longer contexts, which is why the test variants shrink its top-k.
 
-## M0: what to run on napster-ai
+## What to run on napster-ai
 
-1. Download the 3-bit GGUF (about 120 GB; Unsloth re-uploaded it on 2026-10-05 with `glm5-next` metadata):
+Each step prints a few lines to paste back. Steps 1-4 need no model download.
 
-   ```bash
-   pip install -U huggingface_hub
-   hf download unsloth/GLM-5.3-Flash-GGUF --include "*UD-IQ3_XXS*" --local-dir ~/models/glm53
-   ```
-
-2. Check it against what the port assumes, and paste the whole output back:
-
-   ```bash
-   python tools/glm53_inspect.py ~/models/glm53/<path to the first .gguf shard>
-   ```
-
-3. Build llama.cpp with CUDA plus the reference tool (pinned to the commit the tool was written against):
+1. **Build llama.cpp** (CUDA, pinned commit) with the reference tool and the small-model generator:
 
    ```bash
    tools/glm53_ref/build.sh ~/llama.cpp
    ```
 
-4. Make the reference logits. `--n-cpu-moe` keeps that many layers' experts on the CPU; lower it until VRAM runs
-   out, then raise it by a few:
+2. **Build this branch** for the three Ampere cards (sm_86):
+
+   ```bash
+   cmake -B build -DSTRATA_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=86 -DCMAKE_BUILD_TYPE=Release
+   cmake --build build -j"$(nproc)" --target strata-glm strata-glm-ref
+   ```
+
+3. **CPU reference vs llama.cpp** on small random models (paste the four PASS/FAIL lines):
+
+   ```bash
+   PYTHONPATH=~/llama.cpp/gguf-py tools/glm53_selftest.sh ~/llama.cpp/build build
+   ```
+
+4. **GPU engine vs the CPU reference and llama.cpp** on the same small models (paste the whole output):
+
+   ```bash
+   PYTHONPATH=~/llama.cpp/gguf-py tools/glm53_gpu_check.sh ~/llama.cpp/build build
+   ```
+
+5. **The real model.** Download the 3-bit GGUF (about 120 GB; Unsloth re-uploaded it on 2026-10-05 with
+   `glm5-next` metadata) and check it against what the engine assumes (paste the whole output):
+
+   ```bash
+   pip install -U huggingface_hub
+   hf download unsloth/GLM-5.3-Flash-GGUF --include "*UD-IQ3_XXS*" --local-dir ~/models/glm53
+   python tools/glm53_inspect.py ~/models/glm53/<first .gguf shard>
+   ```
+
+6. **Reference logits from llama.cpp** on the real model. `--n-cpu-moe` keeps that many layers' experts on the
+   CPU; lower it until VRAM runs out, then raise it by a few:
 
    ```bash
    ~/llama.cpp/build/bin/llama-strata-ref -m ~/models/glm53/<first shard> -f tools/glm53_ref/prompt.txt \
@@ -116,14 +133,20 @@ Two things found while writing the reference, both checked against llama.cpp's c
        --out ~/glm53-ref/ref.bin --ids-out ~/glm53-ref/ids.txt
    ```
 
-   Paste back the last 20 lines it prints, and keep `ref.bin` and `ids.txt`: every later milestone compares
-   against them.
+7. **Strata's GPU engine on the real model**, compared with step 6 (paste both outputs):
 
-5. Optional, as a sanity check of the model itself: `~/llama.cpp/build/bin/llama-cli -m <first shard> -ngl 99
-   --n-cpu-moe 40 -p "Hello"` and say whether the answer reads sensibly and how many tokens/s it reports.
+   ```bash
+   build/strata-glm -m ~/models/glm53/<first shard> --tokens-file ~/glm53-ref/ids.txt --ctx 4096 \
+       --out ~/glm53-ref/strata.bin
+   python tools/glm53_compare.py ~/glm53-ref/ref.bin ~/glm53-ref/strata.bin
+   ```
+
+   This first version computes every routed expert on the CPU and reads the prompt one token at a time, so it is
+   slow. The VRAM expert cache (M3) and batched prompt reading (M4) come next.
 
 ## Removed on this branch
 
 - `sycl/` (the Intel Arc engine), `docs/INTEL_ARC.md`, `docs/INTEL.md`, `docs/A770_SPEED_SPEC.md`, the Arc
   community benchmark results, `tools/test_setup_sycl.py`, and `setup.py --backend sycl`.
-- The README and other docs still describe the Qwen engine. They are rewritten at M9, once the GLM engine runs.
+- The README and other docs still describe the Qwen engine. They are rewritten at M7, once the GLM engine
+  replaces it.

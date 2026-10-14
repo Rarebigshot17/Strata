@@ -1654,10 +1654,19 @@ endif()
 # every GPU kernel is checked against.  strata-glm-ref writes its logits in the --dump-logits layout for
 # tools/glm53_compare.py.  Needs ggml-cpu (STRATA_NATIVE_EXPERTS, on by default); no CUDA.
 if(STRATA_NATIVE_EXPERTS)
-  add_library(strata_glm STATIC src/glm/model.cpp src/glm/cpu_ref.cpp)
+  add_library(strata_glm STATIC src/glm/model.cpp src/glm/cpu_ref.cpp src/glm/cpu_experts.cpp)
   target_include_directories(strata_glm PUBLIC include)
   target_link_libraries(strata_glm PUBLIC ggml-cpu ggml-base Threads::Threads)
   target_compile_features(strata_glm PUBLIC cxx_std_17)
   add_executable(strata-glm-ref src/glm/ref_main.cpp)
   target_link_libraries(strata-glm-ref PRIVATE strata_glm)
+endif()
+# strata-glm: the GPU engine (src/glm/engine.cu) on Strata's MMVQ kernels; --check-cpu compares it with the
+# CPU reference layer by layer.
+if(STRATA_NATIVE_EXPERTS AND STRATA_ENABLE_CUDA AND NOT STRATA_ENABLE_HIP)
+  add_library(strata_glm_gpu STATIC src/glm/gpu_kernels.cu src/glm/gpu_linear.cu src/glm/engine.cu)
+  target_link_libraries(strata_glm_gpu PUBLIC strata_glm strata_kernels CUDA::cudart)
+  target_compile_options(strata_glm_gpu PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>)
+  add_executable(strata-glm src/glm/glm_main.cpp)
+  target_link_libraries(strata-glm PRIVATE strata_glm_gpu)
 endif()

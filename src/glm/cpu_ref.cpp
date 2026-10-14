@@ -4,6 +4,8 @@
 // `llama-debug --tensor-filter` points at one block of code here.
 #include "strata/glm/cpu_ref.hpp"
 
+#include "strata/glm/cpu_experts.hpp"
+
 #include "ggml.h"
 #include "ggml-cpu.h"
 
@@ -151,6 +153,7 @@ struct CpuRef::LayerState {
 CpuRef::CpuRef(const Model& model, int64_t max_ctx, int n_threads)
     : m_(model), c_(model.config()), max_ctx_(max_ctx), pool_(new ThreadPool(n_threads)) {
     ggml_cpu_init();
+    experts_ = std::make_unique<CpuExperts>(m_, *pool_);
     for (int64_t il = 0; il < c_.n_layer; ++il) {
         auto s = std::make_unique<LayerState>();
         const LayerWeights& w = m_.layer(il);
@@ -566,14 +569,10 @@ void CpuRef::ffn(int64_t il, const float* x, float* y) {
     if (c_.expert_weights_scale != 0.0f && c_.expert_weights_scale != 1.0f)
         for (auto& wv : wts) wv *= c_.expert_weights_scale;
 
-    std::fill(y, y + E, 0.0f);
+    std::vector<int32_t> ids32((size_t) KU);
+    for (int64_t k = 0; k < KU; ++k) ids32[(size_t) k] = (int32_t) ids[(size_t) k];
+    experts_->run(il, x, ids32.data(), wts.data(), (int) KU, y);
     std::vector<float> ye((size_t) E);
-    for (int64_t k = 0; k < KU; ++k) {
-        const int64_t e = ids[(size_t) k];
-        swiglu_ffn(w.gate_exps.slice2(e), w.up_exps.slice2(e), w.down_exps.slice2(e), c_.clamp_exp[(size_t) il], x,
-                   ye.data());
-        for (int64_t i = 0; i < E; ++i) y[i] += wts[(size_t) k] * ye[(size_t) i];
-    }
     if (c_.n_expert_shared > 0) {
         swiglu_ffn(w.gate_shexp, w.up_shexp, w.down_shexp, c_.clamp_shexp[(size_t) il], x, ye.data());
         for (int64_t i = 0; i < E; ++i) y[i] += ye[(size_t) i];
