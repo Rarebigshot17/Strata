@@ -39,6 +39,7 @@ struct RefEvaluator : strata::glm::Evaluator {
     explicit RefEvaluator(strata::glm::CpuRef& ref) : r(ref) {}
     void reset() override { r.reset(); }
     const std::vector<float>& eval(int32_t t) override { return r.eval(t); }
+    int64_t pos() const override { return r.pos(); }
 };
 
 std::vector<int32_t> parse_ids_list(const std::string& s) {

@@ -11,6 +11,7 @@
 #include "strata/glm/model.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -23,6 +24,7 @@ struct EngineOptions {
     std::vector<double> split;       ///< share of the layers per device; empty = by free memory
     int cpu_threads = 0;             ///< 0 = all hardware threads
     bool verbose = true;
+    int prefill_chunk = 256;         ///< prompt tokens read at once (0: one at a time)
     ExpertCacheOptions cache;
 };
 
@@ -36,6 +38,10 @@ public:
     void reset();
     /// Runs `token` at the next position; returns the logits (n_vocab floats, host memory).
     const std::vector<float>& eval(int32_t token, Trace* trace = nullptr);
+    /// Runs `n` prompt tokens in chunks; returns the last one's logits. `progress(done)` after each chunk; false
+    /// from it stops early (the state then holds the tokens read so far, pos() says how many).
+    const std::vector<float>& prefill(const int32_t* ids, int64_t n,
+                                      const std::function<bool(int64_t)>& progress = nullptr);
     int64_t pos() const { return pos_; }
     /// The layers each device holds, for the log: "0: layers 0-21 (8.1 GB)".
     const std::vector<std::string>& placement() const { return placement_; }
@@ -48,6 +54,8 @@ public:
     void save_profile() const;
 
 private:
+    bool run_chunk(const int32_t* ids, int T);   ///< false: this chunk needs the one-token path
+    void setup_prefill();                        ///< the chunk buffers, before the expert cache takes the rest
     struct Impl;
     std::unique_ptr<Impl> impl_;
     int64_t pos_ = 0;

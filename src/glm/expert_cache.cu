@@ -150,6 +150,18 @@ void ExpertCache::matrices(int64_t il, int slot, gpu::DevMatrix& gate, gpu::DevM
     down.w = base + s.down_off;
 }
 
+int ExpertCache::claim_free(int64_t il, int e) {
+    ExpertSlots& s = L_[(size_t) il];
+    if (s.n_slots == 0 || s.slot_of[(size_t) e] >= 0) return -1;
+    for (int i = 0; i < s.n_slots; ++i)
+        if (s.expert_in[(size_t) i] < 0) {
+            s.expert_in[(size_t) i] = e;
+            s.slot_of[(size_t) e] = i;
+            return i;
+        }
+    return -1;
+}
+
 void ExpertCache::record(int64_t il, const int32_t* ids, int k) {
     const ExpertSlots& s = L_[(size_t) il];
     for (int j = 0; j < k; ++j) {

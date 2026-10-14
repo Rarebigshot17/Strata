@@ -8,8 +8,8 @@
 # STRATA_BUILD_DIR: a CUDA build of this repo with strata-glm and strata-glm-ref.
 # Needs gguf-py: PYTHONPATH=<llama.cpp>/gguf-py (or pip install gguf).
 #
-# For each model: strata-glm --check-cpu (GPU vs CPU reference, layer by layer), then the GPU's logits against
-# llama.cpp's. The GPU quantizes activations to q8_1 like llama.cpp's CUDA backend, so on quantized weights the
+# For each model: strata-glm --check-cpu (GPU vs CPU reference, layer by layer), the prompt path (--prefill, in
+# chunks) against the CPU reference, then the GPU's logits against llama.cpp's. The GPU quantizes activations to q8_1 like llama.cpp's CUDA backend, so on quantized weights the
 # numbers differ from the CPU's by more than float rounding; the thresholds allow for that.
 set -uo pipefail
 
@@ -35,6 +35,13 @@ for m in glm5-next-moe v1 q4_0 q8_0; do
         fail=1
     fi
     grep -E "GPU |layer .* differs|check-cpu|strata-glm:|CUDA" "$W/log_$m.txt" | head -12
+    # the prompt in chunks of 16 (crossing pool boundaries) against the CPU reference, then 4 decoded tokens
+    if "$SB/strata-glm" -m "$W/$m.gguf" --tokens-file "$W/ids.txt" --prefill --prefill-chunk 16 --check-cpu \
+            > "$W/pp_$m.txt" 2>&1; then
+        echo "prefill: $(grep check-prefill "$W/pp_$m.txt")"
+    else
+        echo "prefill FAILED:"; tail -8 "$W/pp_$m.txt"; fail=1
+    fi
     "$LB/bin/llama-strata-ref" -m "$W/$m.gguf" --tokens-file "$W/ids.txt" -c 256 -b 64 -ub 64 \
         --out "$W/ref_$m.bin" > /dev/null 2>&1
     echo "vs llama.cpp: $(python3 "$HERE/glm53_compare.py" "$W/ref_$m.bin" "$W/gpu_$m.bin" | tail -2 | tr '\n' ' ')"

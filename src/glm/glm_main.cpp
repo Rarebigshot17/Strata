@@ -64,6 +64,11 @@ struct GpuEvaluator : strata::glm::Evaluator {
     const std::vector<float>& eval(int32_t t) override { return e.eval(t); }
     int64_t hits() const override { return e.cache_hits(); }
     int64_t lookups() const override { return e.cache_lookups(); }
+    int64_t pos() const override { return e.pos(); }
+    const std::vector<float>& prefill(const int32_t* ids, int64_t n,
+                                      const std::function<bool(int64_t)>& progress) override {
+        return e.prefill(ids, n, progress);
+    }
 };
 
 int usage() {
@@ -71,7 +76,7 @@ int usage() {
                  "usage: strata-glm -m MODEL.gguf --tokens-file IDS.txt [--out LOGITS.bin] [--ctx N]\n"
                  "                  [--devices 0,1,2] [--split 24,12,10] [--threads N] [--check-cpu]\n"
                  "                  [--max-tokens N] [--vram-reserve GB] [--expert-profile PATH]\n"
-                 "                  [--max-swaps N] [--no-expert-cache]\n"
+                 "                  [--max-swaps N] [--no-expert-cache] [--prefill] [--prefill-chunk N]\n"
                  "       strata-glm -m MODEL.gguf --serve [--ctx N] [--eos-ids A,B] [same GPU and cache options]\n");
     return 2;
 }
@@ -81,7 +86,7 @@ int usage() {
 int main(int argc, char** argv) {
     std::string model_path, ids_path, out_path;
     strata::glm::EngineOptions opt;
-    bool check_cpu = false, serve = false;
+    bool check_cpu = false, serve = false, use_prefill = false;
     long long max_tokens = 0;
     std::vector<int32_t> eos;
     for (int i = 1; i < argc; ++i) {
@@ -102,6 +107,8 @@ int main(int argc, char** argv) {
         else if (a == "--max-swaps" && (v = next())) opt.cache.max_swaps_per_token = std::atoi(v);
         else if (a == "--no-expert-cache") opt.cache.disabled = true;
         else if (a == "--serve") serve = true;
+        else if (a == "--prefill") use_prefill = true;
+        else if (a == "--prefill-chunk" && (v = next())) opt.prefill_chunk = std::atoi(v);
         else if (a == "--eos-ids" && (v = next())) eos = parse_list<int32_t>(v);
         else return usage();
     }
@@ -155,6 +162,46 @@ int main(int argc, char** argv) {
             }
             const int32_t hdr[2] = {(int32_t) c.n_vocab, (int32_t) ids.size()};
             std::fwrite(hdr, sizeof hdr, 1, out);
+        }
+
+        if (use_prefill) {
+            // the prompt in chunks on the GPU, against the CPU reference token by token; then a few decoded tokens
+            // on both, which checks the state the chunks left (KDA, the latent cache, the pooled keys)
+            const auto a = std::chrono::steady_clock::now();
+            std::vector<float> lg = eng.prefill(ids.data(), (int64_t) ids.size());
+            const double s_pp = std::chrono::duration<double>(std::chrono::steady_clock::now() - a).count();
+            std::printf("prefill: %zu tokens in %.2f s (%.1f tokens/s)\n", ids.size(), s_pp, (double) ids.size() / s_pp);
+            if (!check_cpu) {
+                if (out_path.size()) {
+                    FILE* f = std::fopen(out_path.c_str(), "wb");
+                    const int32_t hdr[2] = {(int32_t) c.n_vocab, 1};
+                    std::fwrite(hdr, sizeof hdr, 1, f);
+                    std::fwrite(lg.data(), sizeof(float), lg.size(), f);
+                    std::fclose(f);
+                }
+                eng.save_profile();
+                return 0;
+            }
+            const auto am = [](const std::vector<float>& v) { return (int32_t) (std::max_element(v.begin(), v.end()) - v.begin()); };
+            std::vector<float> lc;
+            for (int32_t id : ids) lc = ref->eval(id);
+            double worst = rel_diff(lc, lg);
+            int agree = am(lc) == am(lg);
+            std::printf("after the prompt: logits relative diff %.3g, top-1 %s\n", worst, agree ? "same" : "DIFFERENT");
+            for (int step = 0; step < 4; ++step) {
+                const int32_t next = am(lc);
+                lc = ref->eval(next);
+                lg = eng.eval(next);
+                const double dl = rel_diff(lc, lg);
+                worst = std::max(worst, dl);
+                agree += am(lc) == am(lg);
+                std::printf("decode %d: logits relative diff %.3g, top-1 %s\n", step, dl,
+                            am(lc) == am(lg) ? "same" : "DIFFERENT");
+            }
+            const bool pass = worst < 2e-2 && agree >= 4;
+            std::printf("check-prefill: worst logits relative diff %.3g, top-1 agreement %d/5: %s\n", worst, agree,
+                        pass ? "PASS" : "FAIL");
+            return pass ? 0 : 1;
         }
 
         strata::glm::Trace tg, tc;

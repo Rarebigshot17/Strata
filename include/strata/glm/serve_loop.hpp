@@ -17,6 +17,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -28,6 +29,19 @@ public:
     virtual ~Evaluator() = default;
     virtual void reset() = 0;
     virtual const std::vector<float>& eval(int32_t token) = 0;
+    /// The prompt tokens; `progress(done)` after each chunk, false from it stops early. Returns the last logits.
+    virtual const std::vector<float>& prefill(const int32_t* ids, int64_t n,
+                                              const std::function<bool(int64_t)>& progress) {
+        const std::vector<float>* last = nullptr;
+        for (int64_t i = 0; i < n; ++i) {
+            last = &eval(ids[i]);
+            if ((i + 1) % 64 == 0 || i + 1 == n)
+                if (progress && !progress(i + 1)) break;
+        }
+        return *last;
+    }
+    /// Tokens the state holds.
+    virtual int64_t pos() const = 0;
     virtual int64_t hits() const { return 0; }
     virtual int64_t lookups() const { return 0; }
 };

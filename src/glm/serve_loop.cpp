@@ -139,20 +139,18 @@ int serve_loop(Evaluator& ev, const ServeOptions& opt) {
         std::string finish;
         try {
             const size_t total = ids.size();
-            for (size_t i = reuse; i < total; ++i) {
-                last_logits = ev.eval(ids[i]);
-                seq.push_back(ids[i]);
-                const size_t done = i + 1;
-                if ((done - reuse) % 64 == 0 || done == total) {
+            if (reuse < total) {
+                const int64_t before = ev.pos();
+                last_logits = ev.prefill(ids.data() + reuse, (int64_t) (total - reuse), [&](int64_t done_new) {
                     const double ms = ms_since(t0);
-                    std::printf("PP %zu %zu %.1f %.1f\n", done, total, ms,
-                                ms > 0 ? (double) (done - reuse) * 1000.0 / ms : 0.0);
+                    std::printf("PP %zu %zu %.1f %.1f\n", reuse + (size_t) done_new, total, ms,
+                                ms > 0 ? (double) done_new * 1000.0 / ms : 0.0);
                     std::fflush(stdout);
-                }
-                if (in.stop) {
-                    finish = "cancel";
-                    break;
-                }
+                    return !in.stop.load();
+                });
+                const int64_t read = ev.pos() - before;
+                seq.insert(seq.end(), ids.begin() + (long) reuse, ids.begin() + (long) reuse + read);
+                if (seq.size() < total) finish = "cancel";
             }
         } catch (const std::exception& e) {
             std::printf("ERR %s\n", e.what());

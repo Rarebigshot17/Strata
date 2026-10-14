@@ -56,6 +56,11 @@ public:
     void matrices(int64_t il, int slot, gpu::DevMatrix& gate, gpu::DevMatrix& up, gpu::DevMatrix& down) const;
     const ExpertSlots& layer(int64_t il) const { return L_[(size_t) il]; }
 
+    /// A free slot of layer `il` for expert `e` (now mapped to it), or -1. The caller fills it (the prompt path
+    /// copies the expert there while it streams it in).
+    int claim_free(int64_t il, int e);
+    uint8_t* slot_ptr(int64_t il, int slot) const { return L_[(size_t) il].d + (size_t) slot * L_[(size_t) il].blob; }
+
     /// Counts this token's routing of layer `il` (k experts).
     void record(int64_t il, const int32_t* ids, int k);
     /// After a token: decays the scores and copies in the misses that earned a slot (synchronous copies).
