@@ -8,16 +8,27 @@
 //   <- T <id>                                        a generated token
 //   <- DONE <generated> <prompt> <prompt ms> <decode ms> <finish> 0 0 <reused> <hits> <lookups> 0 0 0.0 <read> 0
 //   <- ERR <reason>
-//   -> STOP                                          end the current request (finish "cancel")
+//   -> STOP                                          end the last GEN's request, even still queued (finish "cancel")
 //   -> QUIT
 //
-// At start it prints `INFO key=value ...` lines and `READY <context> stop`. A prompt that continues the tokens the
-// state holds (the previous prompt and its reply, the usual chat turn) reads only what is new; any other prompt
-// starts from position 0 (the KDA layers' state cannot be rewound).
+// At start it prints `INFO key=value ...` lines and `READY <context> stop`.
+//
+// CONVERSATIONS. The KDA layers' state cannot be rewound, so a prompt can only continue a state whose tokens are
+// its prefix. Several clients (agents, a chat, a bot) take turns, so the loop keeps their conversations: switching
+// away from one parks its whole state in host memory, and a prompt that continues a parked conversation restores
+// it and reads only what is new. A prompt also leaves a checkpoint (snapshot.hpp) at `cp=<n>` from the GEN line,
+// or at its end without one, when that is at least checkpoint_min tokens in: the server puts it before the
+// generation prompt, so the next turn (which re-renders the last reply) or a regenerated reply restarts there
+// rather than at 0. Least recently used conversations, then old checkpoints, are dropped beyond park_bytes.
+//
+//   -> GEN <max_new> [cp=<n>] [key=value ...] <ids>
 #pragma once
+
+#include "strata/glm/snapshot.hpp"
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -44,10 +55,17 @@ public:
     virtual int64_t pos() const = 0;
     virtual int64_t hits() const { return 0; }
     virtual int64_t lookups() const { return 0; }
+    /// Saving and restoring the state (snapshot.hpp). Without them only the live conversation is kept.
+    virtual bool can_snapshot() const { return false; }
+    virtual std::shared_ptr<Snapshot> snapshot(bool /*full*/) { return nullptr; }
+    virtual void restore(const Snapshot& /*s*/) {}
 };
 
 struct ServeOptions {
     int64_t max_ctx = 0;
+    size_t park_bytes = (size_t) 8 << 30;   ///< host memory for parked conversations and checkpoints; 0: none
+    int64_t checkpoint_min = 256;           ///< no checkpoint closer than this to the start
+    int max_checkpoints = 2;                ///< per conversation, the latest kept
     std::vector<int32_t> eos_ids;
     std::vector<std::string> info;   ///< extra INFO key=value pairs
 };

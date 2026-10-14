@@ -111,6 +111,36 @@ class Template(unittest.TestCase):
                       "<arg_key>lines</arg_key><arg_value>3</arg_value></tool_call>", out)
         self.assertIn("<|observation|><tool_response>file text</tool_response>", out)
 
+    def test_checkpoint_is_where_the_next_turn_parts(self):
+        """chat_prompt's checkpoint: before the generation prompt, and a prefix of the next turn's prompt, which
+        re-renders the reply without its reasoning."""
+        import re
+
+        class PieceTok:                       # special tokens whole, everything else one character per token
+            vocab: dict = {}
+
+            def encode(self, text, parse_special=False):
+                return [self.vocab.setdefault(p, len(self.vocab))
+                        for p in re.findall(r"<\|[a-z]+\|>|</?think>|\[gMASK\]|<sop>|.", text, re.S)]
+
+        class FakeModel:
+            tokenizer = PieceTok()
+
+        svc = G.Service.__new__(G.Service)
+        svc.model, svc.template = FakeModel(), self.t
+        turn1 = [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "Hi"}]
+        text1, ids1, _, cp1 = svc.chat_prompt({"messages": turn1})
+        self.assertEqual(len(ids1) - cp1, 2)                                   # <|assistant|><think>
+        turn2 = turn1 + [{"role": "assistant", "content": "Hello!", "reasoning_content": "Greet back."},
+                         {"role": "user", "content": "More"}]
+        text2, ids2, _, cp2 = svc.chat_prompt({"messages": turn2})
+        self.assertEqual(ids2[:cp1], ids1[:cp1])
+        self.assertNotEqual(ids2[:cp1 + 2], ids1)                             # the reply re-rendered differs
+        self.assertGreater(cp2, cp1)
+        # a template whose prompt without the generation prompt is not a prefix: no checkpoint
+        svc.template = G.ChatTemplate("{{ messages[0].content }}{% if add_generation_prompt %}!{% else %}?{% endif %}")
+        self.assertIsNone(svc.chat_prompt({"messages": [{"role": "user", "content": "x"}]})[3])
+
 
 class StopStrings(unittest.TestCase):
     def test_stop_cut_across_pieces(self):

@@ -207,6 +207,75 @@ void CpuRef::reset() {
     }
 }
 
+// ================================ snapshots ================================
+
+namespace {
+
+/// Per layer (empty where the layer has none). The indexer's pool being filled is in idx_key / idx_gate rows
+/// below pos, so a light snapshot needs only the KDA state.
+struct CpuSnapshot : Snapshot {
+    std::vector<std::vector<float>> S, conv, latent, idx_key, idx_gate, pooled;
+};
+
+}  // namespace
+
+std::shared_ptr<Snapshot> CpuRef::snapshot(bool full) const {
+    auto sn = std::make_shared<CpuSnapshot>();
+    sn->pos = pos_;
+    sn->full = full;
+    const size_t NL = (size_t) c_.n_layer;
+    for (auto* v : {&sn->S, &sn->conv, &sn->latent, &sn->idx_key, &sn->idx_gate, &sn->pooled}) v->resize(NL);
+    size_t bytes = 0;
+    auto take = [&](std::vector<float>& dst, const std::vector<float>& src, int64_t n) {
+        dst.assign(src.begin(), src.begin() + n);
+        bytes += (size_t) n * sizeof(float);
+    };
+    const int64_t ID = c_.indexer_head_size, P = c_.indexer_kpool;
+    for (int64_t il = 0; il < c_.n_layer; ++il) {
+        const LayerState& s = *st_[(size_t) il];
+        if (c_.is_kda(il)) {
+            take(sn->S[(size_t) il], s.S, (int64_t) s.S.size());
+            std::vector<float>& cv = sn->conv[(size_t) il];
+            for (const auto& w : s.conv) cv.insert(cv.end(), w.begin(), w.end());
+            bytes += cv.size() * sizeof(float);
+        } else if (full) {
+            take(sn->latent[(size_t) il], s.latent, pos_ * c_.kv_lora_rank);
+            if (c_.indexer_full[(size_t) il]) {
+                take(sn->idx_key[(size_t) il], s.idx_key, pos_ * ID);
+                take(sn->idx_gate[(size_t) il], s.idx_gate, pos_ * ID);
+                take(sn->pooled[(size_t) il], s.pooled, pos_ / P * ID);
+            }
+        }
+    }
+    sn->bytes = bytes;
+    return sn;
+}
+
+void CpuRef::restore(const Snapshot& snap) {
+    const auto* sn = dynamic_cast<const CpuSnapshot*>(&snap);
+    if (!sn || sn->S.size() != (size_t) c_.n_layer) throw std::runtime_error("CpuRef::restore: not this engine's snapshot");
+    if (sn->pos > max_ctx_) throw std::runtime_error("CpuRef::restore: the snapshot is longer than max_ctx");
+    for (int64_t il = 0; il < c_.n_layer; ++il) {
+        LayerState& s = *st_[(size_t) il];
+        if (c_.is_kda(il)) {
+            s.S = sn->S[(size_t) il];
+            const float* cv = sn->conv[(size_t) il].data();
+            for (auto& w : s.conv) {
+                std::copy(cv, cv + w.size(), w.begin());
+                cv += w.size();
+            }
+        } else if (sn->full) {
+            std::copy(sn->latent[(size_t) il].begin(), sn->latent[(size_t) il].end(), s.latent.begin());
+            if (c_.indexer_full[(size_t) il]) {
+                std::copy(sn->idx_key[(size_t) il].begin(), sn->idx_key[(size_t) il].end(), s.idx_key.begin());
+                std::copy(sn->idx_gate[(size_t) il].begin(), sn->idx_gate[(size_t) il].end(), s.idx_gate.begin());
+                std::copy(sn->pooled[(size_t) il].begin(), sn->pooled[(size_t) il].end(), s.pooled.begin());
+            }
+        }
+    }
+    pos_ = sn->pos;
+}
+
 // ================================ products ================================
 
 void CpuRef::matvec(const Tensor& w, const float* x, float* y) {

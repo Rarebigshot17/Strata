@@ -69,6 +69,9 @@ struct GpuEvaluator : strata::glm::Evaluator {
                                       const std::function<bool(int64_t)>& progress) override {
         return e.prefill(ids, n, progress);
     }
+    bool can_snapshot() const override { return true; }
+    std::shared_ptr<strata::glm::Snapshot> snapshot(bool full) override { return e.snapshot(full); }
+    void restore(const strata::glm::Snapshot& s) override { e.restore(s); }
 };
 
 int usage() {
@@ -77,7 +80,8 @@ int usage() {
                  "                  [--devices 0,1,2] [--split 24,12,10] [--threads N] [--check-cpu]\n"
                  "                  [--max-tokens N] [--vram-reserve GB] [--expert-profile PATH]\n"
                  "                  [--max-swaps N] [--no-expert-cache] [--prefill] [--prefill-chunk N]\n"
-                 "       strata-glm -m MODEL.gguf --serve [--ctx N] [--eos-ids A,B] [same GPU and cache options]\n");
+                 "       strata-glm -m MODEL.gguf --serve [--ctx N] [--eos-ids A,B] [--park-mib N]\n"
+                 "                  [--checkpoint-min N] [same GPU and cache options]\n");
     return 2;
 }
 
@@ -89,6 +93,7 @@ int main(int argc, char** argv) {
     bool check_cpu = false, serve = false, use_prefill = false;
     long long max_tokens = 0;
     std::vector<int32_t> eos;
+    strata::glm::ServeOptions so;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : nullptr; };
@@ -110,6 +115,8 @@ int main(int argc, char** argv) {
         else if (a == "--prefill") use_prefill = true;
         else if (a == "--prefill-chunk" && (v = next())) opt.prefill_chunk = std::atoi(v);
         else if (a == "--eos-ids" && (v = next())) eos = parse_list<int32_t>(v);
+        else if (a == "--park-mib" && (v = next())) so.park_bytes = (size_t) (std::max(0.0, std::atof(v)) * 1048576.0);
+        else if (a == "--checkpoint-min" && (v = next())) so.checkpoint_min = std::atoll(v);
         else return usage();
     }
     if (serve && !model_path.empty()) {
@@ -118,7 +125,6 @@ int main(int argc, char** argv) {
             strata::glm::GpuEngine eng(model, opt);
             for (const auto& line : eng.placement()) std::fprintf(stderr, "%s\n", line.c_str());
             GpuEvaluator ev(eng);
-            strata::glm::ServeOptions so;
             so.max_ctx = opt.max_ctx;
             so.eos_ids = eos;
             so.info.push_back("backend=cuda");

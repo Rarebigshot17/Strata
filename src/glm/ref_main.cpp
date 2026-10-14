@@ -8,6 +8,7 @@
 #include "strata/glm/cpu_ref.hpp"
 #include "strata/glm/serve_loop.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -40,6 +41,9 @@ struct RefEvaluator : strata::glm::Evaluator {
     void reset() override { r.reset(); }
     const std::vector<float>& eval(int32_t t) override { return r.eval(t); }
     int64_t pos() const override { return r.pos(); }
+    bool can_snapshot() const override { return true; }
+    std::shared_ptr<strata::glm::Snapshot> snapshot(bool full) override { return r.snapshot(full); }
+    void restore(const strata::glm::Snapshot& s) override { r.restore(s); }
 };
 
 std::vector<int32_t> parse_ids_list(const std::string& s) {
@@ -54,7 +58,8 @@ int usage() {
     std::fprintf(stderr,
                  "usage: strata-glm-ref -m MODEL.gguf --tokens-file IDS.txt --out LOGITS.bin\n"
                  "                      [--threads N] [--dump-layers PATH] [--max-tokens N]\n"
-                 "       strata-glm-ref -m MODEL.gguf --serve [--ctx N] [--eos-ids A,B] [--threads N]\n");
+                 "       strata-glm-ref -m MODEL.gguf --serve [--ctx N] [--eos-ids A,B] [--threads N]\n"
+                 "                      [--park-mib N] [--checkpoint-min N]\n");
     return 2;
 }
 
@@ -66,6 +71,7 @@ int main(int argc, char** argv) {
     long long max_tokens = 0, ctx = 4096;
     bool serve = false;
     std::vector<int32_t> eos;
+    strata::glm::ServeOptions so;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : nullptr; };
@@ -79,6 +85,8 @@ int main(int argc, char** argv) {
         else if (a == "--serve") serve = true;
         else if (a == "--ctx" && (v = next())) ctx = std::atoll(v);
         else if (a == "--eos-ids" && (v = next())) eos = parse_ids_list(v);
+        else if (a == "--park-mib" && (v = next())) so.park_bytes = (size_t) (std::max(0.0, std::atof(v)) * 1048576.0);
+        else if (a == "--checkpoint-min" && (v = next())) so.checkpoint_min = std::atoll(v);
         else return usage();
     }
     if (serve && !model_path.empty()) {
@@ -86,7 +94,6 @@ int main(int argc, char** argv) {
             strata::glm::Model model(model_path);
             strata::glm::CpuRef ref(model, ctx, threads);
             RefEvaluator ev(ref);
-            strata::glm::ServeOptions so;
             so.max_ctx = ctx;
             so.eos_ids = eos;
             so.info.push_back("backend=cpu-reference");

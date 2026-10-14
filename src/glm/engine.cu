@@ -304,6 +304,107 @@ void GpuEngine::reset() {
         }
         // the MLA cache and the pooled keys are only read below the current position: nothing to clear
     }
+    // the clears ran on the legacy stream, which the engine's non-blocking streams do not wait for
+    for (auto& d : I.ctx) {
+        ok(cudaSetDevice(d.id), "cudaSetDevice");
+        ok(cudaDeviceSynchronize(), "sync");
+    }
+}
+
+namespace {
+
+/// Per layer (empty where the layer has none). conv holds the three windows one after another.
+struct GpuSnapshot : Snapshot {
+    std::vector<std::vector<float>> S, conv, pend_k, pend_g, pooled;
+    std::vector<std::vector<uint16_t>> cache;
+};
+
+}  // namespace
+
+std::shared_ptr<Snapshot> GpuEngine::snapshot(bool full) {
+    Impl& I = *impl_;
+    const Config& c = I.c;
+    for (auto& d : I.ctx) {
+        ok(cudaSetDevice(d.id), "cudaSetDevice");
+        ok(cudaDeviceSynchronize(), "sync");
+    }
+    auto sn = std::make_shared<GpuSnapshot>();
+    sn->pos = pos_;
+    sn->full = full;
+    const size_t NL = (size_t) c.n_layer;
+    for (auto* v : {&sn->S, &sn->conv, &sn->pend_k, &sn->pend_g, &sn->pooled}) v->resize(NL);
+    sn->cache.resize(NL);
+    size_t bytes = 0;
+    auto down = [&](auto& dst, const void* src, size_t n, size_t at = 0) {
+        if (dst.size() < at + n) dst.resize(at + n);
+        ok(cudaMemcpy(dst.data() + at, src, n * sizeof(dst[0]), cudaMemcpyDeviceToHost), "cudaMemcpy");
+        bytes += n * sizeof(dst[0]);
+    };
+    const int64_t ID = c.indexer_head_size, P = c.indexer_kpool;
+    for (int64_t il = 0; il < c.n_layer; ++il) {
+        const DevLayer& l = I.L[(size_t) il];
+        const size_t i = (size_t) il;
+        ok(cudaSetDevice(l.dev), "cudaSetDevice");
+        if (c.is_kda(il)) {
+            const int64_t H = c.n_head[i], D = c.kda_head_dim, n_conv = (c.ssm_d_conv - 1) * H * D;
+            down(sn->S[i], l.S, (size_t) (H * D * D));
+            for (int j = 0; j < 3; ++j) down(sn->conv[i], l.conv_st[j], (size_t) n_conv, (size_t) (j * n_conv));
+            continue;
+        }
+        if (c.indexer_full[i]) {                       // the pool being filled: rows t % P, overwritten later
+            down(sn->pend_k[i], l.pend_k, (size_t) (P * ID));
+            down(sn->pend_g[i], l.pend_g, (size_t) (P * ID));
+        }
+        if (full) {
+            down(sn->cache[i], l.cache, (size_t) (pos_ * c.kv_lora_rank));
+            if (c.indexer_full[i]) down(sn->pooled[i], l.pooled, (size_t) (pos_ / P * ID));
+        }
+    }
+    sn->bytes = bytes;
+    return sn;
+}
+
+void GpuEngine::restore(const Snapshot& snap) {
+    Impl& I = *impl_;
+    const Config& c = I.c;
+    const auto* sn = dynamic_cast<const GpuSnapshot*>(&snap);
+    if (!sn || sn->S.size() != (size_t) c.n_layer) throw std::runtime_error("GpuEngine::restore: not this engine's snapshot");
+    if (sn->pos > I.opt.max_ctx) throw std::runtime_error("GpuEngine::restore: the snapshot is longer than the context");
+    for (auto& d : I.ctx) {                            // nothing may still be reading the state
+        ok(cudaSetDevice(d.id), "cudaSetDevice");
+        ok(cudaDeviceSynchronize(), "sync");
+    }
+    auto up = [&](void* dst, const auto& src, size_t n, size_t at = 0) {
+        if (n == 0) return;
+        if (src.size() < at + n) throw std::runtime_error("GpuEngine::restore: a truncated snapshot");
+        ok(cudaMemcpy(dst, src.data() + at, n * sizeof(src[0]), cudaMemcpyHostToDevice), "cudaMemcpy");
+    };
+    const int64_t ID = c.indexer_head_size, P = c.indexer_kpool;
+    for (int64_t il = 0; il < c.n_layer; ++il) {
+        const DevLayer& l = I.L[(size_t) il];
+        const size_t i = (size_t) il;
+        ok(cudaSetDevice(l.dev), "cudaSetDevice");
+        if (c.is_kda(il)) {
+            const int64_t H = c.n_head[i], D = c.kda_head_dim, n_conv = (c.ssm_d_conv - 1) * H * D;
+            up(l.S, sn->S[i], (size_t) (H * D * D));
+            for (int j = 0; j < 3; ++j) up(l.conv_st[j], sn->conv[i], (size_t) n_conv, (size_t) (j * n_conv));
+            continue;
+        }
+        if (c.indexer_full[i]) {
+            up(l.pend_k, sn->pend_k[i], (size_t) (P * ID));
+            up(l.pend_g, sn->pend_g[i], (size_t) (P * ID));
+        }
+        if (sn->full) {
+            up(l.cache, sn->cache[i], (size_t) (sn->pos * c.kv_lora_rank));
+            if (c.indexer_full[i]) up(l.pooled, sn->pooled[i], (size_t) (sn->pos / P * ID));
+        }
+    }
+    // pageable host-to-device copies can return before the DMA ends, and the engine's streams do not wait for them
+    for (auto& d : I.ctx) {
+        ok(cudaSetDevice(d.id), "cudaSetDevice");
+        ok(cudaDeviceSynchronize(), "sync");
+    }
+    pos_ = sn->pos;
 }
 
 const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {

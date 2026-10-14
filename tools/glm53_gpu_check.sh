@@ -9,8 +9,9 @@
 # Needs gguf-py: PYTHONPATH=<llama.cpp>/gguf-py (or pip install gguf).
 #
 # For each model: strata-glm --check-cpu (GPU vs CPU reference, layer by layer), the prompt path (--prefill, in
-# chunks) against the CPU reference, then the GPU's logits against llama.cpp's. The GPU quantizes activations to q8_1 like llama.cpp's CUDA backend, so on quantized weights the
-# numbers differ from the CPU's by more than float rounding; the thresholds allow for that.
+# chunks) against the CPU reference, then the GPU's logits against llama.cpp's. The GPU quantizes activations to
+# q8_1 like llama.cpp's CUDA backend, so on quantized weights the numbers differ from the CPU's by more than float
+# rounding; the thresholds allow for that. Last, conversation parking (tools/glm53_park_check.py).
 set -uo pipefail
 
 LB="${1:?llama.cpp build dir}"
@@ -46,4 +47,13 @@ for m in glm5-next-moe v1 q4_0 q8_0; do
         --out "$W/ref_$m.bin" > /dev/null 2>&1
     echo "vs llama.cpp: $(python3 "$HERE/glm53_compare.py" "$W/ref_$m.bin" "$W/gpu_$m.bin" | tail -2 | tr '\n' ' ')"
 done
+# conversations parked in host memory and restored (over every GPU the layers are split across), against fresh
+# runs; one token at a time and without the expert cache, so that both are bit for bit the same computation
+echo "== conversation parking"
+if ! python3 "$HERE/glm53_park_check.py" "$SB/strata-glm" -m "$W/v1.gguf" --prefill-chunk 0 --no-expert-cache \
+        > "$W/park.txt" 2>&1; then
+    fail=1
+    grep -E "FAIL|error|exited|died" "$W/park.txt" | head -12
+fi
+tail -1 "$W/park.txt"
 exit $fail

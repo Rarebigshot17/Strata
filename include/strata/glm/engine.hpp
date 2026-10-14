@@ -9,6 +9,7 @@
 #include "strata/glm/cpu_ref.hpp"
 #include "strata/glm/expert_cache.hpp"
 #include "strata/glm/model.hpp"
+#include "strata/glm/snapshot.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -43,6 +44,9 @@ public:
     const std::vector<float>& prefill(const int32_t* ids, int64_t n,
                                       const std::function<bool(int64_t)>& progress = nullptr);
     int64_t pos() const { return pos_; }
+    /// Copies the state to host memory (snapshot.hpp); `restore` copies one back, pos() included.
+    std::shared_ptr<Snapshot> snapshot(bool full);
+    void restore(const Snapshot& snap);
     /// The layers each device holds, for the log: "0: layers 0-21 (8.1 GB)".
     const std::vector<std::string>& placement() const { return placement_; }
     /// The VRAM expert cache's hit rate so far, and a one-line description.

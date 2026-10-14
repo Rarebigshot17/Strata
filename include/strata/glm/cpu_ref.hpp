@@ -9,6 +9,7 @@
 #pragma once
 
 #include "strata/glm/model.hpp"
+#include "strata/glm/snapshot.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -51,6 +52,9 @@ public:
     /// Runs `token` at the next position and returns its logits (`n_vocab` floats).
     const std::vector<float>& eval(int32_t token, Trace* trace = nullptr);
     int64_t pos() const { return pos_; }
+    /// Saves the state (snapshot.hpp); `restore` puts one back, pos() included.
+    std::shared_ptr<Snapshot> snapshot(bool full) const;
+    void restore(const Snapshot& snap);
 
 private:
     struct LayerState;

@@ -66,12 +66,33 @@ Every piece is checked against llama.cpp, which has run GLM-5.3-Flash since its 
 |---|---|---|---|
 | M0 | Remove SYCL; GGUF inspector; llama.cpp reference harness | done | inspector output, reference logits |
 | M1 | CPU reference: config and tensors from the GGUF, mHC, KDA, MLA with the k-pool indexer, MoE with sigmoid routing and SwiGLU clamp | done | `tools/glm53_selftest.sh`: all variants PASS |
-| M2 | CUDA: dense projections, mHC, KDA decode, MLA decode with the indexer, routing; layer split over the GPUs | next | kernel parity vs the CPU reference; logits vs llama.cpp |
-| M3 | Experts: all in pinned RAM, VRAM cache of the most used, CPU pool for the rest | | logits unchanged; tokens/s |
-| M4 | Prompt processing: batched projections, chunked KDA, batched MLA | | prompt tokens/s; logits unchanged |
-| M5 | Server: the engine protocol, GLM chat template, tool calls (`<arg_key>`/`<arg_value>`), thinking, reasoning effort | | Open WebUI and an agent work end to end |
-| M6 | Several clients at once; MTP drafting | | speed for 1, 2 and 4 clients |
+| M2 | CUDA: dense projections, mHC, KDA decode, MLA decode with the indexer, routing; layer split over the GPUs | written, not yet run on a GPU | `tools/glm53_gpu_check.sh`; logits vs llama.cpp |
+| M3 | Experts: all in RAM (the mapped GGUF), VRAM cache of the most used, CPU for the rest | written, not yet run on a GPU | logits unchanged; tokens/s |
+| M4 | Prompt processing: batched projections, chunked KDA, batched MLA, experts streamed through VRAM | partly: in chunks up to about 2,063 tokens of context, one token at a time beyond (sparse chunks next) | prompt tokens/s; logits unchanged |
+| M5 | Server: the engine protocol, GLM chat template, tool calls (`<arg_key>`/`<arg_value>`), thinking, reasoning effort | written, checked on the CPU engine (`tools/glm53_server_check.sh`) | Open WebUI and an agent work end to end |
+| M6 | Several clients: conversation parking and checkpoints; batching; MTP drafting | parking written, checked on the CPU engine (`tools/glm53_park_check.py`); the rest not started | speed for 1, 2 and 4 clients |
 | M7 | Remove the Qwen engine and HIP; docs | | |
+
+### Several clients on one engine
+
+The agents, the chat and the bot take turns on one engine: requests queue in the server, one runs at a time. The
+KDA layers' state is a running sum that cannot be rewound, so the engine can only continue a state whose tokens
+are the start of the new prompt. To keep each client's conversation anyway, the engine (`src/glm/serve_loop.cpp`)
+keeps several:
+
+- **Parking.** When a prompt starts another conversation, the current one's whole state is copied to host RAM.
+  A later prompt that continues it copies it back and reads only the new tokens.
+- **Checkpoints.** The server asks for a checkpoint where the reply begins (`cp=` on the GEN line: the prompt
+  without the `<|assistant|><think>` generation prompt). The next turn renders the previous reply again without
+  its reasoning, so it parts from the engine's state there; it restarts from the checkpoint and reads the reply
+  and the new message, not the whole conversation. A regenerated reply restarts there too.
+- **Memory.** `--park-mib` (default 8192) caps what parked conversations and checkpoints use; the least recently
+  used conversation goes first. A parked conversation is the KDA layers' state (about 0.15 GB, if they have 64
+  heads of 128 like the attention) plus 11 KB per token, so a 100K-token conversation is about 1.3 GB; a
+  checkpoint is about 0.15 GB. Copies cross PCIe 3.0 at a few GB/s, a fraction of a second either way.
+
+Nothing about the answers changes: `tools/glm53_park_check.py` checks every resumed reply against a fresh
+engine's, token for token.
 
 Small random GLM-5.3-Flash models for tests that need no download: llama.cpp's
 `test-llama-archs -a glm5-next -o DIR` writes a 20 MB `glm5-next-moe.gguf` with 2 layers (one MLA, one KDA).
@@ -109,7 +130,8 @@ Each step prints a few lines to paste back. Steps 1-4 need no model download.
    PYTHONPATH=~/llama.cpp/gguf-py tools/glm53_selftest.sh ~/llama.cpp/build build
    ```
 
-4. **GPU engine vs the CPU reference and llama.cpp** on the same small models (paste the whole output):
+4. **GPU engine vs the CPU reference and llama.cpp** on the same small models, then conversation parking with the
+   layers split over all three cards (paste the whole output):
 
    ```bash
    PYTHONPATH=~/llama.cpp/gguf-py tools/glm53_gpu_check.sh ~/llama.cpp/build build
@@ -141,8 +163,9 @@ Each step prints a few lines to paste back. Steps 1-4 need no model download.
    python tools/glm53_compare.py ~/glm53-ref/ref.bin ~/glm53-ref/strata.bin
    ```
 
-   This first version computes every routed expert on the CPU and reads the prompt one token at a time, so it is
-   slow. The VRAM expert cache (M3) and batched prompt reading (M4) come next.
+   This compares one token at a time. The VRAM expert cache starts empty and fills from what the prompt uses, so
+   the first run is the slowest; `--expert-profile ~/glm53-ref/profile.bin` saves the use counts for the next
+   start.
 
 ## Removed on this branch
 

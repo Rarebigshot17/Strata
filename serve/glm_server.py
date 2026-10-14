@@ -361,7 +361,24 @@ class Service:
         except jinja2.exceptions.TemplateError as e:
             raise BadRequest(f"the chat template refused the request: {e}") from None
         ids = self.model.tokenizer.encode(text, parse_special=True)
-        return text, ids, tools
+        return text, ids, tools, self._checkpoint_at(norm, tools, kwargs, text, ids)
+
+    def _checkpoint_at(self, msgs, tools, kwargs, text, ids):
+        """Where the engine should checkpoint this prompt: before the generation prompt (`<|assistant|><think>`).
+        The next turn re-renders the reply (without its reasoning) after that point, so the engine's state after
+        the reply cannot be continued, but a checkpoint there can. Only the generation prompt is tokenized again:
+        it begins with a special token, so the tokens before it are the conversation's. A wrong guess costs
+        nothing but the checkpoint's use: the engine saves the state of whatever prefix it is given."""
+        try:
+            base = self.template.render(msgs, tools=tools, add_generation_prompt=False, **kwargs)
+        except jinja2.exceptions.TemplateError:
+            return None
+        if not base or not text.startswith(base) or len(base) == len(text):
+            return None
+        tail = self.model.tokenizer.encode(text[len(base):], parse_special=True)
+        if not tail or len(tail) >= len(ids) or ids[len(ids) - len(tail):] != tail:
+            return None
+        return len(ids) - len(tail)
 
     # ---- the generation, as events
     def run(self, ids, max_new, sampling, cancel, stop_strings):
@@ -548,9 +565,10 @@ def make_handler(svc: Service):
 
         # ---- chat
         def _chat(self, req):
-            text, ids, tools = svc.chat_prompt(req)
+            text, ids, tools, cp = svc.chat_prompt(req)
             max_new = svc.max_new(req, len(ids))
             sampling = _sampling(req)
+            sampling["cp"] = cp                      # an engine key, not sampling: where to checkpoint
             stops = req.get("stop") or []
             stops = [stops] if isinstance(stops, str) else [s for s in stops if isinstance(s, str) and s]
             parser = GlmParser(text.rstrip().endswith(THINK_OPEN), tools)
