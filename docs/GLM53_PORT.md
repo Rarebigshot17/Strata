@@ -43,31 +43,48 @@ The MLA cache stores a 512-wide latent per token in each of the 11 MLA layers: a
 under 0.5 KB per token even in fp32. The KDA layers hold a fixed-size state (64 heads x 128 x 128 per layer).
 These are calculated from the config, not measured.
 
-## Milestones
+## How the engine is built
 
-Each milestone ends with a test you run on napster-ai. The main check compares Strata's logits with llama.cpp's
-for the same token ids, using the same GGUF (`tools/glm53_compare.py`). llama.cpp has run GLM-5.3-Flash since
-the `glm5-next` support landed. For bisecting, Strata's `--dump-layers` is compared with `llama-debug`'s per-layer
-tensors.
+The Qwen engine's code is specialised to that model at every level (sizes compiled into the kernels, two layer
+types, captured CUDA graphs built around them). Rewriting it in place would mean changing every one of those
+pieces with no way to test them in between. So the GLM engine is new code under `src/glm/` and
+`include/strata/glm/`. It keeps Strata's design (every routed expert in RAM, the most used ones cached in VRAM,
+the rest computed on the CPU) and reuses Strata's generic parts: the GGUF reader, the quantized GEMV kernels
+(`native_mmvq`), the CPU expert dot products, the expert cache and the server's engine protocol. The Qwen engine
+is deleted once the GLM engine replaces it.
 
-| # | Milestone | Weeks | Test |
+Every piece is checked against llama.cpp, which has run GLM-5.3-Flash since its `glm5-next` support landed:
+
+1. **CPU reference** (`strata-glm-ref`, `src/glm/cpu_ref.cpp`): the whole model on the CPU, one token at a time,
+   with ggml-cpu's own dot products. It matches llama.cpp on small random GLM-5.3-Flash models to float rounding
+   (`tools/glm53_selftest.sh`, which runs without a GPU or a download). On the real model it is slow, about one
+   token per second, and only used as the reference.
+2. **GPU engine**: each CUDA kernel is checked against the CPU reference, then whole-model logits against
+   llama.cpp on the real GGUF (`tools/glm53_compare.py`).
+
+| # | Milestone | Status | Test |
 |---|---|---|---|
-| M0 | Groundwork: remove SYCL, GGUF inspector, llama.cpp reference harness | done on this branch | inspector output, reference logits |
-| M1 | Strip Qwen: n-gram table, vision, Qwen MTP, Qwen packing tools; architecture guard accepts `glm5-next` | 2 | engine builds; refuses a Qwen GGUF |
-| M2 | Model sizes read from the GGUF instead of `constexpr` (about 40 places, including the expert kernels and CPU buffers) | 3 | engine builds; unit tests at the GLM sizes |
-| M3 | Loader and packer for `glm5-next` tensor names; embeddings, output head, dense layers 0-2 | 1 | pack builds; tensor checks pass |
-| M4 | MoE: sigmoid router with bias and x2.5 scale, 288 x top-8, ungated shared expert, SwiGLU clamp, GPU and CPU expert kernels at 4096 / 2048 | 1-2 | routing dump matches llama.cpp |
-| M5 | mHC residual (4 streams, Sinkhorn) | 1 | layer dumps match |
-| M6 | KDA decode and token-by-token prefill | 2 | KDA layer dumps match |
-| M7 | MLA attention, latent KV cache (paged, 8-bit), k-pool indexer | 5-6 | **first full logits match** |
-| M8 | Chunked KDA prefill, fast MLA prefill | 3 | prompt speed; logits still match |
-| M9 | Server: GLM chat template, tool calls (`<arg_key>`/`<arg_value>`), thinking tags, reasoning effort, tokenizer | 1 | Open WebUI and an agent work end to end |
-| M10 | MTP drafter | 2 | speedup measured, output unchanged |
-| M11 | Remove HIP; split layers over 3 GPUs; 3-bit and 4-bit packs; batching for several clients; tuning | 2-3 | speed table for 1, 2 and 4 clients |
+| M0 | Remove SYCL; GGUF inspector; llama.cpp reference harness | done | inspector output, reference logits |
+| M1 | CPU reference: config and tensors from the GGUF, mHC, KDA, MLA with the k-pool indexer, MoE with sigmoid routing and SwiGLU clamp | done | `tools/glm53_selftest.sh`: all variants PASS |
+| M2 | CUDA: dense projections, mHC, KDA decode, MLA decode with the indexer, routing; layer split over the GPUs | next | kernel parity vs the CPU reference; logits vs llama.cpp |
+| M3 | Experts: all in pinned RAM, VRAM cache of the most used, CPU pool for the rest | | logits unchanged; tokens/s |
+| M4 | Prompt processing: batched projections, chunked KDA, batched MLA | | prompt tokens/s; logits unchanged |
+| M5 | Server: the engine protocol, GLM chat template, tool calls (`<arg_key>`/`<arg_value>`), thinking, reasoning effort | | Open WebUI and an agent work end to end |
+| M6 | Several clients at once; MTP drafting | | speed for 1, 2 and 4 clients |
+| M7 | Remove the Qwen engine and HIP; docs | | |
 
 Small random GLM-5.3-Flash models for tests that need no download: llama.cpp's
-`test-llama-archs -a glm5-next -o DIR` writes a 20 MB `glm5-next-moe.gguf` with 2 layers (one MLA, one KDA), and
-`llama-strata-ref` runs it on the CPU in a second. The loader, packer and CPU-side tests use it.
+`test-llama-archs -a glm5-next -o DIR` writes a 20 MB `glm5-next-moe.gguf` with 2 layers (one MLA, one KDA).
+`tools/glm53_tiny_variant.py` switches on the paths it leaves off (SwiGLU clamps, expert weight scaling, an
+indexer top-k small enough to drop pools).
+
+Two things found while writing the reference, both checked against llama.cpp's code:
+
+- The KDA decay applies per **key** channel: `S[i][:] *= exp(g[i])`. That is what ggml's fused
+  `gated_delta_net` op does, and llama.cpp uses that op by default. Its unfused one-token graph
+  (`build_delta_net_autoregressive`) broadcasts the decay over the other axis.
+- Below 2,048 tokens of context the indexer selects every pool, so attention is plain causal there. The
+  indexer only changes results on longer contexts, which is why the test variants shrink its top-k.
 
 ## M0: what to run on napster-ai
 

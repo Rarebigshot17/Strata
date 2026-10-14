@@ -1,0 +1,112 @@
+// src/glm/ref_main.cpp - strata-glm-ref: GLM-5.3-Flash logits from the CPU reference (cpu_ref.hpp).
+//
+//   strata-glm-ref -m MODEL.gguf --tokens-file IDS.txt --out LOGITS.bin [--threads N] [--dump-layers PATH]
+//
+// LOGITS.bin uses the layout of `strata generate --dump-logits` and `llama-strata-ref --out`, one row per
+// position, so tools/glm53_compare.py compares it with llama.cpp's directly. --dump-layers writes, per position,
+// the residual streams after every layer: n_layer x hc x n_embd float32.
+#include "strata/glm/cpu_ref.hpp"
+
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace {
+
+bool read_ids(const std::string& path, std::vector<int32_t>& out) {
+    std::ifstream in(path);
+    if (!in) return false;
+    std::stringstream ss;
+    ss << in.rdbuf();
+    std::string text = ss.str();
+    for (char& c : text)
+        if (c == ',') c = ' ';
+    std::istringstream is(text);
+    long long v;
+    while (is >> v) out.push_back((int32_t) v);
+    return is.eof() && !out.empty();
+}
+
+int usage() {
+    std::fprintf(stderr,
+                 "usage: strata-glm-ref -m MODEL.gguf --tokens-file IDS.txt --out LOGITS.bin\n"
+                 "                      [--threads N] [--dump-layers PATH] [--max-tokens N]\n");
+    return 2;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    std::string model_path, ids_path, out_path, layers_path;
+    int threads = (int) std::thread::hardware_concurrency();
+    long long max_tokens = 0;
+    for (int i = 1; i < argc; ++i) {
+        const std::string a = argv[i];
+        auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : nullptr; };
+        const char* v = nullptr;
+        if (a == "-m" && (v = next())) model_path = v;
+        else if (a == "--tokens-file" && (v = next())) ids_path = v;
+        else if (a == "--out" && (v = next())) out_path = v;
+        else if (a == "--dump-layers" && (v = next())) layers_path = v;
+        else if ((a == "--threads" || a == "-t") && (v = next())) threads = std::atoi(v);
+        else if (a == "--max-tokens" && (v = next())) max_tokens = std::atoll(v);
+        else return usage();
+    }
+    if (model_path.empty() || ids_path.empty() || out_path.empty()) return usage();
+
+    try {
+        std::vector<int32_t> ids;
+        if (!read_ids(ids_path, ids)) {
+            std::fprintf(stderr, "cannot read token ids from %s\n", ids_path.c_str());
+            return 1;
+        }
+        if (max_tokens > 0 && (long long) ids.size() > max_tokens) ids.resize((size_t) max_tokens);
+
+        const auto t0 = std::chrono::steady_clock::now();
+        strata::glm::Model model(model_path);
+        const strata::glm::Config& c = model.config();
+        std::printf("model: %s, %lld layers (%lld KDA), n_embd %lld, vocab %lld, %lld experts top-%lld\n",
+                    c.arch.c_str(), (long long) c.n_layer,
+                    (long long) [&] { long long n = 0; for (int64_t l = 0; l < c.n_layer; ++l) n += c.is_kda(l); return n; }(),
+                    (long long) c.n_embd, (long long) c.n_vocab, (long long) c.n_expert, (long long) c.n_expert_used);
+        strata::glm::CpuRef ref(model, (int64_t) ids.size(), threads);
+        const auto t1 = std::chrono::steady_clock::now();
+
+        FILE* out = std::fopen(out_path.c_str(), "wb");
+        FILE* lay = layers_path.empty() ? nullptr : std::fopen(layers_path.c_str(), "wb");
+        if (!out || (!layers_path.empty() && !lay)) {
+            std::fprintf(stderr, "cannot write the output files\n");
+            return 1;
+        }
+        const int32_t hdr[2] = {(int32_t) c.n_vocab, (int32_t) ids.size()};
+        std::fwrite(hdr, sizeof hdr, 1, out);
+        strata::glm::Trace trace;
+        for (size_t i = 0; i < ids.size(); ++i) {
+            const std::vector<float>& logits = ref.eval(ids[i], lay ? &trace : nullptr);
+            std::fwrite(logits.data(), sizeof(float), logits.size(), out);
+            if (lay)
+                for (const auto& r : trace.layer_out) std::fwrite(r.data(), sizeof(float), r.size(), lay);
+            if ((i + 1) % 16 == 0 || i + 1 == ids.size()) {
+                std::printf("position %zu/%zu\n", i + 1, ids.size());
+                std::fflush(stdout);
+            }
+        }
+        std::fclose(out);
+        if (lay) std::fclose(lay);
+        const auto t2 = std::chrono::steady_clock::now();
+        const double load_s = std::chrono::duration<double>(t1 - t0).count();
+        const double run_s = std::chrono::duration<double>(t2 - t1).count();
+        std::printf("wrote %zu rows of %lld logits to %s (load %.1f s, %.2f tokens/s on %d threads)\n", ids.size(),
+                    (long long) c.n_vocab, out_path.c_str(), load_s, (double) ids.size() / run_s, threads);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "strata-glm-ref: %s\n", e.what());
+        return 1;
+    }
+    return 0;
+}

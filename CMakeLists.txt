@@ -1647,3 +1647,17 @@ if(STRATA_HIP_GFX906)
   add_executable(gfx906_qsa_query_swizzle_probe bench/gfx906_qsa_query_swizzle_probe.cpp)
   target_link_libraries(gfx906_qsa_query_swizzle_probe PRIVATE strata_kernels ${_strata_gpu_runtime_target})
 endif()
+
+# ---- GLM-5.3-Flash (docs/GLM53_PORT.md) ----
+#
+# strata_glm: the model's configuration and tensors read from the GGUF, and the CPU reference forward pass that
+# every GPU kernel is checked against.  strata-glm-ref writes its logits in the --dump-logits layout for
+# tools/glm53_compare.py.  Needs ggml-cpu (STRATA_NATIVE_EXPERTS, on by default); no CUDA.
+if(STRATA_NATIVE_EXPERTS)
+  add_library(strata_glm STATIC src/glm/model.cpp src/glm/cpu_ref.cpp)
+  target_include_directories(strata_glm PUBLIC include)
+  target_link_libraries(strata_glm PUBLIC ggml-cpu ggml-base Threads::Threads)
+  target_compile_features(strata_glm PUBLIC cxx_std_17)
+  add_executable(strata-glm-ref src/glm/ref_main.cpp)
+  target_link_libraries(strata-glm-ref PRIVATE strata_glm)
+endif()
