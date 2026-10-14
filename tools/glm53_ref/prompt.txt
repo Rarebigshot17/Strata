@@ -1,0 +1,10 @@
+The Strata engine keeps every routed expert of a mixture-of-experts model in system RAM and caches the experts it uses most often in VRAM. When a token arrives, the router picks eight of the 288 experts in each layer, and the engine computes the cached ones on the GPU and the rest on the CPU.
+
+def kda_step(state, q, k, v, beta, log_decay):
+    # One token of Kimi Delta Attention for one head.
+    state = state * log_decay.exp()[:, None]
+    state = state + beta * (k[:, None] * (v - k @ state)[None, :])
+    return state, q @ state
+
+Question: A server room has three GPUs with 24 GB, 12 GB and 10 GB of memory. How much memory do they have together, and which card should hold the first layers?
+Answer: Together they have 46 GB. The largest card, with 24 GB, should hold the first layers, because
