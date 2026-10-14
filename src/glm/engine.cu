@@ -6,6 +6,7 @@
 #include "strata/glm/engine.hpp"
 
 #include "strata/glm/cpu_experts.hpp"
+#include "strata/glm/expert_cache.hpp"
 #include "strata/glm/gpu_kernels.hpp"
 #include "strata/glm/gpu_linear.hpp"
 
@@ -92,7 +93,7 @@ struct DevCtx {
           *scores = nullptr, *iq = nullptr, *ik = nullptr, *wts = nullptr, *pscore = nullptr;
     int32_t* sel = nullptr;
     float *fg = nullptr, *fu = nullptr, *fact = nullptr, *logits_e = nullptr, *wexp = nullptr, *ysh = nullptr,
-          *yr = nullptr, *out_logits = nullptr;
+          *yr = nullptr, *yexp = nullptr, *ygpu = nullptr, *out_logits = nullptr;
     int32_t* ids = nullptr;
     void* q8 = nullptr;
     size_t bytes = 0;
@@ -110,6 +111,9 @@ struct GpuEngine::Impl {
     int out_ctx = 0;
     std::unique_ptr<ThreadPool> pool;
     std::unique_ptr<CpuExperts> experts;
+    std::unique_ptr<ExpertCache> cache;
+    std::vector<int32_t> miss_ids;
+    std::vector<float> miss_w;
     // host side
     float *h_x = nullptr, *h_w = nullptr, *h_yr = nullptr, *h_pscore = nullptr;
     int32_t* h_ids = nullptr;
@@ -229,6 +233,8 @@ GpuEngine::GpuEngine(const Model& model, const EngineOptions& opt) : impl_(new I
         d.ids = dalloc<int32_t>((size_t) c.n_expert_used, b);
         d.ysh = dalloc<float>((size_t) E, b);
         d.yr = dalloc<float>((size_t) E, b);
+        d.yexp = dalloc<float>((size_t) E, b);
+        d.ygpu = dalloc<float>((size_t) E, b);
         d.q8 = dalloc<uint8_t>(gpu::q8_scratch_bytes(max_in), b);
         if ((int) di == I.out_ctx) d.out_logits = dalloc<float>((size_t) c.n_vocab, b);
     }
@@ -314,6 +320,17 @@ GpuEngine::GpuEngine(const Model& model, const EngineOptions& opt) : impl_(new I
         I.output_norm = gpu::upload_f32(model.output_norm(), &d.bytes);
     }
 
+    // ---- the VRAM expert cache: what is left on each device, minus the reserve
+    I.cache = std::make_unique<ExpertCache>(model, opt.cache);
+    std::vector<size_t> cache_bytes(I.ctx.size(), 0);
+    for (size_t di = 0; di < I.ctx.size(); ++di) {
+        std::vector<int64_t> layers;
+        for (int64_t il = 0; il < c.n_layer; ++il)
+            if (I.ctx_of_layer[(size_t) il] == (int) di) layers.push_back(il);
+        cache_bytes[di] = I.cache->allocate(I.ctx[di].id, layers);
+    }
+    I.cache->warm_start();
+
     // ---- host side: the CPU experts and the pinned exchange buffers
     const int threads = opt.cpu_threads > 0 ? opt.cpu_threads : (int) std::max(1u, std::thread::hardware_concurrency());
     I.pool = std::make_unique<ThreadPool>(threads);
@@ -335,14 +352,25 @@ GpuEngine::GpuEngine(const Model& model, const EngineOptions& opt) : impl_(new I
                 last = il;
                 bytes += I.L[(size_t) il].bytes;
             }
-        char line[160];
+        char line[200];
         if (first < 0) std::snprintf(line, sizeof line, "GPU %d: no layers (%.2f GB)", I.ctx[di].id, bytes / 1e9);
-        else std::snprintf(line, sizeof line, "GPU %d: layers %lld-%lld%s, %.2f GB", I.ctx[di].id, (long long) first,
-                           (long long) last, (int) di == I.out_ctx ? " + output head" : "", bytes / 1e9);
+        else std::snprintf(line, sizeof line, "GPU %d: layers %lld-%lld%s, %.2f GB weights and buffers, %.2f GB expert cache",
+                           I.ctx[di].id, (long long) first, (long long) last, (int) di == I.out_ctx ? " + output head" : "",
+                           bytes / 1e9, cache_bytes[di] / 1e9);
         placement_.push_back(line);
     }
+    placement_.push_back(I.cache->summary());
     reset();
 }
+
+double GpuEngine::cache_hit_rate() const {
+    const auto& c = *impl_->cache;
+    return c.lookups() ? (double) c.hits() / (double) c.lookups() : 0.0;
+}
+
+std::string GpuEngine::cache_summary() const { return impl_->cache->summary(); }
+
+void GpuEngine::save_profile() const { impl_->cache->save_profile(); }
 
 GpuEngine::~GpuEngine() {
     // device memory is released with the process; streams and pinned buffers here
@@ -516,6 +544,26 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
             ok(cudaMemcpyAsync(I.h_ids, d.ids, (size_t) KU * sizeof(int32_t), cudaMemcpyDeviceToHost, d.stream), "ids");
             ok(cudaMemcpyAsync(I.h_w, d.wexp, (size_t) KU * sizeof(float), cudaMemcpyDeviceToHost, d.stream), "w");
             ok(cudaStreamSynchronize(d.stream), "sync");
+            I.cache->record(il, I.h_ids, KU);
+            // the cached experts on the GPU, in routing order; the rest go to the CPU
+            const int64_t F = c.n_ff_exp[(size_t) il];
+            ok(cudaMemsetAsync(d.ygpu, 0, (size_t) E * sizeof(float), d.stream), "memset");
+            I.miss_ids.clear();
+            I.miss_w.clear();
+            for (int j = 0; j < KU; ++j) {
+                const int slot = I.cache->slot(il, I.h_ids[j]);
+                if (slot < 0) {
+                    I.miss_ids.push_back(I.h_ids[j]);
+                    I.miss_w.push_back(I.h_w[j]);
+                    continue;
+                }
+                DevMatrix G, U, Dn;
+                I.cache->matrices(il, slot, G, U, Dn);
+                gpu::gemv2(G, U, d.xn, d.fg, d.fu, d.q8, s);
+                gpu::swiglu(d.fg, d.fu, d.fact, (int) F, c.clamp_exp[(size_t) il], s);
+                gpu::gemv(Dn, d.fact, d.yexp, d.q8, s);
+                gpu::axpy(d.ygpu, d.yexp, I.h_w[j], (int) E, s);
+            }
             // the shared expert on the GPU while the CPU computes the routed ones
             if (c.n_expert_shared > 0) {
                 const int64_t FS = c.n_ff_exp[(size_t) il] * c.n_expert_shared;
@@ -523,8 +571,14 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
                 gpu::swiglu(d.fg, d.fu, d.fact, (int) FS, c.clamp_shexp[(size_t) il], s);
                 gpu::gemv(l.down_shexp, d.fact, d.ysh, d.q8, s);
             }
-            I.experts->run(il, I.h_x, I.h_ids, I.h_w, KU, I.h_yr);
-            ok(cudaMemcpyAsync(d.y, I.h_yr, (size_t) E * sizeof(float), cudaMemcpyHostToDevice, d.stream), "experts");
+            if (!I.miss_ids.empty()) {
+                I.experts->run(il, I.h_x, I.miss_ids.data(), I.miss_w.data(), (int) I.miss_ids.size(), I.h_yr);
+                ok(cudaMemcpyAsync(d.y, I.h_yr, (size_t) E * sizeof(float), cudaMemcpyHostToDevice, d.stream),
+                   "experts");
+            } else {
+                ok(cudaMemsetAsync(d.y, 0, (size_t) E * sizeof(float), d.stream), "memset");
+            }
+            gpu::add(d.y, d.ygpu, (int) E, s);
             if (c.n_expert_shared > 0) gpu::add(d.y, d.ysh, (int) E, s);
         }
         gpu::hc_post(d.y, d.R, d.pc, d.R2, (int) hc, (int) E, s);
@@ -548,6 +602,7 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
     ok(cudaMemcpyAsync(I.logits.data(), d.out_logits, (size_t) c.n_vocab * sizeof(float), cudaMemcpyDeviceToHost,
                        d.stream), "logits");
     ok(cudaStreamSynchronize(d.stream), "sync");
+    I.cache->maintain();
     ++pos_;
     return I.logits;
 }

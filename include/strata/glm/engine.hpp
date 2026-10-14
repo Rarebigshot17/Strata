@@ -7,6 +7,7 @@
 #pragma once
 
 #include "strata/glm/cpu_ref.hpp"
+#include "strata/glm/expert_cache.hpp"
 #include "strata/glm/model.hpp"
 
 #include <cstdint>
@@ -22,6 +23,7 @@ struct EngineOptions {
     std::vector<double> split;       ///< share of the layers per device; empty = by free memory
     int cpu_threads = 0;             ///< 0 = all hardware threads
     bool verbose = true;
+    ExpertCacheOptions cache;
 };
 
 class GpuEngine {
@@ -37,6 +39,11 @@ public:
     int64_t pos() const { return pos_; }
     /// The layers each device holds, for the log: "0: layers 0-21 (8.1 GB)".
     const std::vector<std::string>& placement() const { return placement_; }
+    /// The VRAM expert cache's hit rate so far, and a one-line description.
+    double cache_hit_rate() const;
+    std::string cache_summary() const;
+    /// Writes the expert use profile (when --expert-profile names a file).
+    void save_profile() const;
 
 private:
     struct Impl;

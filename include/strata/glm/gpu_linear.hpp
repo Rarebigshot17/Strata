@@ -24,6 +24,9 @@ struct DevMatrix {
     DevMatrix rows(int64_t r0, int64_t n) const;
 };
 
+/// The kernel path for weights of `type` kept as they are (None when the type has no GPU kernel).
+DevMatrix::Path path_for(int type);
+
 /// Copies `t` (a matrix, or a 3-D tensor seen as ne1 * ne2 rows) to the current device. `bytes_out` adds the
 /// device bytes used. `allow_convert` false turns a type without a GPU kernel into an error.
 DevMatrix upload(const Tensor& t, size_t* bytes_out = nullptr, bool allow_convert = true);

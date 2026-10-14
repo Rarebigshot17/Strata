@@ -1664,7 +1664,7 @@ endif()
 # strata-glm: the GPU engine (src/glm/engine.cu) on Strata's MMVQ kernels; --check-cpu compares it with the
 # CPU reference layer by layer.
 if(STRATA_NATIVE_EXPERTS AND STRATA_ENABLE_CUDA AND NOT STRATA_ENABLE_HIP)
-  add_library(strata_glm_gpu STATIC src/glm/gpu_kernels.cu src/glm/gpu_linear.cu src/glm/engine.cu)
+  add_library(strata_glm_gpu STATIC src/glm/gpu_kernels.cu src/glm/gpu_linear.cu src/glm/expert_cache.cu src/glm/engine.cu)
   target_link_libraries(strata_glm_gpu PUBLIC strata_glm strata_kernels CUDA::cudart)
   target_compile_options(strata_glm_gpu PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>)
   add_executable(strata-glm src/glm/glm_main.cpp)

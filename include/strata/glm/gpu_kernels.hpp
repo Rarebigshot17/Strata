@@ -18,6 +18,8 @@ void rms_norm_rows(const float* x, float* y, int rows, int n, float eps, const f
 void layer_norm(const float* x, float* y, int n, float eps, const float* w, const float* b, void* stream);
 void add(float* y, const float* x, int n, void* stream);
 void scale(float* x, int n, float s, void* stream);
+/// y += a * x
+void axpy(float* y, const float* x, float a, int n, void* stream);
 /// y[i] = silu(min(g, L)) * clamp(u, -L, L), or silu(g) * u when L <= 1e-6 (ggml_swiglu_clamp / swiglu).
 void swiglu(const float* g, const float* u, float* y, int n, float limit, void* stream);
 

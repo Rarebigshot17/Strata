@@ -57,6 +57,15 @@ DevMatrix DevMatrix::rows(int64_t r0, int64_t n) const {
     return m;
 }
 
+DevMatrix::Path path_for(int type) {
+    if (type == GGML_TYPE_F32) return DevMatrix::F32;
+    if (type == GGML_TYPE_F16) return DevMatrix::F16;
+    if (type == GGML_TYPE_BF16) return DevMatrix::BF16;
+    if (strata::kernels::native_mmvq_supported(type)) return DevMatrix::Mmvq;
+    if (strata::kernels::iq_supported(type)) return DevMatrix::IqMmvq;
+    return DevMatrix::None;
+}
+
 DevMatrix upload(const Tensor& t, size_t* bytes_out, bool allow_convert) {
     DevMatrix m;
     m.n_in = t.ne[0];
@@ -64,17 +73,8 @@ DevMatrix upload(const Tensor& t, size_t* bytes_out, bool allow_convert) {
     m.type = (int) t.type;
     const void* src = t.data;
     std::vector<uint16_t> converted;
-    if (t.type == GGML_TYPE_F32) {
-        m.path = DevMatrix::F32;
-    } else if (t.type == GGML_TYPE_F16) {
-        m.path = DevMatrix::F16;
-    } else if (t.type == GGML_TYPE_BF16) {
-        m.path = DevMatrix::BF16;
-    } else if (strata::kernels::native_mmvq_supported((int) t.type)) {
-        m.path = DevMatrix::Mmvq;
-    } else if (strata::kernels::iq_supported((int) t.type)) {
-        m.path = DevMatrix::IqMmvq;
-    } else {
+    m.path = path_for((int) t.type);
+    if (m.path == DevMatrix::None) {
         if (!allow_convert) throw std::runtime_error("no GPU kernel for the type of " + t.name);
         const auto* tr = ggml_get_type_traits((ggml_type) t.type);
         if (!tr || !tr->to_float) throw std::runtime_error("cannot convert the type of " + t.name);

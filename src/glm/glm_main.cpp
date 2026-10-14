@@ -2,6 +2,7 @@
 //
 //   strata-glm -m MODEL.gguf --tokens-file IDS.txt [--out LOGITS.bin] [--ctx N] [--devices 0,1,2]
 //              [--split 24,12,10] [--threads N] [--check-cpu] [--max-tokens N]
+//              [--vram-reserve GB] [--expert-profile PATH] [--max-swaps N] [--no-expert-cache]
 //
 // --out writes the --dump-logits layout (tools/glm53_compare.py). --check-cpu also runs the CPU reference on the
 // same tokens and compares, per position, the residual streams after every layer and the logits: the first layer
@@ -59,7 +60,8 @@ int usage() {
     std::fprintf(stderr,
                  "usage: strata-glm -m MODEL.gguf --tokens-file IDS.txt [--out LOGITS.bin] [--ctx N]\n"
                  "                  [--devices 0,1,2] [--split 24,12,10] [--threads N] [--check-cpu]\n"
-                 "                  [--max-tokens N]\n");
+                 "                  [--max-tokens N] [--vram-reserve GB] [--expert-profile PATH]\n"
+                 "                  [--max-swaps N] [--no-expert-cache]\n");
     return 2;
 }
 
@@ -83,6 +85,10 @@ int main(int argc, char** argv) {
         else if ((a == "--threads" || a == "-t") && (v = next())) opt.cpu_threads = std::atoi(v);
         else if (a == "--max-tokens" && (v = next())) max_tokens = std::atoll(v);
         else if (a == "--check-cpu") check_cpu = true;
+        else if (a == "--vram-reserve" && (v = next())) opt.cache.vram_reserve_gb = std::atof(v);
+        else if (a == "--expert-profile" && (v = next())) opt.cache.profile = v;
+        else if (a == "--max-swaps" && (v = next())) opt.cache.max_swaps_per_token = std::atoi(v);
+        else if (a == "--no-expert-cache") opt.cache.disabled = true;
         else return usage();
     }
     if (model_path.empty() || ids_path.empty()) return usage();
@@ -152,7 +158,9 @@ int main(int argc, char** argv) {
             std::fflush(stdout);
         }
         if (out) std::fclose(out);
-        std::printf("%zu tokens, %.2f tokens/s (one at a time)\n", ids.size(), (double) ids.size() / gpu_s);
+        std::printf("%zu tokens, %.2f tokens/s (one at a time), expert cache hit rate %.1f%%\n", ids.size(),
+                    (double) ids.size() / gpu_s, 100.0 * eng.cache_hit_rate());
+        eng.save_profile();
         if (check_cpu) {
             const bool pass = worst_logit < 2e-2 && top1_agree >= (int) (0.98 * (double) ids.size());
             std::printf("check-cpu: worst logits relative diff %.3g, worst layer diff %.3g, top-1 agreement %d/%zu: %s\n",

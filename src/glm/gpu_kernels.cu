@@ -109,6 +109,11 @@ __global__ void k_scale(float* x, int n, float s) {
     if (i < n) x[i] *= s;
 }
 
+__global__ void k_axpy(float* y, const float* x, float a, int n) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) y[i] += a * x[i];
+}
+
 __global__ void k_swiglu(const float* g, const float* u, float* y, int n, float limit) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -438,6 +443,11 @@ void add(float* y, const float* x, int n, void* stream) {
 void scale(float* x, int n, float s, void* stream) {
     k_scale<<<blocks(n, 256), 256, 0, S(stream)>>>(x, n, s);
     check("scale");
+}
+
+void axpy(float* y, const float* x, float a, int n, void* stream) {
+    k_axpy<<<blocks(n, 256), 256, 0, S(stream)>>>(y, x, a, n);
+    check("axpy");
 }
 
 void swiglu(const float* g, const float* u, float* y, int n, float limit, void* stream) {
