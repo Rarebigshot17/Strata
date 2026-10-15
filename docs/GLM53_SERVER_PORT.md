@@ -50,14 +50,16 @@ strata-glm-ref takes `-m --ctx --eos-ids --threads --park-mib --checkpoint-min`.
 
 ### A. Engine (C++)
 
-- [ ] A1 Sampler: no full-vocabulary sort (top-p by growing partial sorts, min-p by threshold, plain sampling
+Done: A1-A3 in f8efa24, A4 in 29056d3 (ctest, the selftest, the park and server checks pass).
+
+- [x] A1 Sampler: no full-vocabulary sort (top-p by growing partial sorts, min-p by threshold, plain sampling
   in O(n)); `logit_bias` (added before penalties, -100 or less bans); seed comment.
-- [ ] A2 Serve loop: INFO keys above (integer `park_mib`, `logit_bias=1`, version, expert cache figures);
+- [x] A2 Serve loop: INFO keys above (integer `park_mib`, `logit_bias=1`, version, expert cache figures);
   `ERR internal:` for engine failures; `HB` heartbeats gated on progress; DONE hits/lookups from decode only.
-- [ ] A3 Expert warm-up before READY (reads the routed experts into the page cache, with progress on stderr;
+- [x] A3 Expert warm-up before READY (reads the routed experts into the page cache, with progress on stderr;
   `--no-warm` skips it): the first request after a start no longer faults 120-170 GB in from disk while the
   server's silence watchdog runs.
-- [ ] A4 CMake: GLM-only (ggml, `strata_glm`, a 3-file `strata_glm_kernels`, `strata_glm_gpu`, the two
+- [x] A4 CMake: GLM-only (ggml, `strata_glm`, a 3-file `strata_glm_kernels`, `strata_glm_gpu`, the two
   executables). Delete the Qwen engine tree, HIP, `tests/`, the C++ benches, `ref/`, Qwen `data/`.
 
 ### B. Server (Python)
