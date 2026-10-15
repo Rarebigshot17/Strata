@@ -26,11 +26,11 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from gguf_reader import GGUFFile  # noqa: E402
 
-# Expert quant types Strata's CUDA expert kernels accept today (src/kernels/cuda/iq_kernels.cu:1917-1923,
-# native_mmvq.cu:2464-2469). Q6_K only behind STRATA_Q6K_EXPERTS.
-STRATA_EXPERT_TYPES = {"Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "Q3_K", "Q4_K", "Q5_K", "IQ2_XXS", "IQ2_XS",
+# Expert quant types the GLM engine's GPU path takes: a GEMV kernel (gpu_linear.cu path_for: native_mmvq or the
+# iq kernels) and an f16 dequantizer for prompt chunks (gpu_gemm.cu weight_f16). The CPU takes any ggml type.
+STRATA_EXPERT_TYPES = {"F32", "F16", "BF16", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "Q3_K", "Q4_K", "Q5_K", "Q6_K",
+                       "IQ2_XXS", "IQ2_XS",
                        "IQ3_XXS", "IQ4_NL", "IQ3_S", "IQ2_S", "IQ4_XS", "IQ1_M", "Q2_0"}
-STRATA_EXPERT_TYPES_FLAGGED = {"Q6_K"}
 
 # What the port assumes (transformers Glm5NextTextConfig defaults, llama.cpp conversion/glm.py). The suffix after
 # the architecture prefix is matched, so this works for both "glm5-next" and "glm5next".
@@ -191,8 +191,6 @@ def main() -> int:
     for ty, b in sorted(exp_bytes.items(), key=lambda kv: -kv[1]):
         if ty in STRATA_EXPERT_TYPES:
             note = "Strata kernels: yes"
-        elif ty in STRATA_EXPERT_TYPES_FLAGGED:
-            note = "Strata kernels: only with STRATA_Q6K_EXPERTS"
         else:
             note = "Strata kernels: NO, needs a new kernel or a requantize"
             unsupported.append(ty)

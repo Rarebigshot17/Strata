@@ -137,14 +137,23 @@ Each step prints a few lines to paste back. Steps 1-4 need no model download.
    PYTHONPATH=~/llama.cpp/gguf-py tools/glm53_gpu_check.sh ~/llama.cpp/build build
    ```
 
-5. **The real model.** Download the 3-bit GGUF (about 120 GB; Unsloth re-uploaded it on 2026-10-05 with
-   `glm5-next` metadata) and check it against what the engine assumes (paste the whole output):
+5. **The real model.** Pick the 3-bit or the 4-bit GGUF (see "Memory on napster-ai"; Unsloth re-uploaded them on
+   2026-10-05 with `glm5-next` metadata). List what the repository has, then download one quant's shards and
+   check them against what the engine assumes (paste the whole output):
 
    ```bash
    pip install -U huggingface_hub
+   python -c "from huggingface_hub import list_repo_files as l; print('\n'.join(f for f in l('unsloth/GLM-5.3-Flash-GGUF') if f.endswith('.gguf')))"
+   # 3-bit, about 120 GB:
    hf download unsloth/GLM-5.3-Flash-GGUF --include "*UD-IQ3_XXS*" --local-dir ~/models/glm53
+   # or 4-bit, about 170 GB: the IQ4_XS shards (or the UD-Q4_K_XL ones, whichever the list shows)
+   hf download unsloth/GLM-5.3-Flash-GGUF --include "*IQ4_XS*" --local-dir ~/models/glm53-q4
    python tools/glm53_inspect.py ~/models/glm53/<first .gguf shard>
    ```
+
+   The GPU kernels take every type these files use for experts (IQ3_XXS, IQ3_S, IQ4_XS, Q3_K-Q6_K, Q8_0); the
+   inspector lists any tensor whose type has none. With the 4-bit file about 20 GB of RAM is left beside the
+   experts, so give parked conversations less of it (`--park-mib 4096`).
 
 6. **Reference logits from llama.cpp** on the real model. `--n-cpu-moe` keeps that many layers' experts on the
    CPU; lower it until VRAM runs out, then raise it by a few:
