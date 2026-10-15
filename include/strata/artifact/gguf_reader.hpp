@@ -1,24 +1,7 @@
-// include/strata/artifact/gguf_reader.hpp - generated from src/artifact/gguf_reader.cpp by
-// scripts/split_artifact.py.  Header-only on purpose: the reader is one translation unit's worth of
-// code with no state to hide, and a header-only split cannot introduce a duplicate-symbol or
-// missing-declaration bug in code that is already validated.
+// include/strata/artifact/gguf_reader.hpp - a GGUF v3 reader: the file mapped, the header, every metadata
+// value (arrays included) and the tensor directory, across the shards of a split model. No ggml dependency.
+// The GLM engine opens its model through GgufModel::open (src/glm/model.cpp).
 #pragma once
-// src/artifact/gguf_reader.cpp - P1.S2: GGUF v3 reader, mmap, no ggml dependency.
-//
-// The C++ counterpart of tools/gguf_reader.py, which has been the reference since P0.S6 (written
-// because gguf-py cannot represent type 42 / Q2_0). Per P1.S2 it must:
-//   * mmap the file and parse header, metadata KV (ALL value types incl. arrays), tensor directory
-//   * be multi-shard aware (split.* keys)
-//   * carry an architecture guard: general.architecture == "qwen4exp" and the compiled-in constants
-//     must match, refusing with a precise error otherwise
-//   * have no ggml dependency
-//
-// This file is the reader plus a `--check` mode that validates it the way the Python one is
-// validated: parse the tiny model AND both real shards, and report counts that other harnesses have
-// already established independently (1,223 / 1 tensors; 202 Q2_0 in shard 1). Agreement with those
-// numbers is the test.
-//
-// Build: scripts/build_artifact.bat        Run: gguf_reader.exe <file.gguf> [--check]
 
 #include <cstdint>
 #include <cstdio>
@@ -496,8 +479,8 @@ inline uint64_t tensor_payload_bytes(const TensorInfo& t) {
 
 // The shards of one model (strata::gguf_split_paths), opened together; tensors are looked up across all of them.
 // From eddoursul/Strata 8029fa9, with the split-key validation of #255 (gopinath87607) made a property of the
-// model rather than of one loader: a split GGUF carries the model's metadata (general.architecture and the
-// qwen4exp keys) in its FIRST shard only, and the later shards just declare split.count / split.no /
+// model rather than of one loader: a split GGUF carries the model's metadata (general.architecture and
+// the architecture's keys) in its FIRST shard only, and the later shards just declare split.count / split.no /
 // split.tensors.count.  Unsloth's UD-Q4_K_XL is the extreme case: shard 1 holds the metadata and no tensor at
 // all, and output.weight, token_embd.weight and the PLE table live in shard 2.  So the architecture is checked
 // on `meta()` and a tensor is read from the shard that holds it.
@@ -576,38 +559,5 @@ private:
     std::vector<std::unique_ptr<GgufFile>> shards_;
     std::map<std::string, std::pair<size_t, const TensorInfo*>> index_;
 };
-
-// ---- architecture guard (P1.S2). The engine is specialised to ONE model; anything else must be
-// refused with a precise error rather than silently mis-run.
-struct Qwen4ExpGuard {
-    uint32_t block_count = 48, hidden = 2560, experts = 0, experts_used = 0, head_count = 24,
-             head_count_kv = 2;   // 0 = presence-only: pruned variants (GSQ-RCO Coder) legitimately ship
-                                  // fewer experts than the canonical 512; the graph reads the true value
-};
-
-inline std::string check_architecture(const GgufFile& g, const Qwen4ExpGuard& want = {}) {
-    const MetaValue* arch = g.get("general.architecture");
-    if (!arch) return "missing general.architecture";
-    if (arch->s != "qwen4exp") return "architecture is '" + arch->s + "', this engine requires 'qwen4exp'";
-    struct Req {
-        const char* key;
-        uint64_t want;
-    };
-    const Req reqs[] = {
-        {"qwen4exp.block_count", want.block_count},
-        {"qwen4exp.embedding_length", want.hidden},
-        {"qwen4exp.expert_count", want.experts},
-        {"qwen4exp.expert_used_count", want.experts_used},
-        {"qwen4exp.attention.head_count", want.head_count},
-        {"qwen4exp.attention.head_count_kv", want.head_count_kv},
-    };
-    for (const auto& r : reqs) {
-        const MetaValue* v = g.get(r.key);
-        if (!v) return std::string("missing ") + r.key;
-        if (r.want && v->u != r.want)
-            return std::string(r.key) + " = " + std::to_string(v->u) + ", expected " + std::to_string(r.want);
-    }
-    return {}; // empty == ok
-}
 
 } // namespace strata
