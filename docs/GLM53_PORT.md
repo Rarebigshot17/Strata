@@ -38,8 +38,8 @@ The routed experts are about 305B parameters (288 experts x 3 matrices x 4096 x 
 | 3-bit | IQ3_XXS (3.06 bits) | about 117 GB | about 65 GB |
 | 4-bit | IQ4_XS (4.25 bits) | about 162 GB | about 20 GB |
 
-The MLA cache stores a 512-wide latent per token in each of the 11 MLA layers: about 5.6 KB per token at 8 bits
-(11 KB at 16 bits), so about 6 GB at 1M tokens. The indexer adds one pooled 128-wide key per 16 tokens per layer,
+The MLA cache stores a 512-wide latent per token in each of the 11 MLA layers. The engine keeps it in f16, as
+llama.cpp does by default: 11 KB per token, 11.8 GB of VRAM at 1M tokens (an 8-bit cache would halve that). The indexer adds one pooled 128-wide key per 16 tokens per layer,
 under 0.5 KB per token even in fp32. The KDA layers hold a fixed-size state (64 heads x 128 x 128 per layer).
 These are calculated from the config, not measured.
 
@@ -175,6 +175,21 @@ Each step prints a few lines to paste back. Steps 1-4 need no model download.
    This compares one token at a time. The VRAM expert cache starts empty and fills from what the prompt uses, so
    the first run is the slowest; `--expert-profile ~/glm53-ref/profile.bin` saves the use counts for the next
    start.
+
+8. **The server**, once step 7 agrees with llama.cpp. Port 8101 keeps clear of Open WebUI (3000), Portainer
+   (8000) and the UPS dashboard (8080). Anything beyond this machine's loopback needs an API key:
+
+   ```bash
+   python -m serve.glm_server --model ~/models/glm53/<first shard> --engine build/strata-glm \
+       --host 0.0.0.0 --port 8101 --ctx 131072 --api-key "$(openssl rand -hex 24)" --log ~/glm53-engine.log \
+       -- --expert-profile ~/glm53-ref/profile.bin
+   ```
+
+   In Open WebUI add an OpenAI connection with that key and the address its container reaches the host at:
+   `http://172.17.0.1:8101/v1` on Docker's default bridge, or `http://100.126.222.90:8101/v1` over Tailscale
+   (which the agents and the Discord bot can use too). `--ctx` sets the longest conversation; each token of it
+   takes 11 KB of VRAM in the MLA cache (1.5 GB at 131072, 11.8 GB at 1M), which the expert cache gives up.
+   Everything after `--` goes to the engine (`--park-mib`, `--expert-profile`, `--vram-reserve`, ...).
 
 ## Removed on this branch
 
