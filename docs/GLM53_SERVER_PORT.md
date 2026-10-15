@@ -64,6 +64,11 @@ Done: A1-A3 in f8efa24, A4 in 29056d3 (ctest, the selftest, the park and server 
 
 ### B. Server (Python)
 
+In progress on work-in-progress branches, one per part, each pushed after every commit and merged into
+glm53-flash once reviewed: `glm53-flash-wip-frontend` (B1), `glm53-flash-wip-server` (B2),
+`glm53-flash-wip-web` (B4 and the small serve modules), `glm53-flash-wip-setup` (C1), `glm53-flash-wip-tools`
+(C2). The tests (B3), the docs (C3) and the review (D1) follow the merge.
+
 - [ ] B1 `serve/frontend.py`: a GLM `OutputParser` with the same interface (events reasoning / content /
   tool_start / tool_args / tool_call; `finish`, `state`, `buf`, `pending`, `rescued`, `refused`), GLM call grammar
   `<tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value>...</tool_call>`, values verbatim (schema "string"
