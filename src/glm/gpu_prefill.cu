@@ -234,7 +234,132 @@ __global__ void k_causal_softmax_f16(const float* Sc, __half* P, int H, int n_ct
         p[i] = __float2half_rn(i <= last ? expf(s[i] - mx) / sum : 0.0f);
 }
 
+// block per (query, cell): the query's selected latent rows side by side, zeros past its count
+__global__ void k_gather_cells(const __half* cache, const int32_t* sel, const int32_t* n_sel, int max_sel, int KL,
+                               __half* Kg) {
+    const int j = blockIdx.x, b = blockIdx.y;
+    __half* dst = Kg + ((size_t) b * max_sel + j) * KL;
+    if (j < n_sel[b]) {
+        const __half* src = cache + (size_t) sel[(size_t) b * max_sel + j] * KL;
+        for (int c = threadIdx.x; c < KL; c += blockDim.x) dst[c] = src[c];
+    } else {
+        for (int c = threadIdx.x; c < KL; c += blockDim.x) dst[c] = __float2half_rn(0.0f);
+    }
+}
+
+// one block per row (query b, head h): k_causal_softmax_f16 over the query's n_sel[b] gathered cells
+__global__ void k_sparse_softmax_f16(const float* Sc, __half* P, const int32_t* n_sel, int H, int max_sel) {
+    const int64_t row = blockIdx.x;
+    const int n = n_sel[row / H];
+    const float* s = Sc + row * max_sel;
+    __half* p = P + row * max_sel;
+    float mx = -FLT_MAX;
+    for (int i = threadIdx.x; i < n; i += blockDim.x) mx = fmaxf(mx, s[i]);
+    mx = block_max(mx);
+    float sum = 0.0f;
+    for (int i = threadIdx.x; i < n; i += blockDim.x) sum += expf(s[i] - mx);
+    sum = block_sum(sum);
+    for (int i = threadIdx.x; i < max_sel; i += blockDim.x)
+        p[i] = __float2half_rn(i < n ? expf(s[i] - mx) / sum : 0.0f);
+}
+
 // ---------------------------------------------------------------- indexer
+
+// acc[t][p] (+)= max(head h's dot, 0) * w[t][h], the decode path's k_kpool_scores one head at a time
+__global__ void k_pool_scores_accum(const float* dots, const float* w, int h, int IH, float* acc, int64_t T,
+                                    int64_t NP, bool first) {
+    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= T * NP) return;
+    const float v = fmaxf(dots[i], 0.0f) * w[(i / NP) * IH + h];
+    acc[i] = first ? 0.0f + v : acc[i] + v;
+}
+
+/// A float's bits as an unsigned key that sorts the same way (-0 taken as +0, which compares equal to it).
+__device__ __forceinline__ uint32_t order_key(float x) {
+    if (x == 0.0f) x = 0.0f;
+    const uint32_t u = __float_as_uint(x);
+    return (u & 0x80000000u) ? ~u : (u | 0x80000000u);
+}
+
+/// Over the block's threads in order: how many before this one have `f` set; the block's count in *total.
+/// Every thread of the block must call it.
+__device__ int block_excl_count(bool f, int* total) {
+    __shared__ int wt[32];
+    const int lane = threadIdx.x & 31, wid = threadIdx.x >> 5, nw = (int) (blockDim.x >> 5);
+    const unsigned b = __ballot_sync(0xffffffffu, f);
+    if (lane == 0) wt[wid] = __popc(b);
+    __syncthreads();
+    int before = 0, tot = 0;
+    for (int w = 0; w < nw; ++w) {
+        before += w < wid ? wt[w] : 0;
+        tot += wt[w];
+    }
+    __syncthreads();
+    *total = tot;
+    return before + __popc(b & ((1u << lane) - 1u));
+}
+
+// one block per query row: the decode path's selection. Of the nv = (t+1)/P complete pools, the n_top with the
+// highest scores, ties to the lower pool (std::stable_sort descending), found by a radix select on the scores'
+// bits; every pool when nv <= n_top. Their cells in pool order, then the tail cells t, t-1, ... of the pool
+// being filled.
+__global__ void k_topk_pools(const float* acc, int64_t NP, int64_t t0, int P, int n_top, bool tail, int max_sel,
+                             int32_t* sel, int32_t* n_sel) {
+    __shared__ uint32_t hist[256];
+    __shared__ uint32_t s_prefix, s_remaining;
+    const int i = blockIdx.x;
+    const int64_t t = t0 + i;
+    const int nv = (int) ((t + 1) / P);
+    const float* s = acc + (size_t) i * NP;
+    int32_t* out = sel + (size_t) i * max_sel;
+    const bool all = nv <= n_top, none = n_top <= 0;
+
+    uint32_t prefix = 0, mask = 0, remaining = (uint32_t) (n_top > 0 ? n_top : 0);
+    if (!all && !none) {
+        for (int shift = 24; shift >= 0; shift -= 8) {
+            for (int b = threadIdx.x; b < 256; b += blockDim.x) hist[b] = 0;
+            __syncthreads();
+            for (int j = threadIdx.x; j < nv; j += blockDim.x) {
+                const uint32_t key = order_key(s[j]);
+                if ((key & mask) == prefix) atomicAdd(&hist[(key >> shift) & 0xFFu], 1u);
+            }
+            __syncthreads();
+            if (threadIdx.x == 0) {               // the digit holding the remaining-th largest, from the top
+                uint32_t above = 0;
+                int d = 255;
+                for (; d > 0 && above + hist[d] < remaining; --d) above += hist[d];
+                s_prefix = prefix | ((uint32_t) d << shift);
+                s_remaining = remaining - above;
+            }
+            __syncthreads();
+            prefix = s_prefix;
+            remaining = s_remaining;
+            mask |= 0xFFu << shift;
+            __syncthreads();
+        }
+    }
+    // prefix is now the n_top-th largest key; `remaining` of the pools equal to it are taken, the lowest first
+    int eq_before = 0, taken = 0;
+    for (int j0 = 0; j0 < nv; j0 += (int) blockDim.x) {
+        const int j = j0 + (int) threadIdx.x;
+        const bool in = j < nv && !none;
+        const uint32_t key = in ? order_key(s[j]) : 0u;
+        const bool gt = in && (all || key > prefix);
+        const bool eq = in && !all && key == prefix;
+        int n_eq = 0, n_take = 0;
+        const int r = eq_before + block_excl_count(eq, &n_eq);
+        const bool take = gt || (eq && r < (int) remaining);
+        const int pos = taken + block_excl_count(take, &n_take);
+        if (take)
+            for (int m = 0; m < P; ++m) out[(size_t) pos * P + m] = j * P + m;
+        eq_before += n_eq;
+        taken += n_take;
+    }
+    int n = taken * P;
+    const int tl = tail ? (int) ((t + 1) % P) : 0;
+    for (int k = threadIdx.x; k < tl; k += blockDim.x) out[n + k] = (int32_t) (t - k);
+    if (threadIdx.x == 0) n_sel[i] = n + tl;
+}
 
 // block per pool, thread per channel: decode's k_kpool on rows first + p * P ...
 __global__ void k_kpool_rows(const float* keys, const float* gates, const float* ape, float* pooled, int64_t p0,
@@ -403,6 +528,30 @@ void to_f16(const float* x, uint16_t* y, int64_t n, void* stream) {
 void causal_softmax_f16(const float* Sc, uint16_t* P, int T, int H, int n_ctx, int64_t t0, void* stream) {
     k_causal_softmax_f16<<<T * H, 256, 0, S(stream)>>>(Sc, (__half*) P, H, n_ctx, t0);
     check("causal_softmax_f16");
+}
+
+void gather_cells(const uint16_t* cache, const int32_t* sel, const int32_t* n_sel, int B, int max_sel, int KL,
+                  uint16_t* Kg, void* stream) {
+    k_gather_cells<<<dim3((unsigned) max_sel, (unsigned) B), 128, 0, S(stream)>>>((const __half*) cache, sel, n_sel,
+                                                                                 max_sel, KL, (__half*) Kg);
+    check("gather_cells");
+}
+
+void sparse_softmax_f16(const float* Sc, uint16_t* P, const int32_t* n_sel, int B, int H, int max_sel, void* stream) {
+    k_sparse_softmax_f16<<<B * H, 256, 0, S(stream)>>>(Sc, (__half*) P, n_sel, H, max_sel);
+    check("sparse_softmax_f16");
+}
+
+void pool_scores_accum(const float* dots, const float* w, int h, int IH, float* acc, int T, int64_t NP, bool first,
+                       void* stream) {
+    k_pool_scores_accum<<<grid((int64_t) T * NP, 256), 256, 0, S(stream)>>>(dots, w, h, IH, acc, T, NP, first);
+    check("pool_scores_accum");
+}
+
+void topk_pools_rows(const float* acc, int64_t NP, int T, int64_t t0, int P, int n_top, bool tail, int max_sel,
+                     int32_t* sel, int32_t* n_sel, void* stream) {
+    k_topk_pools<<<T, 1024, 0, S(stream)>>>(acc, NP, t0, P, n_top, tail, max_sel, sel, n_sel);
+    check("topk_pools_rows");
 }
 
 void kpool_rows(const float* keys, const float* gates, const float* ape, float* pooled, int64_t p0, int n_pools,

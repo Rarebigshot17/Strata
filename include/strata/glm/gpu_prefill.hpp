@@ -34,12 +34,27 @@ void to_f16(const float* x, uint16_t* y, int64_t n, void* stream);
 /// Causal softmax over the dense scores S [T*H][n_ctx] (row t*H + h sees cells 0 .. t0 + t), written as f16
 /// probabilities P [T*H][n_ctx] with the cells it does not see at 0.
 void causal_softmax_f16(const float* S, uint16_t* P, int T, int H, int n_ctx, int64_t t0, void* stream);
+/// Past the indexer's dense range each query attends its own cells. Kg [B][max_sel][KL] = for query b, the f16
+/// latent rows sel[b][0 .. n_sel[b]), then zero rows.
+void gather_cells(const uint16_t* cache, const int32_t* sel, const int32_t* n_sel, int B, int max_sel, int KL,
+                  uint16_t* Kg, void* stream);
+/// causal_softmax_f16 for the gathered cells: row b*H + h of S [B*H][max_sel] over its first n_sel[b] entries.
+void sparse_softmax_f16(const float* S, uint16_t* P, const int32_t* n_sel, int B, int H, int max_sel, void* stream);
 
 // the k-pool indexer
 /// Pools `n_pools` complete pools whose P members are consecutive rows of keys/gates [rows][ID] starting at row
 /// `first`, into pooled + p0 * ID.
 void kpool_rows(const float* keys, const float* gates, const float* ape, float* pooled, int64_t p0, int n_pools,
                 int first, int P, int ID, void* stream);
+/// The pool scores, one indexer head at a time: acc [T][NP] (= when first, else +=) max(dots, 0) * w[t][h], dots
+/// [T][NP] being head h's products with the pooled keys and w [T][IH] the scaled head weights.
+void pool_scores_accum(const float* dots, const float* w, int h, int IH, float* acc, int T, int64_t NP, bool first,
+                       void* stream);
+/// The selection of each query t = t0 + i (i < T), as the decode path makes it: the n_top best of its
+/// (t+1)/P complete pools by acc [T][NP] (ties to the lower pool; all of them when there are no more), as cells
+/// in pool order, then the tail t, t-1, ... of the pool being filled when `tail`. sel [T][max_sel], n_sel [T].
+void topk_pools_rows(const float* acc, int64_t NP, int T, int64_t t0, int P, int n_top, bool tail, int max_sel,
+                     int32_t* sel, int32_t* n_sel, void* stream);
 
 // LayerNorm per row
 void layer_norm_rows(const float* x, float* y, int rows, int n, float eps, const float* w, const float* b,

@@ -97,6 +97,10 @@ struct DevCtx {
     uint8_t* arena = nullptr;                ///< the mixer's or the FFN's buffers, one at a time
     size_t arena_bytes = 0;
     int32_t *d_idx = nullptr, *d_slot = nullptr;
+    // past the indexer's dense range: each query's cells [T][max_sel] and their count, and which full indexer
+    // layer's selection they are (Impl::sel_version)
+    int32_t *sel_rows = nullptr, *n_sel = nullptr;
+    uint64_t sel_have = 0;
     std::unique_ptr<gpu::GemmCtx> gemm;
     // streamed experts: two device buffers, filled on a copy stream while the other is computed
     uint8_t* dstage[2] = {nullptr, nullptr};
@@ -130,6 +134,8 @@ struct GpuEngine::Impl {
     size_t blob_max = 0;
     std::vector<int32_t> h_ids_rows;
     std::vector<float> h_w_rows;
+    int32_t *h_sel_rows = nullptr, *h_n_sel = nullptr;   ///< pinned: the last selection, for other devices
+    uint64_t sel_version = 0;                            ///< counts the full indexer layers' selections
 
     Impl(const Model& model, const EngineOptions& o) : m(model), c(model.config()), opt(o) {}
 };

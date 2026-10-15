@@ -58,7 +58,8 @@ public:
     void save_profile() const;
 
 private:
-    bool run_chunk(const int32_t* ids, int T);   ///< false: this chunk needs the one-token path
+    /// T prompt tokens; `sparse`: past the indexer's dense range, each query attends its own selection
+    bool run_chunk(const int32_t* ids, int T, bool sparse);
     void setup_prefill();                        ///< the chunk buffers, before the expert cache takes the rest
     struct Impl;
     std::unique_ptr<Impl> impl_;

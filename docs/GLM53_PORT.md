@@ -68,7 +68,7 @@ Every piece is checked against llama.cpp, which has run GLM-5.3-Flash since its 
 | M1 | CPU reference: config and tensors from the GGUF, mHC, KDA, MLA with the k-pool indexer, MoE with sigmoid routing and SwiGLU clamp | done | `tools/glm53_selftest.sh`: all variants PASS |
 | M2 | CUDA: dense projections, mHC, KDA decode, MLA decode with the indexer, routing; layer split over the GPUs | written, not yet run on a GPU | `tools/glm53_gpu_check.sh`; logits vs llama.cpp |
 | M3 | Experts: all in RAM (the mapped GGUF), VRAM cache of the most used, CPU for the rest | written, not yet run on a GPU | logits unchanged; tokens/s |
-| M4 | Prompt processing: batched projections, chunked KDA, batched MLA, experts streamed through VRAM | partly: in chunks up to about 2,063 tokens of context, one token at a time beyond (sparse chunks next) | prompt tokens/s; logits unchanged |
+| M4 | Prompt processing: batched projections, chunked KDA, batched MLA (causal below 2,063 tokens of context, each query's own selection past that), experts streamed through VRAM | written, not yet run on a GPU | prompt tokens/s; logits unchanged |
 | M5 | Server: the engine protocol, GLM chat template, tool calls (`<arg_key>`/`<arg_value>`), thinking, reasoning effort | written, checked on the CPU engine (`tools/glm53_server_check.sh`) | Open WebUI and an agent work end to end |
 | M6 | Several clients: conversation parking and checkpoints; batching; MTP drafting | parking written, checked on the CPU engine (`tools/glm53_park_check.py`); the rest not started | speed for 1, 2 and 4 clients |
 | M7 | Remove the Qwen engine and HIP; docs | | |

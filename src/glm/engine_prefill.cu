@@ -7,7 +7,10 @@
 // one computes (and kept in a free cache slot when there is one).
 //
 // While the indexer still selects every pool (the context below top_k + kpool - 1 tokens) attention is plain
-// causal and the chunk path runs it. Past that, the remaining prompt tokens take the one-token path for now.
+// causal over the cache. Past that each query attends its own selection, made as the decode path makes it: the
+// chunk's pool scores with one product per indexer head, a top-k per query on the GPU (ties to the lower pool,
+// like decode's stable sort), then the query's cells gathered side by side and the same two f16 products as the
+// causal case, batched per query.
 #include "engine_impl.hpp"
 
 #include "strata/glm/gpu_kernels.hpp"
@@ -71,11 +74,21 @@ void GpuEngine::setup_prefill() {
     }
     // the three phases share one arena: the KDA mixer, the MLA mixer, the FFN
     const size_t f = sizeof(float);
+    const int64_t MS = I.max_sel, IH = c.indexer_n_head;
     const size_t kda = align256(8 * T * maxDI * f) + align256(T * D * f) + align256(T * maxH * f) + 8 * 256;
-    const size_t mla = align256(T * QL * f) + align256(T * maxH * HK * f) + align256(T * KL * f) +
-                       2 * align256(T * maxH * KL * f) + align256(T * maxH * KL * 2) + align256(T * maxH * HV * f) +
-                       align256(T * maxH * I.max_sel * f) + align256(T * maxH * I.max_sel * 2) +
-                       align256(T * ID * f) + 2 * align256((P + T) * ID * f) + 12 * 256;
+    // MLA: the projections and the indexer's keys, then the attention: over every cell (the dense range), or past
+    // it the indexer's queries and pool scores, and per batch of queries their gathered cells, scores and
+    // probabilities (sparse_batch() queries at a time, at least min(T, 32))
+    const size_t mla_common = align256(T * QL * f) + align256(T * maxH * HK * f) + align256(T * KL * f) +
+                              2 * align256(T * maxH * KL * f) + align256(T * maxH * KL * 2) +
+                              align256(T * maxH * HV * f) + align256(T * ID * f) + 2 * align256((P + T) * ID * f) +
+                              8 * 256;
+    const size_t dense_att = align256(T * maxH * MS * f) + align256(T * maxH * MS * 2);
+    const int64_t nb = std::min<int64_t>(T, 32);
+    const size_t sparse_att = align256(T * IH * ID * f) + align256(T * IH * f) + 2 * align256(T * I.max_pools * f) +
+                              align256(nb * MS * KL * 2) + align256(nb * maxH * MS * f) + align256(nb * maxH * MS * 2) +
+                              8 * 256;
+    const size_t mla = mla_common + std::max(dense_att, sparse_att);
     const size_t ffn = 3 * align256(T * maxFF * f) + align256(T * NE * f) + align256(T * KU * f) +
                        align256(T * KU * sizeof(int32_t)) + align256(T * KU * E * f) + 3 * align256(T * E * f) + 10 * 256;
     const size_t arena = std::max({kda, mla, ffn});
@@ -107,6 +120,8 @@ void GpuEngine::setup_prefill() {
         d.arena_bytes = arena;
         d.d_idx = dalloc<int32_t>((size_t) (T * KU), b);
         d.d_slot = dalloc<int32_t>((size_t) (T * KU), b);
+        d.sel_rows = dalloc<int32_t>((size_t) (T * MS), b);
+        d.n_sel = dalloc<int32_t>((size_t) T, b);
         // the largest weight a product dequantizes on this device, and the largest activation it converts
         size_t welems = (size_t) (E * maxF);
         for (int64_t il = 0; il < c.n_layer; ++il) {
@@ -135,6 +150,8 @@ void GpuEngine::setup_prefill() {
     }
     if (I.blob_max)
         for (auto& h : I.hstage) h = halloc<uint8_t>(I.blob_max);
+    I.h_sel_rows = halloc<int32_t>((size_t) (T * MS));
+    I.h_n_sel = halloc<int32_t>((size_t) T);
 }
 
 const std::vector<float>& GpuEngine::prefill(const int32_t* ids, int64_t n,
@@ -142,17 +159,26 @@ const std::vector<float>& GpuEngine::prefill(const int32_t* ids, int64_t n,
     Impl& I = *impl_;
     const Config& c = I.c;
     if (n <= 0) throw std::runtime_error("prefill of no tokens");
-    bool any_mla = false;
-    for (int64_t il = 0; il < c.n_layer; ++il) any_mla |= !c.is_kda(il);
-    // positions whose query still sees every pool: (t + 1) / P <= top_k / P
-    const int64_t dense_until = any_mla ? (c.indexer_top_k / c.indexer_kpool + 1) * c.indexer_kpool - 1
-                                        : INT64_MAX;
+    // Positions whose query still sees every cell, (t + 1) / P <= top_k / P with the tail selected, attend over
+    // all of them (the dense chunk path). Past those each query attends its own selection (sparse chunks), which
+    // a shared indexer layer takes from the full one before it: without one, the one-token path.
+    bool any_mla = false, full_seen = false, sparse_ok = true;
+    for (int64_t il = 0; il < c.n_layer; ++il) {
+        if (c.is_kda(il)) continue;
+        any_mla = true;
+        if (c.indexer_full[(size_t) il]) full_seen = true;
+        else if (!full_seen) sparse_ok = false;
+    }
+    const int64_t dense_until = !any_mla ? INT64_MAX
+                                : c.indexer_select_tail ? (c.indexer_top_k / c.indexer_kpool + 1) * c.indexer_kpool - 1
+                                                        : 0;
     int64_t i = 0;
     while (i < n) {
-        int64_t T = std::min<int64_t>(I.opt.prefill_chunk, n - i);
-        T = std::min<int64_t>(T, std::max<int64_t>(0, dense_until - pos_));
+        const int64_t room = std::min<int64_t>(I.opt.prefill_chunk, n - i);
+        const bool sparse = pos_ >= dense_until;
+        const int64_t T = !sparse ? std::min<int64_t>(room, dense_until - pos_) : sparse_ok ? room : 0;
         if (T >= 2) {
-            run_chunk(ids + i, (int) T);
+            run_chunk(ids + i, (int) T, sparse);
             i += T;
         } else {
             eval(ids[i]);
@@ -163,7 +189,7 @@ const std::vector<float>& GpuEngine::prefill(const int32_t* ids, int64_t n,
     return I.logits;
 }
 
-bool GpuEngine::run_chunk(const int32_t* ids, int T) {
+bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
     Impl& I = *impl_;
     const Config& c = I.c;
     const Model& m = I.m;
@@ -286,20 +312,92 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T) {
                 }
             }
 
-            // causal attention over the latent cache: S = Q K^T * scale, f16 softmax, O = P K
-            const int n_ctx = (int) (t0 + T);
-            float* Sc = A.take<float>((size_t) (T * H) * (size_t) n_ctx);
-            uint16_t* P16 = A.take<uint16_t>((size_t) (T * H) * (size_t) n_ctx);
             cublasHandle_t hb = (cublasHandle_t) G.cublas();
-            cb(cublasSetStream(hb, d.stream), "cublasSetStream");
             const float scale = 1.0f / std::sqrt((float) HK), one = 1.0f, zero = 0.0f;
-            cb(cublasGemmEx(hb, CUBLAS_OP_T, CUBLAS_OP_N, n_ctx, (int) (T * H), (int) KL, &scale, l.cache, CUDA_R_16F,
-                            (int) KL, q16, CUDA_R_16F, (int) KL, &zero, Sc, CUDA_R_32F, n_ctx, CUBLAS_COMPUTE_32F,
-                            CUBLAS_GEMM_DEFAULT), "attention scores");
-            gpu::causal_softmax_f16(Sc, P16, T, (int) H, n_ctx, t0, s);
-            cb(cublasGemmEx(hb, CUBLAS_OP_N, CUBLAS_OP_N, (int) KL, (int) (T * H), n_ctx, &one, l.cache, CUDA_R_16F,
-                            (int) KL, P16, CUDA_R_16F, n_ctx, &zero, lat, CUDA_R_32F, (int) KL, CUBLAS_COMPUTE_32F,
-                            CUBLAS_GEMM_DEFAULT), "attention values");
+            if (!sparse) {
+                // causal attention over the latent cache: S = Q K^T * scale, f16 softmax, O = P K
+                const int n_ctx = (int) (t0 + T);
+                float* Sc = A.take<float>((size_t) (T * H) * (size_t) n_ctx);
+                uint16_t* P16 = A.take<uint16_t>((size_t) (T * H) * (size_t) n_ctx);
+                cb(cublasSetStream(hb, d.stream), "cublasSetStream");
+                cb(cublasGemmEx(hb, CUBLAS_OP_T, CUBLAS_OP_N, n_ctx, (int) (T * H), (int) KL, &scale, l.cache,
+                                CUDA_R_16F, (int) KL, q16, CUDA_R_16F, (int) KL, &zero, Sc, CUDA_R_32F, n_ctx,
+                                CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT), "attention scores");
+                gpu::causal_softmax_f16(Sc, P16, T, (int) H, n_ctx, t0, s);
+                cb(cublasGemmEx(hb, CUBLAS_OP_N, CUBLAS_OP_N, (int) KL, (int) (T * H), n_ctx, &one, l.cache,
+                                CUDA_R_16F, (int) KL, P16, CUDA_R_16F, n_ctx, &zero, lat, CUDA_R_32F, (int) KL,
+                                CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT), "attention values");
+            } else {
+                const int64_t IH = c.indexer_n_head, ID = c.indexer_head_size, P = c.indexer_kpool;
+                const int MS = (int) I.max_sel;
+                if (c.indexer_full[(size_t) il]) {
+                    // the selection (build_kpool_select), every query of the chunk at once: the pool scores
+                    // sum_h w[h] relu(q_h . pooled), head by head, then each query's top pools
+                    const int64_t NP = (t0 + T) / P;                // pools complete by the chunk's last token
+                    float* iq = A.take<float>((size_t) (T * IH * ID));
+                    float* wts = A.take<float>((size_t) (T * IH));
+                    float* acc = A.take<float>((size_t) (T * NP));
+                    float* dots = A.take<float>((size_t) (T * NP));
+                    G.gemm(l.idx_q_b, qr, T, iq, s);
+                    G.gemm(l.idx_proj, d.pxn, T, wts, s);
+                    gpu::scale(wts, (int) (T * IH), 1.0f / std::sqrt((float) (ID * IH)), s);
+                    cb(cublasSetStream(hb, d.stream), "cublasSetStream");
+                    for (int64_t h = 0; h < IH; ++h) {
+                        // dots [T][NP] = iq[:, h, :] pooled^T
+                        cb(cublasSgemm(hb, CUBLAS_OP_T, CUBLAS_OP_N, (int) NP, T, (int) ID, &one, l.pooled, (int) ID,
+                                       iq + h * ID, (int) (IH * ID), &zero, dots, (int) NP), "pool scores");
+                        gpu::pool_scores_accum(dots, wts, (int) h, (int) IH, acc, T, NP, h == 0, s);
+                    }
+                    gpu::topk_pools_rows(acc, NP, T, t0, (int) P, (int) (c.indexer_top_k / P), c.indexer_select_tail,
+                                         MS, d.sel_rows, d.n_sel, s);
+                    // a copy for the shared indexer layers on the other devices
+                    ok(cudaMemcpyAsync(I.h_sel_rows, d.sel_rows, (size_t) T * MS * sizeof(int32_t),
+                                       cudaMemcpyDeviceToHost, d.stream), "selection");
+                    ok(cudaMemcpyAsync(I.h_n_sel, d.n_sel, (size_t) T * sizeof(int32_t), cudaMemcpyDeviceToHost,
+                                       d.stream), "selection");
+                    ok(cudaStreamSynchronize(d.stream), "sync");
+                    d.sel_have = ++I.sel_version;
+                } else if (d.sel_have != I.sel_version) {
+                    // a shared indexer layer on another device than the full one: its selection from the host
+                    // (prefill() runs sparse chunks only when a full layer comes first)
+                    ok(cudaMemcpyAsync(d.sel_rows, I.h_sel_rows, (size_t) T * MS * sizeof(int32_t),
+                                       cudaMemcpyHostToDevice, d.stream), "selection");
+                    ok(cudaMemcpyAsync(d.n_sel, I.h_n_sel, (size_t) T * sizeof(int32_t), cudaMemcpyHostToDevice,
+                                       d.stream), "selection");
+                    ok(cudaStreamSynchronize(d.stream), "sync");    // before the next full layer refills them
+                    d.sel_have = I.sel_version;
+                }
+                // attention over each query's own cells, nb queries at a time: gathered K, then the dense path's
+                // products batched per query
+                const size_t per_q = align256((size_t) MS * KL * 2) + align256((size_t) H * MS * sizeof(float)) +
+                                     align256((size_t) H * MS * 2);
+                const size_t room = A.cap > A.used + 3 * 256 ? A.cap - A.used - 3 * 256 : 0;
+                const int nb = (int) std::min<size_t>((size_t) T, room / per_q);
+                if (nb < 1) throw std::runtime_error("prompt chunk arena too small for sparse attention");
+                uint16_t* Kg = A.take<uint16_t>((size_t) nb * MS * KL);
+                float* Sc = A.take<float>((size_t) nb * H * MS);
+                uint16_t* P16 = A.take<uint16_t>((size_t) nb * H * MS);
+                cb(cublasSetStream(hb, d.stream), "cublasSetStream");
+                for (int b0 = 0; b0 < T; b0 += nb) {
+                    const int bn = std::min(nb, T - b0);
+                    gpu::gather_cells(l.cache, d.sel_rows + (size_t) b0 * MS, d.n_sel + b0, bn, MS, (int) KL, Kg, s);
+                    // S_b [H][MS] = q_b [H][KL] Kg_b^T * scale
+                    cb(cublasGemmStridedBatchedEx(hb, CUBLAS_OP_T, CUBLAS_OP_N, MS, (int) H, (int) KL, &scale, Kg,
+                                                  CUDA_R_16F, (int) KL, (long long) MS * KL,
+                                                  q16 + (size_t) b0 * H * KL, CUDA_R_16F, (int) KL, (long long) H * KL,
+                                                  &zero, Sc, CUDA_R_32F, MS, (long long) H * MS, bn,
+                                                  CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT),
+                       "sparse attention scores");
+                    gpu::sparse_softmax_f16(Sc, P16, d.n_sel + b0, bn, (int) H, MS, s);
+                    // O_b [H][KL] = P_b [H][MS] Kg_b
+                    cb(cublasGemmStridedBatchedEx(hb, CUBLAS_OP_N, CUBLAS_OP_N, (int) KL, (int) H, MS, &one, Kg,
+                                                  CUDA_R_16F, (int) KL, (long long) MS * KL, P16, CUDA_R_16F, MS,
+                                                  (long long) H * MS, &zero, lat + (size_t) b0 * H * KL, CUDA_R_32F,
+                                                  (int) KL, (long long) H * KL, bn, CUBLAS_COMPUTE_32F,
+                                                  CUBLAS_GEMM_DEFAULT),
+                       "sparse attention values");
+                }
+            }
             G.gemm_heads(l.v_b, (int) H, lat, (int) (H * KL), KL, T, heads, (int) (H * HV), HV, s);
             G.gemm(l.wo, heads, T, d.py, s);
         }
