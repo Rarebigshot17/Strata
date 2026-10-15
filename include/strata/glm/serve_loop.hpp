@@ -57,6 +57,8 @@ public:
     virtual int64_t lookups() const { return 0; }
     /// Saving and restoring the state (snapshot.hpp). Without them only the live conversation is kept.
     virtual bool can_snapshot() const { return false; }
+    /// What snapshot(full) would hold now, logits not included (so the loop can skip one that cannot be kept).
+    virtual size_t snapshot_bytes(bool /*full*/) const { return 0; }
     virtual std::shared_ptr<Snapshot> snapshot(bool /*full*/) { return nullptr; }
     virtual void restore(const Snapshot& /*s*/) {}
 };

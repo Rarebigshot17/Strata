@@ -235,9 +235,20 @@ private:
         }
     };
 
+    /// A snapshot of the live state with its logits; nullptr when it alone would not fit park_bytes (it would be
+    /// dropped at once, after a copy that takes seconds for a long conversation).
     std::shared_ptr<Snapshot> save(bool full) {
+        const size_t est = ev_.snapshot_bytes(full);
+        const size_t need = est + logits.size() * sizeof(float);
+        if (est > 0 && need > opt_.park_bytes) {
+            std::fprintf(stderr, "conversations: %s of %zu tokens would take %.1f MiB, more than --park-mib; not kept\n",
+                         full ? "a conversation" : "a checkpoint", sessions_[cur_].tokens.size(), mib(need));
+            return nullptr;
+        }
         auto s = ev_.snapshot(full);
         if (!s) return nullptr;
+        if (est > 0 && s->bytes != est)
+            std::fprintf(stderr, "conversations: snapshot size estimated %zu bytes, actual %zu\n", est, s->bytes);
         s->logits = logits;
         s->bytes += logits.size() * sizeof(float);
         return s;

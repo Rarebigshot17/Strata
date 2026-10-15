@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import codecs
+import collections
 import json
 import os
 import pathlib
@@ -202,11 +203,54 @@ class EngineDied(RuntimeError):
     pass
 
 
+class Fifo:
+    """The engine runs one request at a time; the others wait their turn in arrival order (a Lock wakes any of
+    them, so a steady stream of agent requests could keep the chat waiting)."""
+
+    def __init__(self):
+        self._cv = threading.Condition()
+        self._waiting: collections.deque = collections.deque()
+        self._busy = False
+
+    def join(self) -> object:
+        ticket = object()
+        with self._cv:
+            self._waiting.append(ticket)
+        return ticket
+
+    def wait(self, ticket, timeout: float) -> bool:
+        """True once it is this ticket's turn (the caller then holds the engine until release())."""
+        with self._cv:
+            if not self._cv.wait_for(lambda: not self._busy and self._waiting[0] is ticket, timeout):
+                return False
+            self._waiting.popleft()
+            self._busy = True
+            return True
+
+    def leave(self, ticket):
+        """A waiter that gave up."""
+        with self._cv:
+            try:
+                self._waiting.remove(ticket)
+            except ValueError:
+                pass
+            self._cv.notify_all()
+
+    def release(self):
+        with self._cv:
+            self._busy = False
+            self._cv.notify_all()
+
+    def waiting(self) -> int:
+        with self._cv:
+            return len(self._waiting)
+
+
 class Engine:
     def __init__(self, cmd: list[str], log_path: str | None):
         self.cmd = cmd
         self.log = open(log_path, "a", encoding="utf-8") if log_path else subprocess.DEVNULL
-        self.lock = threading.Lock()                 # one request at a time; the others wait here, FIFO enough
+        self.queue = Fifo()                          # one request at a time; the others wait here, in order
         self.lines: queue.Queue = queue.Queue()
         self.max_ctx = 0
         self.info = {}
@@ -390,10 +434,16 @@ class Service:
         held = ""
         stats = None
         stop_hit = False
-        while not self.engine.lock.acquire(timeout=1.0):     # another request is running: wait, with heartbeats
-            if cancel.is_set():
-                return
-            yield ("heartbeat", None)
+        q = self.engine.queue
+        ticket, turn = q.join(), False
+        try:
+            while not (turn := q.wait(ticket, 1.0)):          # another request is running: wait, with heartbeats
+                if cancel.is_set():
+                    return
+                yield ("heartbeat", None)
+        finally:
+            if not turn:                                      # cancelled, or the client left (GeneratorExit)
+                q.leave(ticket)
         try:
             for kind, val in self.engine.generate(ids, max_new, sampling, cancel):
                 if kind == "token":
@@ -426,7 +476,7 @@ class Service:
             if not stop_hit and (held or tail):
                 yield ("text", held + tail)
         finally:
-            self.engine.lock.release()
+            q.release()
         if stop_hit and stats is not None:
             stats["finish"] = "stop"
         yield ("done", stats)

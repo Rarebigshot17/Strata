@@ -142,12 +142,71 @@ class Template(unittest.TestCase):
         self.assertIsNone(svc.chat_prompt({"messages": [{"role": "user", "content": "x"}]})[3])
 
 
+class Queue(unittest.TestCase):
+    def test_turns_in_arrival_order(self):
+        import threading
+        q = G.Fifo()
+        first = q.join()
+        self.assertTrue(q.wait(first, 0))
+        order, threads = [], []
+        tickets = [q.join() for _ in range(5)]
+
+        def worker(i):
+            while not q.wait(tickets[i], 0.05):
+                pass
+            order.append(i)
+            q.release()
+
+        for i in reversed(range(5)):                 # started in the opposite order to their tickets
+            threads.append(threading.Thread(target=worker, args=(i,)))
+            threads[-1].start()
+        q.release()
+        for t in threads:
+            t.join(10)
+        self.assertEqual(order, [0, 1, 2, 3, 4])
+
+    def test_a_waiter_that_leaves_does_not_block_the_rest(self):
+        q = G.Fifo()
+        a, b, c = q.join(), q.join(), q.join()
+        self.assertTrue(q.wait(a, 0))
+        q.leave(b)
+        q.release()
+        self.assertTrue(q.wait(c, 1))
+        self.assertEqual(q.waiting(), 0)
+
+    def test_run_gives_up_its_place_when_cancelled_or_closed(self):
+        import threading
+
+        class Busy:
+            max_ctx = 100
+            queue = G.Fifo()
+
+        class Model:
+            tokenizer = None
+            eos_ids = []
+
+        svc = G.Service.__new__(G.Service)
+        svc.engine, svc.model = Busy(), Model()
+        holder = Busy.queue.join()
+        self.assertTrue(Busy.queue.wait(holder, 0))
+        cancel = threading.Event()
+        gen = svc.run([1], 4, {}, cancel, [])
+        self.assertEqual(next(gen), ("heartbeat", None))
+        self.assertEqual(Busy.queue.waiting(), 1)
+        gen.close()                                   # the client left
+        self.assertEqual(Busy.queue.waiting(), 0)
+        gen = svc.run([1], 4, {}, cancel, [])
+        next(gen)
+        cancel.set()
+        self.assertEqual(list(gen), [])               # cancelled while waiting: nothing more
+        self.assertEqual(Busy.queue.waiting(), 0)
+
+
 class StopStrings(unittest.TestCase):
     def test_stop_cut_across_pieces(self):
         class FakeEngine:
             max_ctx = 100
-            import threading
-            lock = threading.Lock()
+            queue = G.Fifo()
 
             def generate(self, ids, max_new, sampling, cancel):
                 for t in ids:

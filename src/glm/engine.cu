@@ -364,6 +364,26 @@ std::shared_ptr<Snapshot> GpuEngine::snapshot(bool full) {
     return sn;
 }
 
+size_t GpuEngine::snapshot_bytes(bool full) const {
+    const Config& c = impl_->c;
+    const int64_t ID = c.indexer_head_size, P = c.indexer_kpool;
+    size_t b = 0;
+    for (int64_t il = 0; il < c.n_layer; ++il) {
+        const size_t i = (size_t) il;
+        if (c.is_kda(il)) {
+            const int64_t H = c.n_head[i], D = c.kda_head_dim;
+            b += (size_t) (H * D * D + 3 * (c.ssm_d_conv - 1) * H * D) * sizeof(float);
+            continue;
+        }
+        if (c.indexer_full[i]) b += (size_t) (2 * P * ID) * sizeof(float);
+        if (full) {
+            b += (size_t) (pos_ * c.kv_lora_rank) * sizeof(uint16_t);
+            if (c.indexer_full[i]) b += (size_t) (pos_ / P * ID) * sizeof(float);
+        }
+    }
+    return b;
+}
+
 void GpuEngine::restore(const Snapshot& snap) {
     Impl& I = *impl_;
     const Config& c = I.c;

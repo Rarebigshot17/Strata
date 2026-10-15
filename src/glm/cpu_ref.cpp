@@ -251,6 +251,22 @@ std::shared_ptr<Snapshot> CpuRef::snapshot(bool full) const {
     return sn;
 }
 
+size_t CpuRef::snapshot_bytes(bool full) const {
+    const int64_t ID = c_.indexer_head_size, P = c_.indexer_kpool;
+    size_t n = 0;
+    for (int64_t il = 0; il < c_.n_layer; ++il) {
+        const LayerState& s = *st_[(size_t) il];
+        if (c_.is_kda(il)) {
+            n += s.S.size();
+            for (const auto& w : s.conv) n += w.size();
+        } else if (full) {
+            n += (size_t) (pos_ * c_.kv_lora_rank);
+            if (c_.indexer_full[(size_t) il]) n += (size_t) (2 * pos_ * ID + pos_ / P * ID);
+        }
+    }
+    return n * sizeof(float);
+}
+
 void CpuRef::restore(const Snapshot& snap) {
     const auto* sn = dynamic_cast<const CpuSnapshot*>(&snap);
     if (!sn || sn->S.size() != (size_t) c_.n_layer) throw std::runtime_error("CpuRef::restore: not this engine's snapshot");

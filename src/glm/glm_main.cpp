@@ -71,6 +71,7 @@ struct GpuEvaluator : strata::glm::Evaluator {
     }
     bool can_snapshot() const override { return true; }
     std::shared_ptr<strata::glm::Snapshot> snapshot(bool full) override { return e.snapshot(full); }
+    size_t snapshot_bytes(bool full) const override { return e.snapshot_bytes(full); }
     void restore(const strata::glm::Snapshot& s) override { e.restore(s); }
 };
 

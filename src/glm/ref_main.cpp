@@ -43,6 +43,7 @@ struct RefEvaluator : strata::glm::Evaluator {
     int64_t pos() const override { return r.pos(); }
     bool can_snapshot() const override { return true; }
     std::shared_ptr<strata::glm::Snapshot> snapshot(bool full) override { return r.snapshot(full); }
+    size_t snapshot_bytes(bool full) const override { return r.snapshot_bytes(full); }
     void restore(const strata::glm::Snapshot& s) override { r.restore(s); }
 };
 

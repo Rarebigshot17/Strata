@@ -46,6 +46,7 @@ public:
     int64_t pos() const { return pos_; }
     /// Copies the state to host memory (snapshot.hpp); `restore` copies one back, pos() included.
     std::shared_ptr<Snapshot> snapshot(bool full);
+    size_t snapshot_bytes(bool full) const;   ///< what snapshot(full) would hold now, logits not included
     void restore(const Snapshot& snap);
     /// The layers each device holds, for the log: "0: layers 0-21 (8.1 GB)".
     const std::vector<std::string>& placement() const { return placement_; }

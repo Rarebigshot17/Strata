@@ -54,6 +54,7 @@ public:
     int64_t pos() const { return pos_; }
     /// Saves the state (snapshot.hpp); `restore` puts one back, pos() included.
     std::shared_ptr<Snapshot> snapshot(bool full) const;
+    size_t snapshot_bytes(bool full) const;   ///< what snapshot(full) would hold now, logits not included
     void restore(const Snapshot& snap);
 
 private:
