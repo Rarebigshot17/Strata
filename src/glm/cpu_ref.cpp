@@ -684,6 +684,7 @@ const std::vector<float>& CpuRef::eval(int32_t token, Trace* trace) {
     std::vector<float> x((size_t) E), xn((size_t) E), yv((size_t) E), post((size_t) hc), comb((size_t) (hc * hc));
     if (trace) trace->layer_out.clear();
     for (int64_t il = 0; il < c_.n_layer; ++il) {
+        ticks_.fetch_add(1, std::memory_order_relaxed);
         const LayerWeights& w = m_.layer(il);
         const LayerState& s = *st_[(size_t) il];
         hc_pre(w.hc_attn_fn, w.hc_attn_scale, w.hc_attn_base, R.data(), x.data(), post.data(), comb.data());

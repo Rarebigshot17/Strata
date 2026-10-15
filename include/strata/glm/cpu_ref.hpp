@@ -11,6 +11,7 @@
 #include "strata/glm/model.hpp"
 #include "strata/glm/snapshot.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -52,6 +53,8 @@ public:
     /// Runs `token` at the next position and returns its logits (`n_vocab` floats).
     const std::vector<float>& eval(int32_t token, Trace* trace = nullptr);
     int64_t pos() const { return pos_; }
+    /// Counts layers run, from any thread (serve_loop's heartbeat).
+    uint64_t ticks() const { return ticks_.load(std::memory_order_relaxed); }
     /// Saves the state (snapshot.hpp); `restore` puts one back, pos() included.
     std::shared_ptr<Snapshot> snapshot(bool full) const;
     size_t snapshot_bytes(bool full) const;   ///< what snapshot(full) would hold now, logits not included
@@ -72,6 +75,7 @@ private:
     const Config& c_;
     int64_t max_ctx_;
     int64_t pos_ = 0;
+    std::atomic<uint64_t> ticks_{0};
     std::unique_ptr<ThreadPool> pool_;
     std::unique_ptr<CpuExperts> experts_;
     std::vector<std::unique_ptr<LayerState>> st_;

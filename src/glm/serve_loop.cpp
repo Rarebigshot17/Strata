@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cmath>
 #include <cerrno>
+#include <cstdarg>
 #include <condition_variable>
 #include <cstdio>
 #include <deque>
@@ -305,6 +306,67 @@ private:
     uint64_t clock_ = 0;
 };
 
+/// stdout: the protocol's lines, from the request loop and the heartbeat thread, one line at a time.
+class Out {
+public:
+    void line(const char* fmt, ...) __attribute__((format(printf, 2, 3))) {
+        std::lock_guard<std::mutex> lk(mu_);
+        va_list ap;
+        va_start(ap, fmt);
+        std::vfprintf(stdout, fmt, ap);
+        va_end(ap);
+        std::fputc('\n', stdout);
+        std::fflush(stdout);
+        last_ = Clock::now();
+    }
+    /// HB when nothing was written for `quiet` seconds.
+    void beat(double quiet) {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (std::chrono::duration<double>(Clock::now() - last_).count() < quiet) return;
+        std::fputs("HB\n", stdout);
+        std::fflush(stdout);
+        last_ = Clock::now();
+    }
+
+private:
+    std::mutex mu_;
+    Clock::time_point last_ = Clock::now();
+};
+
+/// While a request runs, says HB every few quiet seconds in which the engine made progress (its ticks moved), so
+/// the server can tell a long prompt chunk (or a cold page cache) from a hung engine.
+class Heartbeat {
+public:
+    Heartbeat(Evaluator& ev, Out& out) : ev_(ev), out_(out), th_([this] { run(); }) {}
+    ~Heartbeat() {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            quit_ = true;
+        }
+        cv_.notify_one();
+        th_.join();
+    }
+    void active(bool on) { active_ = on; }
+
+private:
+    void run() {
+        uint64_t seen = ev_.ticks();
+        std::unique_lock<std::mutex> lk(mu_);
+        while (!cv_.wait_for(lk, std::chrono::seconds(1), [&] { return quit_; })) {
+            const uint64_t now = ev_.ticks();
+            if (active_ && now != seen) out_.beat(3.0);
+            seen = now;
+        }
+    }
+    Evaluator& ev_;
+    Out& out_;
+    std::mutex mu_;
+    std::condition_variable cv_;
+    bool quit_ = false;
+    std::atomic<bool> active_{false};
+    std::thread th_;
+};
+
 }  // namespace
 
 int serve_loop(Evaluator& ev, const ServeOptions& opt) {
@@ -313,20 +375,24 @@ int serve_loop(Evaluator& ev, const ServeOptions& opt) {
     std::thread reader([input] { input->run(); });
     reader.detach();
     Conversations conv(ev, opt);
+    Out out;
+    Heartbeat heartbeat(ev, out);
 
-    std::printf("INFO engine=glm-0.1 eos=%zu park_mib=%.1f", opt.eos_ids.size(),
-                conv.enabled() ? mib(opt.park_bytes) : 0.0);
-    for (const auto& kv : opt.info) std::printf(" %s", kv.c_str());
-    std::printf("\nREADY %lld stop\n", (long long) opt.max_ctx);
-    std::fflush(stdout);
+    {
+        std::string info = "INFO engine=" + opt.version + " eos=" + std::to_string(opt.eos_ids.size()) +
+                           " park_mib=" + std::to_string(conv.enabled() ? opt.park_bytes >> 20 : (size_t) 0) +
+                           " logit_bias=1";
+        for (const auto& kv : opt.info) info += " " + kv;
+        out.line("%s", info.c_str());
+        out.line("READY %lld stop", (long long) opt.max_ctx);
+    }
 
     std::string line;
     uint64_t gen_no = 0;                              // this request's GEN line, counted as Input counts them
     while (in.next(line)) {
         if (line == "QUIT") break;
         if (!Input::is_gen(line)) {
-            std::printf("ERR unsupported command: %s\n", line.substr(0, line.find(' ')).c_str());
-            std::fflush(stdout);
+            out.line("ERR unsupported command: %s", line.substr(0, line.find(' ')).c_str());
             continue;
         }
         // GEN <max_new> [key=value ...] <ids>
@@ -350,33 +416,39 @@ int serve_loop(Evaluator& ev, const ServeOptions& opt) {
             else sp.set(key, value);                  // unknown keys: ignored
         }
         if (bad || max_new < 0) {
-            std::printf("ERR malformed GEN line\n");
-            std::fflush(stdout);
+            out.line("ERR malformed GEN line");
+            continue;
+        }
+        if (const std::string why = sp.check(opt.n_vocab); !why.empty()) {
+            out.line("ERR %s", why.c_str());
+            continue;
+        }
+        for (int32_t id : ids)
+            if (id < 0 || (opt.n_vocab > 0 && id >= opt.n_vocab)) {
+                bad = true;
+                break;
+            }
+        if (bad) {
+            out.line("ERR a token id outside the vocabulary");
             continue;
         }
         if ((int64_t) ids.size() + 1 > opt.max_ctx) {
-            std::printf("ERR the prompt (%zu tokens) does not fit the context (%lld)\n", ids.size(),
-                        (long long) opt.max_ctx);
-            std::fflush(stdout);
+            out.line("ERR the prompt (%zu tokens) does not fit the context (%lld)", ids.size(), (long long) opt.max_ctx);
             continue;
         }
         const size_t total = ids.size();
         if (in.stopped(gen_no)) {                     // stopped while queued: the state is not touched
-            std::printf("DONE 0 %zu 0.0 0.0 cancel 0 0 0 0 0 0 0 0.0 0 0\n", total);
-            std::fflush(stdout);
+            out.line("DONE 0 %zu 0.0 0.0 cancel 0 0 0 0 0 0 0 0.0 0 0", total);
             continue;
         }
         const auto t0 = Clock::now();
-        const int64_t hits0 = ev.hits(), look0 = ev.lookups();
+        heartbeat.active(true);
 
         std::string finish;
         size_t reuse = 0, at = 0;
         try {
             reuse = at = conv.prepare(ids);
-            if (reuse > 0) {
-                std::printf("RESUME %zu\n", reuse);
-                std::fflush(stdout);
-            }
+            if (reuse > 0) out.line("RESUME %zu", reuse);
             // a checkpoint at cp=<n> (the server's: before the generation prompt), else at the prompt's end
             int64_t ck = cp_at >= 0 ? cp_at : (int64_t) total;
             if (ck <= (int64_t) reuse || ck > (int64_t) total || ck < opt.checkpoint_min) ck = -1;
@@ -390,9 +462,8 @@ int serve_loop(Evaluator& ev, const ServeOptions& opt) {
                     if (done == total || std::chrono::duration<double>(Clock::now() - last_pp).count() >= 0.25) {
                         last_pp = Clock::now();
                         const double ms = ms_since(t0);
-                        std::printf("PP %zu %zu %.1f %.1f\n", done, total, ms,
-                                    ms > 0 ? (double) (done - reuse) * 1000.0 / ms : 0.0);
-                        std::fflush(stdout);
+                        out.line("PP %zu %zu %.1f %.1f", done, total, ms,
+                                 ms > 0 ? (double) (done - reuse) * 1000.0 / ms : 0.0);
                     }
                     return !in.stopped(gen_no);
                 });
@@ -406,13 +477,14 @@ int serve_loop(Evaluator& ev, const ServeOptions& opt) {
                 if (to == ck) conv.checkpoint();
             }
         } catch (const std::exception& e) {
-            std::printf("ERR %s\n", e.what());
-            std::fflush(stdout);
+            heartbeat.active(false);
+            out.line("ERR internal: %s", e.what());
             conv.discard();
             continue;
         }
         const double prompt_ms = ms_since(t0);
         const auto t1 = Clock::now();
+        const int64_t hits0 = ev.hits(), look0 = ev.lookups();   // the expert cache during decode
         long long produced = 0;
         if (finish.empty() && max_new == 0) finish = "length";
         if (finish.empty()) {
@@ -425,8 +497,7 @@ int serve_loop(Evaluator& ev, const ServeOptions& opt) {
                         if (!std::isfinite(v)) { nonfinite = true; break; }
                     if (nonfinite) { finish = "nonfinite"; break; }
                     const int32_t y = sampler.sample(conv.logits, hist);
-                    std::printf("T %d\n", y);
-                    std::fflush(stdout);
+                    out.line("T %d", y);
                     ++produced;
                     hist.push_back(y);
                     if (std::find(opt.eos_ids.begin(), opt.eos_ids.end(), y) != opt.eos_ids.end()) { finish = "stop"; break; }
@@ -436,18 +507,18 @@ int serve_loop(Evaluator& ev, const ServeOptions& opt) {
                     conv.append(&y, 1);
                 }
             } catch (const std::exception& e) {
-                std::printf("ERR %s\n", e.what());
-                std::fflush(stdout);
+                heartbeat.active(false);
+                out.line("ERR internal: %s", e.what());
                 conv.discard();
                 continue;
             }
         }
+        heartbeat.active(false);
         if (finish == "nonfinite") conv.discard();   // a state that produced NaN is not reused
         const double decode_ms = ms_since(t1);
-        std::printf("DONE %lld %zu %.1f %.1f %s 0 0 %zu %lld %lld 0 0 0.0 %zu 0\n", produced, total, prompt_ms,
-                    decode_ms, finish.c_str(), reuse, (long long) (ev.hits() - hits0),
-                    (long long) (ev.lookups() - look0), at - reuse);
-        std::fflush(stdout);
+        out.line("DONE %lld %zu %.1f %.1f %s 0 0 %zu %lld %lld 0 0 0.0 %zu 0", produced, total, prompt_ms, decode_ms,
+                 finish.c_str(), reuse, (long long) (ev.hits() - hits0), (long long) (ev.lookups() - look0),
+                 at - reuse);
         if (conv.enabled()) std::fprintf(stderr, "conversations: %s\n", conv.summary().c_str());
     }
     return 0;

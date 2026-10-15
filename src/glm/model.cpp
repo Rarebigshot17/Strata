@@ -6,9 +6,16 @@
 
 #include "ggml.h"
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
+
+#include <sys/mman.h>
+#include <unistd.h>
 
 namespace strata::glm {
 
@@ -273,6 +280,72 @@ void Model::resolve() {
             }
         }
     }
+}
+
+namespace {
+
+struct Range {
+    const uint8_t* p;
+    size_t n;
+};
+
+std::vector<Range> expert_ranges(const Model& m) {
+    std::vector<Range> out;
+    const Config& c = m.config();
+    for (int64_t il = 0; il < c.n_layer; ++il) {
+        if (c.is_dense(il)) continue;
+        const LayerWeights& w = m.layer(il);
+        for (const Tensor* t : {&w.gate_exps, &w.up_exps, &w.down_exps})
+            if (t->ok()) out.push_back({static_cast<const uint8_t*>(t->data), t->row_bytes() * (size_t) t->rows()});
+    }
+    return out;
+}
+
+}  // namespace
+
+size_t Model::expert_bytes() const {
+    size_t n = 0;
+    for (const Range& r : expert_ranges(*this)) n += r.n;
+    return n;
+}
+
+void Model::warm_experts(int threads, const std::function<void(size_t, size_t)>& progress) const {
+    // pieces of 64 MiB, taken by the threads in file order (the disk reads ahead along each)
+    const size_t piece = (size_t) 64 << 20;
+    std::vector<Range> pieces;
+    size_t total = 0;
+    for (const Range& r : expert_ranges(*this)) {
+        total += r.n;
+        for (size_t o = 0; o < r.n; o += piece) pieces.push_back({r.p + o, std::min(piece, r.n - o)});
+    }
+    if (pieces.empty()) return;
+    const size_t page = (size_t) std::max(4096L, sysconf(_SC_PAGESIZE));
+    std::atomic<size_t> next{0}, done{0};
+    auto work = [&] {
+        for (;;) {
+            const size_t i = next.fetch_add(1);
+            if (i >= pieces.size()) return;
+            const Range& r = pieces[i];
+            const uintptr_t a = (uintptr_t) r.p & ~(uintptr_t) (page - 1);
+            madvise((void*) a, r.n + ((uintptr_t) r.p - a), MADV_WILLNEED);
+            volatile uint8_t sink = 0;
+            for (size_t o = 0; o < r.n; o += page) sink = sink ^ r.p[o];
+            (void) sink;
+            done.fetch_add(r.n);
+        }
+    };
+    std::vector<std::thread> pool;
+    for (int t = 0; t < std::max(1, threads); ++t) pool.emplace_back(work);
+    auto last = std::chrono::steady_clock::now();
+    while (done.load() < total) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        if (progress && std::chrono::steady_clock::now() - last >= std::chrono::seconds(2)) {
+            last = std::chrono::steady_clock::now();
+            progress(done.load(), total);
+        }
+    }
+    for (auto& th : pool) th.join();
+    if (progress) progress(total, total);
 }
 
 }  // namespace strata::glm

@@ -41,6 +41,7 @@ struct RefEvaluator : strata::glm::Evaluator {
     void reset() override { r.reset(); }
     const std::vector<float>& eval(int32_t t) override { return r.eval(t); }
     int64_t pos() const override { return r.pos(); }
+    uint64_t ticks() const override { return r.ticks(); }
     bool can_snapshot() const override { return true; }
     std::shared_ptr<strata::glm::Snapshot> snapshot(bool full) override { return r.snapshot(full); }
     size_t snapshot_bytes(bool full) const override { return r.snapshot_bytes(full); }
@@ -60,7 +61,7 @@ int usage() {
                  "usage: strata-glm-ref -m MODEL.gguf --tokens-file IDS.txt --out LOGITS.bin\n"
                  "                      [--threads N] [--dump-layers PATH] [--max-tokens N]\n"
                  "       strata-glm-ref -m MODEL.gguf --serve [--ctx N] [--eos-ids A,B] [--threads N]\n"
-                 "                      [--park-mib N] [--checkpoint-min N]\n");
+                 "                      [--park-mib N] [--checkpoint-min N] [--no-warm]\n");
     return 2;
 }
 
@@ -84,6 +85,7 @@ int main(int argc, char** argv) {
         else if ((a == "--threads" || a == "-t") && (v = next())) threads = std::atoi(v);
         else if (a == "--max-tokens" && (v = next())) max_tokens = std::atoll(v);
         else if (a == "--serve") serve = true;
+        else if (a == "--no-warm") {}                 // strata-glm's option; nothing to warm here
         else if (a == "--ctx" && (v = next())) ctx = std::atoll(v);
         else if (a == "--eos-ids" && (v = next())) eos = parse_ids_list(v);
         else if (a == "--park-mib" && (v = next())) so.park_bytes = (size_t) (std::max(0.0, std::atof(v)) * 1048576.0);
@@ -96,6 +98,7 @@ int main(int argc, char** argv) {
             strata::glm::CpuRef ref(model, ctx, threads);
             RefEvaluator ev(ref);
             so.max_ctx = ctx;
+            so.n_vocab = model.config().n_vocab;
             so.eos_ids = eos;
             so.info.push_back("backend=cpu-reference");
             return strata::glm::serve_loop(ev, so);

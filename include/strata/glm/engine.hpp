@@ -11,6 +11,7 @@
 #include "strata/glm/model.hpp"
 #include "strata/glm/snapshot.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -55,6 +56,10 @@ public:
     int64_t cache_hits() const;
     int64_t cache_lookups() const;
     std::string cache_summary() const;
+    int64_t cache_slots() const;          ///< expert slots over every device
+    size_t cache_bytes() const;           ///< the VRAM they take
+    /// Counts layers run, from any thread: it moves while the engine works (serve_loop's heartbeat).
+    uint64_t ticks() const { return ticks_.load(std::memory_order_relaxed); }
     /// Writes the expert use profile (when --expert-profile names a file).
     void save_profile() const;
 
@@ -65,6 +70,7 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
     int64_t pos_ = 0;
+    std::atomic<uint64_t> ticks_{0};
     std::vector<std::string> placement_;
 };
 

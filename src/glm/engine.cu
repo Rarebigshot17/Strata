@@ -276,6 +276,10 @@ int64_t GpuEngine::cache_hits() const { return impl_->cache->hits(); }
 
 int64_t GpuEngine::cache_lookups() const { return impl_->cache->lookups(); }
 
+int64_t GpuEngine::cache_slots() const { return impl_->cache->total_slots(); }
+
+size_t GpuEngine::cache_bytes() const { return impl_->cache->total_bytes(); }
+
 void GpuEngine::save_profile() const { impl_->cache->save_profile(); }
 
 GpuEngine::~GpuEngine() {
@@ -449,6 +453,7 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
 
     int cur = I.ctx_of_layer[0];
     for (int64_t il = 0; il < c.n_layer; ++il) {
+        ticks_.fetch_add(1, std::memory_order_relaxed);
         const int ci = I.ctx_of_layer[(size_t) il];
         if (ci != cur) {                                  // the residual streams move to the next device
             DevCtx& from = I.ctx[(size_t) cur];

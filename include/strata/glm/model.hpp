@@ -9,6 +9,7 @@
 #include "strata/artifact/gguf_reader.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -140,6 +141,12 @@ public:
     const Tensor& output_norm() const { return output_norm_; }
     const Tensor& output() const { return output_; }
     const strata::GgufModel& gguf() const { return *gguf_; }
+    /// The routed experts' bytes (most of the file).
+    size_t expert_bytes() const;
+    /// Reads every routed expert once, so they sit in the page cache: the experts are mapped from the file, and
+    /// the first prompt after a start would otherwise fault them in from disk while it runs. `progress(done,
+    /// total)` is called every couple of seconds from the calling thread.
+    void warm_experts(int threads, const std::function<void(size_t, size_t)>& progress) const;
 
 private:
     Tensor get(const std::string& name, std::vector<int64_t> shape, bool required = true) const;

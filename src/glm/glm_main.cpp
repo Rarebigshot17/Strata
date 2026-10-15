@@ -64,6 +64,7 @@ struct GpuEvaluator : strata::glm::Evaluator {
     const std::vector<float>& eval(int32_t t) override { return e.eval(t); }
     int64_t hits() const override { return e.cache_hits(); }
     int64_t lookups() const override { return e.cache_lookups(); }
+    uint64_t ticks() const override { return e.ticks(); }
     int64_t pos() const override { return e.pos(); }
     const std::vector<float>& prefill(const int32_t* ids, int64_t n,
                                       const std::function<bool(int64_t)>& progress) override {
@@ -81,7 +82,7 @@ int usage() {
                  "                  [--devices 0,1,2] [--split 24,12,10] [--threads N] [--check-cpu]\n"
                  "                  [--max-tokens N] [--vram-reserve GB] [--expert-profile PATH]\n"
                  "                  [--max-swaps N] [--no-expert-cache] [--prefill] [--prefill-chunk N]\n"
-                 "       strata-glm -m MODEL.gguf --serve [--ctx N] [--eos-ids A,B] [--park-mib N]\n"
+                 "       strata-glm -m MODEL.gguf --serve [--ctx N] [--eos-ids A,B] [--park-mib N] [--no-warm]\n"
                  "                  [--checkpoint-min N] [same GPU and cache options]\n");
     return 2;
 }
@@ -91,7 +92,7 @@ int usage() {
 int main(int argc, char** argv) {
     std::string model_path, ids_path, out_path;
     strata::glm::EngineOptions opt;
-    bool check_cpu = false, serve = false, use_prefill = false;
+    bool check_cpu = false, serve = false, use_prefill = false, warm = true;
     long long max_tokens = 0;
     std::vector<int32_t> eos;
     strata::glm::ServeOptions so;
@@ -113,6 +114,7 @@ int main(int argc, char** argv) {
         else if (a == "--max-swaps" && (v = next())) opt.cache.max_swaps_per_token = std::atoi(v);
         else if (a == "--no-expert-cache") opt.cache.disabled = true;
         else if (a == "--serve") serve = true;
+        else if (a == "--no-warm") warm = false;
         else if (a == "--prefill") use_prefill = true;
         else if (a == "--prefill-chunk" && (v = next())) opt.prefill_chunk = std::atoi(v);
         else if (a == "--eos-ids" && (v = next())) eos = parse_list<int32_t>(v);
@@ -125,10 +127,23 @@ int main(int argc, char** argv) {
             strata::glm::Model model(model_path);
             strata::glm::GpuEngine eng(model, opt);
             for (const auto& line : eng.placement()) std::fprintf(stderr, "%s\n", line.c_str());
+            if (warm) {
+                // the experts into the page cache before READY, so the first prompt does not read them from disk
+                const auto w0 = std::chrono::steady_clock::now();
+                const int threads = opt.cpu_threads > 0 ? std::min(opt.cpu_threads, 16) : 8;
+                model.warm_experts(threads, [&](size_t done, size_t total) {
+                    const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - w0).count();
+                    std::fprintf(stderr, "warming the experts: %.1f of %.1f GB (%.0f s, %.2f GB/s)\n", done / 1e9,
+                                 total / 1e9, s, s > 0 ? done / 1e9 / s : 0.0);
+                });
+            }
             GpuEvaluator ev(eng);
             so.max_ctx = opt.max_ctx;
+            so.n_vocab = model.config().n_vocab;
             so.eos_ids = eos;
             so.info.push_back("backend=cuda");
+            so.info.push_back("expert_slots=" + std::to_string(eng.cache_slots()));
+            so.info.push_back("expert_cache_mib=" + std::to_string(eng.cache_bytes() >> 20));
             const int rc = strata::glm::serve_loop(ev, so);
             eng.save_profile();
             return rc;

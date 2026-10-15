@@ -224,6 +224,18 @@ void ExpertCache::save_profile() const {
     std::rename(tmp.c_str(), opt_.profile.c_str());
 }
 
+int64_t ExpertCache::total_slots() const {
+    int64_t n = 0;
+    for (const auto& s : L_) n += s.n_slots;
+    return n;
+}
+
+size_t ExpertCache::total_bytes() const {
+    size_t b = 0;
+    for (const auto& s : L_) b += (size_t) s.n_slots * s.blob;
+    return b;
+}
+
 std::string ExpertCache::summary() const {
     int64_t slots = 0, layers = 0;
     size_t bytes = 0;

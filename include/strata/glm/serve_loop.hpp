@@ -1,17 +1,21 @@
 // include/strata/glm/serve_loop.hpp - the engine side of serve/'s line protocol, for GLM-5.3-Flash.
 //
-// The engine stays resident and takes requests on stdin; serve/glm_server.py (and Strata's own server) drive it:
+// The engine stays resident and takes requests on stdin; serve/server.py drives it (docs/GLM53_SERVER_PORT.md):
 //
-//   -> GEN <max_new> [key=value ...] <id,id,...>     generate after these prompt tokens
+//   -> GEN <max_new> [cp=<n>] [logit_bias=id:v,...] [key=value ...] <id,id,...>
+//                                                    generate after these prompt tokens (sampler.hpp's keys)
 //   <- RESUME <n>                                    n prompt tokens were already in the state and are not read again
-//   <- PP <done> <total> <ms> <tok/s>                prompt progress, one line per chunk
-//   <- T <id>                                        a generated token
+//   <- PP <done> <total> <ms> <tok/s>                prompt progress, at most 4 a second and once at the end
+//   <- HB                                            still working (a long prompt chunk): only while it progresses
+//   <- T <id>                                        a generated token (an end-of-turn id too, then DONE stop)
 //   <- DONE <generated> <prompt> <prompt ms> <decode ms> <finish> 0 0 <reused> <hits> <lookups> 0 0 0.0 <read> 0
-//   <- ERR <reason>
+//                                                    hits/lookups: the expert cache during decode
+//   <- ERR <reason>                                  the request is refused; no DONE follows
+//   <- ERR internal: <what>                          the engine failed; the state is discarded; no DONE follows
 //   -> STOP                                          end the last GEN's request, even still queued (finish "cancel")
-//   -> QUIT
+//   -> QUIT                                          read between requests
 //
-// At start it prints `INFO key=value ...` lines and `READY <context> stop`.
+// At start it prints `INFO engine=<version> eos=<n> park_mib=<n> logit_bias=1 ...` and `READY <context> stop`.
 //
 // CONVERSATIONS. The KDA layers' state cannot be rewound, so a prompt can only continue a state whose tokens are
 // its prefix. Several clients (agents, a chat, a bot) take turns, so the loop keeps their conversations: switching
@@ -20,8 +24,6 @@
 // or at its end without one, when that is at least checkpoint_min tokens in: the server puts it before the
 // generation prompt, so the next turn (which re-renders the last reply) or a regenerated reply restarts there
 // rather than at 0. Least recently used conversations, then old checkpoints, are dropped beyond park_bytes.
-//
-//   -> GEN <max_new> [cp=<n>] [key=value ...] <ids>
 #pragma once
 
 #include "strata/glm/snapshot.hpp"
@@ -55,6 +57,8 @@ public:
     virtual int64_t pos() const = 0;
     virtual int64_t hits() const { return 0; }
     virtual int64_t lookups() const { return 0; }
+    /// A counter that moves while the engine works, read from another thread (0 forever: no heartbeats).
+    virtual uint64_t ticks() const { return 0; }
     /// Saving and restoring the state (snapshot.hpp). Without them only the live conversation is kept.
     virtual bool can_snapshot() const { return false; }
     /// What snapshot(full) would hold now, logits not included (so the loop can skip one that cannot be kept).
@@ -63,13 +67,19 @@ public:
     virtual void restore(const Snapshot& /*s*/) {}
 };
 
+#ifndef STRATA_VERSION
+#define STRATA_VERSION "0.0.0"
+#endif
+
 struct ServeOptions {
     int64_t max_ctx = 0;
+    int64_t n_vocab = 0;                    ///< token ids must be below it (0: not checked)
+    std::string version = STRATA_VERSION;   ///< INFO engine=
     size_t park_bytes = (size_t) 8 << 30;   ///< host memory for parked conversations and checkpoints; 0: none
     int64_t checkpoint_min = 256;           ///< no checkpoint closer than this to the start
     int max_checkpoints = 2;                ///< per conversation, the latest kept
     std::vector<int32_t> eos_ids;
-    std::vector<std::string> info;   ///< extra INFO key=value pairs
+    std::vector<std::string> info;   ///< extra INFO key=value pairs (backend, expert cache figures)
 };
 
 /// Runs until QUIT or the end of stdin. Returns the process exit code.

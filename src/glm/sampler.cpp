@@ -9,7 +9,41 @@
 
 namespace strata::glm {
 
+namespace {
+
+/// `id:value,id:value`, the Qwen engine's rules: values -100..100, -100 a ban, no duplicate ids.
+std::string parse_bias(const std::string& text, std::vector<std::pair<int32_t, float>>& out) {
+    out.clear();
+    if (text.empty()) return "empty logit_bias";
+    const char* p = text.c_str();
+    for (;;) {
+        if (*p < '0' || *p > '9') return "invalid logit_bias token ID";
+        char* end = nullptr;
+        const unsigned long id = std::strtoul(p, &end, 10);
+        if (*end != ':' || id > 0x7fffffffUL) return "logit_bias ID too large or missing ':'";
+        p = end + 1;
+        const float value = std::strtof(p, &end);
+        if (end == p || !std::isfinite(value) || value < -100 || value > 100 || (*end && *end != ','))
+            return "invalid logit_bias value (expected -100..100)";
+        out.emplace_back((int32_t) id, value);
+        if (!*end) break;
+        p = end + 1;
+    }
+    std::vector<int32_t> ids;
+    for (const auto& b : out) ids.push_back(b.first);
+    std::sort(ids.begin(), ids.end());
+    if (std::adjacent_find(ids.begin(), ids.end()) != ids.end()) return "logit_bias ID duplicated";
+    return "";
+}
+
+}  // namespace
+
 bool SamplingParams::set(const std::string& key, const std::string& value) {
+    if (key == "logit_bias") {
+        bias_error = parse_bias(value, logit_bias);
+        if (!bias_error.empty()) logit_bias.clear();
+        return true;
+    }
     const double v = std::atof(value.c_str());
     if (key == "temperature") temperature = (float) v;
     else if (key == "top_p") top_p = (float) v;
@@ -26,11 +60,26 @@ bool SamplingParams::set(const std::string& key, const std::string& value) {
     return true;
 }
 
+std::string SamplingParams::check(int64_t n_vocab) const {
+    if (!bias_error.empty()) return bias_error;
+    int64_t banned = 0;
+    for (const auto& [id, v] : logit_bias) {
+        if (id < 0 || id >= n_vocab) return "logit_bias ID outside the vocabulary";
+        banned += v <= -100;
+    }
+    if (n_vocab > 0 && banned >= n_vocab) return "logit_bias bans the entire vocabulary";
+    return "";
+}
+
 Sampler::Sampler(const SamplingParams& p) : p_(p), rng_(p.has_seed ? p.seed : std::random_device{}()) {}
 
 int32_t Sampler::sample(const std::vector<float>& logits_in, const std::vector<int32_t>& history) {
     std::vector<float> logits = logits_in;
     const int64_t n = (int64_t) logits.size();
+
+    // logit bias, before the penalties (as the Qwen engine and llama.cpp apply it)
+    for (const auto& [id, v] : p_.logit_bias)
+        if (id >= 0 && id < n) logits[(size_t) id] = v <= -100 ? -INFINITY : logits[(size_t) id] + v;
 
     // penalties over the last penalty_last_n tokens (llama.cpp's penalties sampler)
     if (p_.penalty_repeat != 1.0f || p_.penalty_freq != 0.0f || p_.penalty_present != 0.0f) {
@@ -46,47 +95,101 @@ int32_t Sampler::sample(const std::vector<float>& logits_in, const std::vector<i
         }
     }
 
-    if (p_.temperature <= 0.0f)
-        return (int32_t) (std::max_element(logits.begin(), logits.end()) - logits.begin());
+    const int32_t best = (int32_t) (std::max_element(logits.begin(), logits.end()) - logits.begin());
+    if (p_.temperature <= 0.0f) return best;
+    const double mx = logits[(size_t) best];
+    auto by_logit = [&](int32_t a, int32_t b) { return logits[(size_t) a] > logits[(size_t) b]; };
+    auto weight = [&](int32_t i, double temp) { return std::exp(((double) logits[(size_t) i] - mx) / temp); };
 
-    // candidates, best first
-    std::vector<int32_t> idx((size_t) n);
-    std::iota(idx.begin(), idx.end(), 0);
-    int64_t keep = n;
-    if (p_.top_k > 0 && p_.top_k < n) keep = p_.top_k;
-    std::partial_sort(idx.begin(), idx.begin() + keep, idx.end(),
-                      [&](int32_t a, int32_t b) { return logits[(size_t) a] > logits[(size_t) b]; });
-    idx.resize((size_t) keep);
+    // candidates, best first. `idx` stays empty while every token is still a candidate, in vocabulary order.
+    std::vector<int32_t> idx;
+    if (p_.top_k > 0 && p_.top_k < n) {
+        idx.resize((size_t) n);
+        std::iota(idx.begin(), idx.end(), 0);
+        std::partial_sort(idx.begin(), idx.begin() + p_.top_k, idx.end(), by_logit);
+        idx.resize((size_t) p_.top_k);
+    }
 
-    // probabilities of the kept candidates at temperature 1, for top-p and min-p
-    auto probs_of = [&](const std::vector<int32_t>& cand, float temp) {
-        std::vector<double> pr(cand.size());
-        const double mx = logits[(size_t) cand[0]];
-        double sum = 0;
-        for (size_t i = 0; i < cand.size(); ++i) sum += (pr[i] = std::exp((logits[(size_t) cand[i]] - mx) / temp));
-        for (auto& v : pr) v /= sum;
-        return pr;
-    };
+    // top-p over the candidates' probabilities at temperature 1: the most likely ones, down to and including
+    // the one that brings their sum to top_p
     if (p_.top_p < 1.0f) {
-        const auto pr = probs_of(idx, 1.0f);
-        double acc = 0;
-        size_t cut = idx.size();
-        for (size_t i = 0; i < idx.size(); ++i) {
-            acc += pr[i];
-            if (acc >= p_.top_p) {
-                cut = i + 1;
-                break;
+        if (!idx.empty()) {                              // top-k sorted them already
+            double sum = 0;
+            for (int32_t i : idx) sum += weight(i, 1.0);
+            double acc = 0;
+            size_t cut = idx.size();
+            for (size_t i = 0; i < idx.size(); ++i) {
+                acc += weight(idx[i], 1.0) / sum;
+                if (acc >= p_.top_p) { cut = i + 1; break; }
             }
+            idx.resize(std::max<size_t>(cut, 1));
+        } else {
+            // every token is a candidate. Bucket them by how far below the best logit they are, take whole
+            // buckets while their sum stays under top_p, and sort only the bucket where it crosses.
+            constexpr int B = 2048;
+            constexpr double SPAN = 40.0;                // logits more than 40 below the best: the last bucket
+            std::vector<double> w((size_t) n), mass(B, 0.0);
+            std::vector<int32_t> bucket((size_t) n);
+            double sum = 0;
+            for (int64_t i = 0; i < n; ++i) {
+                const double d = mx - (double) logits[(size_t) i];
+                const int b = std::isfinite(d) ? (int) std::min<double>(B - 1, d * (B / SPAN)) : B - 1;
+                sum += (w[(size_t) i] = std::exp(-d));
+                mass[(size_t) b] += w[(size_t) i];
+                bucket[(size_t) i] = b;
+            }
+            const double target = p_.top_p * sum;
+            double before = 0;
+            int cross = B - 1;
+            for (int b = 0; b < B; ++b) {
+                if (before + mass[(size_t) b] >= target) { cross = b; break; }
+                before += mass[(size_t) b];
+            }
+            std::vector<int32_t> edge;
+            for (int64_t i = 0; i < n; ++i) {
+                if (bucket[(size_t) i] < cross) idx.push_back((int32_t) i);
+                else if (bucket[(size_t) i] == cross) edge.push_back((int32_t) i);
+            }
+            std::sort(edge.begin(), edge.end(), by_logit);
+            for (int32_t i : edge) {
+                idx.push_back(i);
+                if ((before += w[(size_t) i]) >= target) break;
+            }
+            if (idx.empty()) idx.push_back(best);
         }
-        idx.resize(std::max<size_t>(cut, 1));
     }
+
+    // min-p: the candidates at least min_p times as likely as the best one
     if (p_.min_p > 0.0f) {
-        const auto pr = probs_of(idx, 1.0f);
-        size_t cut = 1;
-        while (cut < idx.size() && pr[cut] >= p_.min_p * pr[0]) ++cut;
-        idx.resize(cut);
+        if (idx.empty()) {
+            for (int64_t i = 0; i < n; ++i)
+                if (weight((int32_t) i, 1.0) >= p_.min_p) idx.push_back((int32_t) i);
+        } else {
+            std::vector<int32_t> kept;
+            for (int32_t i : idx)
+                if (weight(i, 1.0) >= p_.min_p) kept.push_back(i);   // the best token is always a candidate
+            idx = std::move(kept);
+        }
+        if (idx.empty()) idx.push_back(best);
     }
-    const auto pr = probs_of(idx, p_.temperature);
+
+    // the draw at the temperature
+    const double temp = p_.temperature;
+    if (idx.empty()) {                                   // every token: the distribution as it is
+        std::vector<double> w((size_t) n);
+        double total = 0;
+        for (int64_t i = 0; i < n; ++i) total += (w[(size_t) i] = weight((int32_t) i, temp));
+        double r = std::uniform_real_distribution<double>(0.0, total)(rng_);
+        int32_t last = best;
+        for (int64_t i = 0; i < n; ++i) {
+            if (w[(size_t) i] <= 0) continue;
+            last = (int32_t) i;
+            if ((r -= w[(size_t) i]) < 0) return (int32_t) i;
+        }
+        return last;
+    }
+    std::vector<double> pr(idx.size());
+    for (size_t i = 0; i < idx.size(); ++i) pr[i] = weight(idx[i], temp);
     std::discrete_distribution<size_t> dist(pr.begin(), pr.end());
     return idx[dist(rng_)];
 }

@@ -71,6 +71,8 @@ public:
     int64_t hits() const { return hits_; }
     int64_t lookups() const { return lookups_; }
     std::string summary() const;
+    int64_t total_slots() const;
+    size_t total_bytes() const;
 
 private:
     void load(int64_t il, int e, int s);

@@ -214,6 +214,7 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
 
     int cur = I.ctx_of_layer[0];
     for (int64_t il = 0; il < c.n_layer; ++il) {
+        ticks_.fetch_add(1, std::memory_order_relaxed);
         const int ci = I.ctx_of_layer[(size_t) il];
         if (ci != cur) {
             DevCtx& from = I.ctx[(size_t) cur];
