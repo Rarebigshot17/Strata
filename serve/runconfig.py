@@ -15,27 +15,28 @@ import shutil
 from pathlib import Path
 
 # (key, kind, help).  kind: "bool", "int>=0", "num>=0", ("enum", values), "names", or ("sampling", check) for a key
-# of the "sampling" block, ("arg", flag) for an engine option kept in "args".
+# of the "sampling" block, ("arg", flag, check) for an engine option kept in "args" ("int>=0" or "num>=0").
 EDITABLE = [
     ("sampling.temperature", ("sampling", "num>=0"),
-     "Default temperature for requests that send none (0 = greedy, the default without a sampling block)"),
-    ("sampling.top_p", ("sampling", "0<x<=1"), "Default top_p for requests that send none"),
-    ("sampling.top_k", ("sampling", "1..64"), "Default top_k for requests that send none (1-64)"),
+     "Default temperature for requests that send none (0 = greedy; empty: 1.0)"),
+    ("sampling.top_p", ("sampling", "0<x<=1"), "Default top_p for requests that send none (empty: 0.95)"),
+    ("sampling.top_k", ("sampling", "int>=0"), "Default top_k for requests that send none (0 = off)"),
     ("sampling.min_p", ("sampling", "0<=x<=1"), "Default min_p for requests that send none"),
     ("reasoning_budget_tokens", "int>=0", "Cap the thinking of every request at this many tokens (0 or empty: no cap)"),
     ("fit_max_tokens", "bool", "Shorten a max_tokens that does not fit the context instead of answering 400"),
     ("anthropic_thinking", ("enum", ["model", "on_request"]),
      "Anthropic requests that do not ask for thinking: think as the model does (model) or not (on_request)"),
-    ("effort_position", ("enum", ["start", "end"]),
-     "Where a non-default reasoning effort goes: start (the default) or end (keeps the cache when it changes)"),
     ("aliases", "names", "Other model names the server lists and answers to (comma-separated)"),
     ("idle_unload_s", "num>=0", "Unload the model after this many seconds without requests (0 or empty: never)"),
-    ("lazy_load", "bool", "Start without loading the model; the first request loads it (text only)"),
+    ("lazy_load", "bool", "Start without loading the model; the first request loads it"),
     ("engine_silence_s", "num>=0", "End a request when the engine says nothing for this long (default 300 s, 0 = wait)"),
     ("api_monitor", "bool", "Keep the last 100 requests' prompts and answers in memory for /api-monitor"),
     ("open_browser", "bool", "Open the chat page in the browser when the model is ready"),
-    ("vram_reserve_mib", ("arg", "--vram-reserve-mib"),
-     "VRAM in MiB the engine leaves free for other programs (engine default 700)"),
+    ("vram_reserve_gb", ("arg", "--vram-reserve", "num>=0"),
+     "VRAM in GB the engine leaves free on each GPU after its expert cache (engine default 1)"),
+    ("park_mib", ("arg", "--park-mib", "int>=0"),
+     "RAM in MiB for parked conversations and checkpoints, so a chat resumes without reading it again "
+     "(engine default 8192, 0 = none)"),
 ]
 SPEC = {k: kind for k, kind, _ in EDITABLE}
 
@@ -44,7 +45,12 @@ def _arg(cfg: dict, flag: str):
     a = cfg.get("args") if isinstance(cfg.get("args"), list) else []
     if flag in a[:-1]:
         v = str(a[a.index(flag) + 1])
-        return int(v) if v.isdigit() else v
+        if v.isdigit():
+            return int(v)
+        try:
+            return float(v)
+        except ValueError:
+            return v
     return None
 
 
@@ -78,7 +84,7 @@ def _number(key, v, whole=False, lo=0.0, hi=None, lo_open=False):
     return int(v) if whole else v
 
 
-def check(key: str, v, cfg: dict):
+def check(key: str, v):
     """The value to store for `key`, or a ValueError naming what is expected.  None removes the key (its default)."""
     if key not in SPEC:
         raise ValueError(f"{key!r} cannot be changed here (only the keys the Settings view lists)")
@@ -89,8 +95,6 @@ def check(key: str, v, cfg: dict):
     if k == "bool":
         if not isinstance(v, bool):
             raise ValueError(f"{key}: expected true or false, not {v!r}")
-        if key == "lazy_load" and v and cfg.get("vision"):
-            raise ValueError("lazy_load: lazy loading is text-only, and this model reads images (\"vision\")")
         return v
     if k == "enum":
         if v not in kind[1]:
@@ -107,7 +111,7 @@ def check(key: str, v, cfg: dict):
     if k == "num>=0":
         return _number(key, v)
     if k == "arg":
-        return _number(key, v, whole=True)
+        return _number(key, v, whole=kind[2] == "int>=0")
     rule = kind[1]                                     # a sampling key: the server's own rules
     if rule == "num>=0":
         return float(_number(key, v))
@@ -115,7 +119,7 @@ def check(key: str, v, cfg: dict):
         return float(_number(key, v, hi=1, lo_open=True))
     if rule == "0<=x<=1":
         return float(_number(key, v, hi=1))
-    return _number(key, v, whole=True, lo=1, hi=64)
+    return _number(key, v, whole=True)
 
 
 def apply(cfg: dict, changes: dict) -> tuple[dict, list[str]]:
@@ -123,7 +127,7 @@ def apply(cfg: dict, changes: dict) -> tuple[dict, list[str]]:
     first, so a request with one bad value changes nothing (ValueError)."""
     if not isinstance(changes, dict) or not changes:
         raise ValueError('send {"set": {"<key>": <value or null>, ...}}')
-    checked = {k: check(k, v, cfg) for k, v in changes.items()}
+    checked = {k: check(k, v) for k, v in changes.items()}
     new = json.loads(json.dumps(cfg))                  # a deep copy: the caller's dict is left alone
     changed = []
     for key, v in checked.items():
