@@ -1,5 +1,5 @@
 name: Question
-description: Ask how to use Strata, or share a result
+description: Ask how to use Strata with GLM-5.3-Flash, or share a result
 title: "Question: "
 labels: ["question"]
 body:
@@ -10,13 +10,13 @@ body:
     id: question
     attributes:
       label: Your question
-      description: What you're trying to do. Include your version, GPU, and OS if it affects the answer.
+      description: What you're trying to do. Include your version, GPUs, RAM and OS if it affects the answer.
     validations:
       required: true
   - type: textarea
     id: numbers
     attributes:
       label: Results (optional)
-      description: Only if you ran a benchmark or measured speed. Model, quant, context, and the tok/s you get.
+      description: Only if you ran a benchmark or measured speed. Quant (3-bit or 4-bit), context, GPUs and RAM, and the tok/s you get.
     validations:
       required: false

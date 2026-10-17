@@ -1,5 +1,5 @@
 name: Bug report
-description: Something in Strata doesn't work as documented
+description: Something in Strata (GLM-5.3-Flash on Linux and NVIDIA) doesn't work as documented
 title: "[Bug]: "
 labels: ["bug"]
 body:
@@ -7,7 +7,7 @@ body:
     value: |
       Thanks for the report.
 
-      Please search the [open issues](https://github.com/Niko1221/Strata/issues?q=is%3Aissue+state%3Aopen) first — this may already be tracked.
+      Please search the [open issues](https://github.com/Rarebigshot17/Strata/issues?q=is%3Aissue+state%3Aopen) first — this may already be tracked.
   - type: textarea
     id: what
     attributes:
@@ -18,20 +18,20 @@ body:
   - type: input
     id: hardware
     attributes:
-      label: Strata version, GPU, OS
-      description: The engine version is on the About tab, or in `GET /v1/status` under `engine`.
-      placeholder: "0.1.31 · RTX 5070 12GB · Windows 11"
+      label: Strata version, quant, GPUs, RAM, OS
+      description: The engine version is on the About tab, or in `GET /v1/status` under `engine`. The quant is 3-bit or 4-bit.
+      placeholder: "0.2.0 · 3-bit · 3x RTX 3090 24GB · 192 GB RAM · Ubuntu 24.04"
     validations:
       required: true
   - type: textarea
     id: log
     attributes:
       label: Engine log
-      description: Drag in `strata-<model>.log` from your Strata folder. Drag and drop works directly into this box.
+      description: Drag in `strata-<model>.log` from your Strata folder, or paste the server's terminal output. Drag and drop works directly into this box.
     validations:
       required: false
   - type: markdown
     value: |
       A couple of extras that help a lot:
 
-      - Check the [troubleshooting table](https://github.com/Niko1221/Strata/blob/main/docs/DETAILS.md#troubleshooting) first, many reports are already solved there.
+      - Check the [README](https://github.com/Rarebigshot17/Strata#readme) first: what GLM-5.3-Flash needs (NVIDIA GPUs, 120-170 GB of RAM) and how to start it are there.
