@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import threading
+import time
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -38,19 +39,26 @@ class TemplateRequestError(jinja2.exceptions.TemplateError, ValueError):
 
 
 class ChatTemplate:
-    """The model's chat template, rendered with the same Jinja settings as transformers' apply_chat_template."""
+    """The model's chat template, rendered with the same Jinja settings as transformers' apply_chat_template.
+    `path`: a template file; `source`: the template's text (the GGUF's tokenizer.chat_template)."""
 
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path | None = None, *, source: str | None = None):
         def raise_exception(message):
             raise TemplateRequestError(message)
 
         def tojson(x, ensure_ascii=False, indent=None, separators=None, sort_keys=False):
             return json.dumps(x, ensure_ascii=ensure_ascii, indent=indent, separators=separators, sort_keys=sort_keys)
 
+        if source is None:
+            if path is None:
+                raise ValueError("ChatTemplate needs a template file or the template's text")
+            source = Path(path).read_text(encoding="utf-8")
         env = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True, extensions=["jinja2.ext.loopcontrols"])
         env.filters["tojson"] = tojson
         env.globals["raise_exception"] = raise_exception
-        self.source = Path(path).read_text(encoding="utf-8")
+        # transformers gives templates the date this way (a system prompt that states today's date)
+        env.globals["strftime_now"] = lambda fmt: time.strftime(fmt)
+        self.source = source
         self.template = env.from_string(self.source)
         self.caps = self._detect_caps()
 
