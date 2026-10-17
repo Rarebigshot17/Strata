@@ -20,7 +20,7 @@ from serve.frontend import ChatTemplate
 from serve.server import ByteTokenizer, MockEngine, Service, serve
 
 ROOT = Path(__file__).resolve().parents[1]
-CFG = {"exe": "build/strata-glm", "args": ["-m", "models/model-00001-of-00004.gguf", "--ctx", "65536", "--threads", "32"],
+CFG = {"exe": "build/strata-glm", "args": ["-m", "models/model-00001-of-00004.gguf", "--ctx", "65536"],
        "model_name": "glm-q3", "port": 8101, "host": "0.0.0.0", "api_key": "",
        "sampling": {"temperature": 0.7, "presence_penalty": 1.5},
        "mcp_servers": {"files": {"command": "npx", "args": ["-y", "server-filesystem", "."]}},
