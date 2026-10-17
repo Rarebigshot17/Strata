@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
-"""A tiny terminal chat for a running Strata server (start it with run-<model>.bat / run-<model>.sh first).
+"""A tiny terminal chat for a running Strata server (start it with ./setup.sh or run-<model>.sh first).
 
-    python chat.py [--port 8080] [--think none|low|medium|high]
+    python chat.py [--port 8101] [--think on|off]
 
-Type a message and press Enter.  /image <path> attaches a picture to your next message (when the server was set up
-with images), /think <none|low|medium|high> sets how long the model thinks first, /reset starts a new conversation,
-/quit leaves.  Standard library only.
+Type a message and press Enter.  /think on|off turns the model's thinking before it answers on or off, /reset
+starts a new conversation, /quit leaves.  Standard library only.
 """
 from __future__ import annotations
 
 import argparse
-import base64
 import json
-import mimetypes
-import os
 import sys
 import time
 import urllib.request
 
 
+# GLM thinks or does not: the server reads any effort level as "on" and none as "off"
+EFFORT = {"on": "medium", "off": "none"}
+
+
 def stream(url, messages, think, max_tokens):
     body = {"model": "strata", "messages": messages, "stream": True, "max_tokens": max_tokens,
-            "reasoning_effort": think}
+            "reasoning_effort": EFFORT[think]}
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=3600) as r:
         for raw in r:
@@ -34,19 +34,18 @@ def stream(url, messages, think, max_tokens):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--port", type=int, default=8080)
+    ap.add_argument("--port", type=int, default=8101)
     ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--think", default="medium", choices=["none", "low", "medium", "high"],
-                    help="how long the model thinks before answering (none = answer directly)")
-    ap.add_argument("--no-think", action="store_true", help="same as --think none")
+    ap.add_argument("--think", default="on", choices=["on", "off"],
+                    help="whether the model thinks before answering (off = answer directly)")
+    ap.add_argument("--no-think", action="store_true", help="same as --think off")
     ap.add_argument("--max-tokens", type=int, default=4096)
     a = ap.parse_args()
     url = f"http://{a.host}:{a.port}/v1/chat/completions"
     gray, reset = ("\033[90m", "\033[0m") if sys.stdout.isatty() else ("", "")
-    messages, pending = [], []
-    think = "none" if a.no_think else a.think
-    print(f"Strata chat ({url}).  /image <path> = attach a picture, /think none|low|medium|high (now: {think}), "
-          f"/reset = new conversation, /quit = leave.")
+    messages = []
+    think = "off" if a.no_think else a.think
+    print(f"Strata chat ({url}).  /think on|off (now: {think}), /reset = new conversation, /quit = leave.")
     while True:
         try:
             user = input("\nyou> ").strip()
@@ -56,34 +55,20 @@ def main() -> int:
         if user in ("/quit", "/exit"):
             return 0
         if user == "/reset":
-            messages, pending = [], []
+            messages = []
             print("(new conversation)")
             continue
         if user.startswith("/think"):
             level = user[6:].strip().lower()
-            if level in ("none", "low", "medium", "high"):
+            if level in ("on", "off"):
                 think = level
                 print(f"(thinking: {think})")
             else:
-                print("(usage: /think none|low|medium|high)")
-            continue
-        if user.startswith("/image"):
-            path = user[6:].strip().strip('"').strip("'")
-            if not os.path.isfile(path):
-                print(f"(no such file: {path or '?'} - usage: /image <path to a picture>)")
-                continue
-            mime = mimetypes.guess_type(path)[0] or "image/jpeg"
-            data = base64.b64encode(open(path, "rb").read()).decode()
-            pending.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{data}"}})
-            print(f"(picture attached: {os.path.basename(path)} - now type your question)")
+                print("(usage: /think on|off)")
             continue
         if not user:
             continue
-        if pending:
-            messages.append({"role": "user", "content": [*pending, {"type": "text", "text": user}]})
-            pending = []
-        else:
-            messages.append({"role": "user", "content": user})
+        messages.append({"role": "user", "content": user})
         answer, n, t0 = [], 0, time.time()
         print("model> ", end="", flush=True)
         try:
