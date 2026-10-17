@@ -488,7 +488,7 @@ $("cfg-save").addEventListener("click", async () => {
     const b = await r.json();
     if (!r.ok) throw new Error((b.error || {}).message || `HTTP ${r.status}`);
     $("cfg-msg").textContent = b.changed.length
-      ? `Saved (${b.changed.join(", ")}); the earlier file is ${b.file}.bak. Start the model again to use it.` : "Nothing changed.";
+      ? `Saved (${b.changed.join(", ")}); the earlier file is ${b.file}.bak. Start Strata again to use it.` : "Nothing changed.";
     loadConfig();
   } catch (e) {
     $("cfg-msg").textContent = "";
