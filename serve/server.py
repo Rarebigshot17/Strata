@@ -14,7 +14,8 @@ An unset (or 0, or -1) max tokens means "unlimited": whatever the prompt leaves 
 unset one is 256 tokens: a plain prompt has no end of turn to stop at).
 
 The tokenizer and the chat template are the model's own, read from its GGUF (the engine's `-m`, the first shard).
-The engine boundary is `Engine.generate(prompt_ids, max_new, sampling, cancel) -> iterator of token ids`.
+The engine boundary is `Engine.generate(prompt_ids, max_new, sampling, cancel, checkpoint) -> iterator of token ids`
+(`checkpoint`: where the engine keeps a checkpoint of the prompt, or None).
 `StrataEngine` keeps one `strata-glm --serve` process resident (the weights load once) and talks to it over
 stdin/stdout (the protocol: include/strata/glm/serve_loop.hpp); `MockEngine` is a scripted stand-in that makes every
 API path testable without a GPU.
@@ -229,7 +230,8 @@ class ModelFiles:
 # ------------------------------------------------------------------------------------------------ engines
 class Engine(Protocol):
     max_context: int
-    def generate(self, ids: list[int], max_new: int, sampling: dict, cancel: threading.Event) -> Iterator[int]: ...
+    def generate(self, ids: list[int], max_new: int, sampling: dict, cancel: threading.Event,
+                 checkpoint: int | None = None) -> Iterator[int | None]: ...
 
 
 class MockEngine:
@@ -2021,8 +2023,7 @@ class Service:
             while True:
                 segment_before = getattr(self.engine, "last", None)
                 segments_before = len(segments)     # (#879: a pass sent again leaves no segment)
-                gen = self.engine.generate(prompt, max_new - n, sampling, cancel, checkpoint=checkpoint) \
-                    if checkpoint is not None else self.engine.generate(prompt, max_new - n, sampling, cancel)
+                gen = self.engine.generate(prompt, max_new - n, sampling, cancel, checkpoint=checkpoint)
                 seg, wrap, leaving = [], False, False   # this pass's tokens; the budget is reached; closed
                 nonfinite = False               # #879: the engine ended this pass on non-finite logits
                 opens = False                   # the thinking is over: write the forced call's opening
