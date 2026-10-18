@@ -1,6 +1,6 @@
 # Per-request token biases
 
-`POST /v1/chat/completions` accepts `logit_bias`. The same bias applies to every token
+`POST /v1/chat/completions` and `POST /v1/completions` accept `logit_bias`. The same bias applies to every token
 the request generates. Nothing is biased by default, and a request without the field has no bias.
 
 ## Finding a token's ID

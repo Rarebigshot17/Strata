@@ -2559,6 +2559,16 @@ def completion_chunks(svc: Service, req: dict, ids, max_new, cancel):
             yield last
 
 
+def usage_chunk(req: dict, last: dict | None) -> dict | None:
+    """OpenAI's stream_options.include_usage: one more chunk after the last, with no choices and the request's usage,
+    for clients that read it there (the last chunk carries the usage too, as llama.cpp's server sends it)."""
+    opts = req.get("stream_options")
+    if not isinstance(opts, dict) or not opts.get("include_usage") or not last or "usage" not in last:
+        return None
+    return {"id": last["id"], "object": last["object"], "created": last["created"], "model": last["model"],
+            "choices": [], "usage": last["usage"]}
+
+
 def completion_collect(chunks) -> dict:
     """The non-streamed /v1/completions answer: the stream's text joined, its finish reason and usage."""
     text, last = [], None
@@ -3554,12 +3564,16 @@ def make_handler(svc: Service):
                 return self._json(200, openai_collect(chunks))
             self._sse()
             try:
+                last = None
                 for c in chunks:
                     if c is None:
                         self.wfile.write(b": keep-alive\n\n")      # an SSE comment: clients ignore it
                     else:
                         self.wfile.write(b"data: " + json.dumps(c, ensure_ascii=False).encode() + b"\n\n")
+                        last = c
                     self.wfile.flush()
+                if (tail := usage_chunk(req, last)) is not None:
+                    self.wfile.write(b"data: " + json.dumps(tail, ensure_ascii=False).encode() + b"\n\n")
                 self.wfile.write(b"data: [DONE]\n\n")
             except OSError:
                 self._note(outcome="disconnected")
@@ -3596,12 +3610,16 @@ def make_handler(svc: Service):
                 return self._json(200, completion_collect(chunks))
             self._sse()
             try:
+                last = None
                 for c in chunks:
                     if c is None:
                         self.wfile.write(b": keep-alive\n\n")
                     else:
                         self.wfile.write(b"data: " + json.dumps(c, ensure_ascii=False).encode() + b"\n\n")
+                        last = c
                     self.wfile.flush()
+                if (tail := usage_chunk(req, last)) is not None:
+                    self.wfile.write(b"data: " + json.dumps(tail, ensure_ascii=False).encode() + b"\n\n")
                 self.wfile.write(b"data: [DONE]\n\n")
             except OSError:
                 self._note(outcome="disconnected")
