@@ -2681,9 +2681,8 @@ class WebApp(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        tok = ByteTokenizer()
-        cls.svc = Service(RecordingEngine(tok, "</think>\n\nhello", max_context=CTX), tok,
-                          ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        cls.svc = Service(MockEngine(tok, reply_text("", "hello"), max_context=CTX), tok, glm_template())
         cls.httpd = serve(cls.svc, port=0)
         cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
 
@@ -2732,50 +2731,48 @@ class WebApp(unittest.TestCase):
 
     def test_model_discovery_and_props(self):
         svc = self.svc
-        previous = svc.engine.max_context, svc.vision, svc.sampling_defaults, svc.shared
+        previous = svc.engine.max_context, svc.sampling_defaults, svc.shared
         try:
             svc.engine.max_context = 262144
             svc.sampling_defaults = {"temperature": 1.0, "repetition_penalty": 1.1}
             svc.shared = {"temperature": 0.7, "max_tokens": 4096}
-            for vision in (None, object()):
-                svc.vision = vision
-                for path in ("/models", "/v1/models"):
-                    code, _, body = self.get(path)
-                    self.assertEqual(code, 200)
-                    models = json.loads(body)["data"]
-                    self.assertEqual(len(models), 1)
-                    model = models[0]
-                    self.assertEqual(model["id"], svc.model)
-                    self.assertEqual(model["status"]["value"], "loaded")
-                    self.assertEqual(model["meta"]["n_ctx"], 262144)
-                    self.assertEqual(model["architecture"]["input_modalities"],
-                                     ["text", "image"] if vision else ["text"])
-                code, _, body = self.get("/props?model=" + svc.model + "&autoload=false")
+            for path in ("/models", "/v1/models"):
+                code, _, body = self.get(path)
                 self.assertEqual(code, 200)
-                props = json.loads(body)
-                self.assertEqual(props["default_generation_settings"]["n_ctx"], 262144)
-                self.assertEqual(props["default_generation_settings"]["params"],
-                                 {"temperature": 0.7, "repeat_penalty": 1.1, "n_predict": 4096})
-                self.assertEqual(props["chat_template"], (ROOT / "serve/chat_template.jinja").read_text(encoding="utf-8"))
-                for key in ("supports_tools", "supports_tool_calls", "supports_system_role",
-                            "supports_parallel_tool_calls", "supports_preserve_reasoning"):
-                    self.assertIs(props["chat_template_caps"][key], True)
-                self.assertEqual(props["modalities"]["vision"], vision is not None)
-                self.assertEqual(props["total_slots"], 1)
-                self.assertFalse(props["models_autoload"])
+                models = json.loads(body)["data"]
+                self.assertEqual(len(models), 1)
+                model = models[0]
+                self.assertEqual(model["id"], svc.model)
+                self.assertEqual(model["status"]["value"], "loaded")
+                self.assertEqual(model["meta"]["n_ctx"], 262144)
+                self.assertEqual(model["architecture"]["input_modalities"], ["text"])     # the model reads text only
+            code, _, body = self.get("/props?model=" + svc.model + "&autoload=false")
+            self.assertEqual(code, 200)
+            props = json.loads(body)
+            self.assertEqual(props["default_generation_settings"]["n_ctx"], 262144)
+            self.assertEqual(props["default_generation_settings"]["params"],
+                             {"temperature": 0.7, "repeat_penalty": 1.1, "n_predict": 4096})
+            self.assertEqual(props["chat_template"], (ROOT / "serve/chat_template.jinja").read_text(encoding="utf-8"))
+            for key in ("supports_tools", "supports_tool_calls", "supports_system_role",
+                        "supports_parallel_tool_calls", "supports_preserve_reasoning"):
+                self.assertIs(props["chat_template_caps"][key], True)
+            self.assertIs(props["modalities"]["vision"], False)
+            self.assertEqual(props["total_slots"], 1)                 # one request at a time
+            self.assertFalse(props["models_autoload"])
             svc.shared = {}
             props = json.loads(self.get("/props")[2])
             self.assertEqual(props["default_generation_settings"]["params"]["n_predict"], -1)
             self.assertEqual(self.get("/props?model=not-loaded&autoload=true")[0], 404)
         finally:
-            svc.engine.max_context, svc.vision, svc.sampling_defaults, svc.shared = previous
+            svc.engine.max_context, svc.sampling_defaults, svc.shared = previous
 
     def test_props_caps_follow_the_active_template(self):
         source = self.svc.template.source
-        cases = [("{# tools tool_calls reasoning_content <tool_call> <function= #}{{ messages[-1].content }}",
+        cases = [("{# tools tool_calls reasoning_content <tool_call> <arg_key> #}{{ messages[-1].content }}",
                   {"supports_tools": False, "supports_tool_calls": False, "supports_system_role": False,
                    "supports_parallel_tool_calls": False, "supports_preserve_reasoning": False}),
-                 ("{% set preserve_thinking = false %}" + source, {"supports_preserve_reasoning": False}),
+                 # GLM's template keeps earlier turns' reasoning only when clear_thinking is false
+                 ("{% set clear_thinking = true %}" + source, {"supports_preserve_reasoning": False}),
                  ("{% for m in messages %}{% if m.tool_calls and m.tool_calls|length > 1 %}"
                   "{{ raise_exception('Only one tool call is supported.') }}{% endif %}{% endfor %}" + source,
                   {"supports_tool_calls": True, "supports_parallel_tool_calls": False}),
@@ -2815,7 +2812,7 @@ class WebApp(unittest.TestCase):
 
         original = self.svc.template
         try:
-            self.svc.template = ChatTemplate(ROOT / "serve/chat_template.jinja")
+            self.svc.template = glm_template()
             with mock.patch.object(self.svc.template, "render", side_effect=AssertionError("render during request")):
                 with ThreadPoolExecutor(max_workers=4) as pool:
                     results = list(pool.map(lambda _: self.get("/props"), range(4)))
@@ -2841,18 +2838,6 @@ class WebApp(unittest.TestCase):
                 self.svc.status.pop("prompt_tokens", None)
         self.assertEqual(json.loads(self.get("/slots")[2])[0]["n_prompt_tokens"], 0)
 
-    def test_slots_lists_every_batch_slot(self):
-        engine = self.svc.engine
-        engine.batch, engine.max_context = 2, CTX
-        engine.slots_view = lambda: [{"slot": 0, "state": "decoding", "prompt_tokens": 500},
-                                     {"slot": 1, "state": "idle", "held_tokens": 77}]
-        try:
-            slots = json.loads(self.get("/slots")[2])
-        finally:
-            del engine.batch, engine.slots_view
-        self.assertEqual(slots, [{"id": 0, "n_ctx": CTX, "is_processing": True, "n_prompt_tokens": 500},
-                                 {"id": 1, "n_ctx": CTX, "is_processing": False, "n_prompt_tokens": 77}])
-
     def test_the_endpoints_keep_the_context_while_the_engine_restarts(self):
         """#351: max_context is 0 until READY; the endpoints report the last known one."""
         engine = self.svc.engine
@@ -2866,20 +2851,6 @@ class WebApp(unittest.TestCase):
             engine.max_context = had
             del engine.known_ctx
 
-    def test_props_total_slots_follows_the_batch_slots(self):
-        # llama.cpp clients read total_slots as the number of requests the server runs at once
-        engine, had = self.svc.engine, hasattr(self.svc.engine, "batch")
-        previous = getattr(engine, "batch", None)
-        try:
-            for batch, slots in ((0, 1), (3, 3)):
-                engine.batch = batch
-                self.assertEqual(json.loads(self.get("/props")[2])["total_slots"], slots)
-        finally:
-            if had:
-                engine.batch = previous
-            else:
-                del engine.batch
-
     def test_discovery_needs_the_api_key(self):
         self.svc.api_key = "secret"
         try:
@@ -2892,11 +2863,11 @@ class WebApp(unittest.TestCase):
     def test_build_model_path_and_slot_status(self):
         engine = self.svc.engine
         engine.model_path = "models/example.gguf"
-        engine.info = {"version": "0.1.21"}
+        engine.info = {"version": "glm-0.1"}
         try:
             props = json.loads(self.get("/props")[2])
             self.assertEqual(props["model_path"], engine.model_path)
-            self.assertEqual(props["build_info"], "Strata 0.1.21")
+            self.assertEqual(props["build_info"], "Strata glm-0.1")
             for busy in (True, False):
                 with self.svc.status_lock:
                     self.svc.status["busy"] = busy
