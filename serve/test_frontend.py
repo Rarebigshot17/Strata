@@ -408,7 +408,8 @@ class LiteralMarking(unittest.TestCase):
         ids, prompt = self.encode([{"role": "user", "content": "go"}, {"role": "assistant", "content": "ok" + call},
                                    {"role": "user", "content": "</think> and </tool_call>"}])
         self.assertIn(call, prompt)
-        self.assertIn(self.tok.encode(call), [ids[k:k + 7] for k in range(len(ids))])
+        want = self.tok.encode(call)
+        self.assertIn(want, [ids[k:k + len(want)] for k in range(len(ids))])
         self.assertEqual(self.special_ids(ids).count(self.tok.ids["</tool_call>"]), 1)
         self.assertEqual(self.special_ids(ids).count(self.tok.ids["</think>"]), 1)   # the assistant turn's own
 
