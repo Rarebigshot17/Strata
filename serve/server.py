@@ -1880,7 +1880,7 @@ class Service:
         el = now - s.get("started", now)
         if s.get("first_token") is None:
             pr = getattr(self.engine, "progress", None)   # (position reached, prompt tokens): a reused prefix counts
-            done = f"{pr[0]:,} of {pr[1]:,}" if pr and pr[1] else f"{s.get('prompt_tokens', 0):,}"   # as read (#29)
+            done = f"{pr[0]:,} of {pr[1]:,}" if pr and pr[1] else f"{s.get('prompt_tokens', 0):,}"   # as read
             print(f"[strata] reading the prompt: {done} tokens, {el:.0f} s so far", flush=True)
         else:
             rate = s["generated"] / max(1e-6, now - s["first_token"])
@@ -2528,6 +2528,50 @@ def openai_chunks(svc: Service, req: dict, ids, thinking, tools, max_new, cancel
             if x.get("timings"):
                 last["timings"] = x["timings"]          # llama.cpp's field: the speed its clients show
             yield last
+
+
+COMPLETION_MAX_TOKENS = 256      # /v1/completions without max_tokens: a plain prompt may never reach an end of turn
+
+
+def completion_chunks(svc: Service, req: dict, ids, max_new, cancel):
+    """/v1/completions' stream: text_completion chunks with the model's text as it comes (None: a keep-alive), and a
+    last one with the finish reason, the usage and llama.cpp's timings."""
+    cid, created, model = "cmpl-" + uuid.uuid4().hex[:24], int(time.time()), svc.model_for(req)
+
+    def chunk(text, finish=None):
+        return {"id": cid, "object": "text_completion", "created": created, "model": model,
+                "choices": [{"index": 0, "text": text, "logprobs": None, "finish_reason": finish}]}
+
+    for kind, x in svc.run(ids, False, None, max_new, req, cancel, raw=True):
+        if kind == "ping":
+            yield None
+        elif kind == "event":
+            if x.text:
+                yield chunk(x.text)
+        elif kind == "done":
+            last = chunk("", {"cancel": "stop"}.get(x["finish"], x["finish"]))
+            last["usage"] = {"prompt_tokens": len(ids), "completion_tokens": x["completion_tokens"],
+                             "total_tokens": len(ids) + x["completion_tokens"],
+                             "prompt_tokens_details": {"cached_tokens": x.get("reused") or 0}}
+            if x.get("timings"):
+                last["timings"] = x["timings"]
+            yield last
+
+
+def completion_collect(chunks) -> dict:
+    """The non-streamed /v1/completions answer: the stream's text joined, its finish reason and usage."""
+    text, last = [], None
+    for c in chunks:
+        if c is None:
+            continue
+        text.append(c["choices"][0]["text"])
+        last = c
+    out = {"id": last["id"], "object": "text_completion", "created": last["created"], "model": last["model"],
+           "choices": [{"index": 0, "text": "".join(text), "logprobs": None,
+                        "finish_reason": last["choices"][0]["finish_reason"]}], "usage": last["usage"]}
+    if last.get("timings"):
+        out["timings"] = last["timings"]
+    return out
 
 
 def _is_json(text: str) -> bool:
@@ -3440,6 +3484,9 @@ def make_handler(svc: Service):
                             delta = item["choices"][0]["delta"]
                             content, reasoning = delta.get("content", ""), delta.get("reasoning_content", "")
                             usage, timings = item.get("usage"), item.get("timings")
+                        elif api == "completions":
+                            content, reasoning = item["choices"][0].get("text", ""), ""
+                            usage, timings = item.get("usage"), item.get("timings")
                         elif api == "responses":
                             kind = item["type"]
                             content = item["delta"] if kind == "response.output_text.delta" else ""
@@ -3518,6 +3565,48 @@ def make_handler(svc: Service):
                 cancel.set()                                 # client went away: stop the engine
                 chunks.close()
             except (EngineDied, EngineError, StructuredOutputError, ValueError) as e:
+                self._stream_error(e)
+
+        def _completions(self, req):
+            """POST /v1/completions (OpenAI's legacy completion): the prompt as it is given - special tokens' texts are
+            those tokens, so a client can write GLM's chat format itself - and the model's text back as it is, with no
+            thinking or tool calls read from it.  Stop strings and the end-of-turn tokens end it; stream and non-stream.
+            Without max_tokens it writes at most COMPLETION_MAX_TOKENS (a plain prompt has no end of turn to stop at)."""
+            prompt = req.get("prompt")
+            if isinstance(prompt, list) and len(prompt) == 1 and isinstance(prompt[0], str):
+                prompt = prompt[0]                         # one prompt in a list: some clients always send a list
+            if not isinstance(prompt, str) or not prompt:
+                raise ValueError("prompt must be a non-empty string (one prompt per request)")
+            if req.get("n") not in (None, 1):
+                raise ValueError("n: this server writes one completion per request")
+            bias_api.normalize(req.get("logit_bias"), len(getattr(svc.tok, "tokens", ())) or None)
+            stop_strings(req)                                 # a bad stop is a 400 before anything is sent
+            check_request_sampling(req)                       # ... and a sampling field of the wrong type
+            svc.load()
+            bias_api.validate_request(req, svc.engine, len(getattr(svc.tok, "tokens", ())) or None)
+            ids = svc.tok.encode(prompt, parse_special=True)
+            max_new = svc.room(len(ids), int(req.get("max_tokens") or COMPLETION_MAX_TOKENS))   # -1: the rest
+            svc.checkpoint.at = None                          # no conversation in it: the engine keeps its own end
+            cancel = threading.Event()
+            self._watch_client(cancel)                       # #430 #431
+            _debug_req("completions", req, [], None, max_new, False, len(ids))
+            chunks = self._capture(completion_chunks(svc, req, ids, max_new, cancel), "completions")
+            if not req.get("stream"):
+                return self._json(200, completion_collect(chunks))
+            self._sse()
+            try:
+                for c in chunks:
+                    if c is None:
+                        self.wfile.write(b": keep-alive\n\n")
+                    else:
+                        self.wfile.write(b"data: " + json.dumps(c, ensure_ascii=False).encode() + b"\n\n")
+                    self.wfile.flush()
+                self.wfile.write(b"data: [DONE]\n\n")
+            except OSError:
+                self._note(outcome="disconnected")
+                cancel.set()                                 # client went away: stop the engine
+                chunks.close()
+            except (EngineDied, EngineError, ValueError) as e:
                 self._stream_error(e)
 
         def _stream_error(self, e: Exception):
