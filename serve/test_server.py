@@ -1884,6 +1884,9 @@ class EngineDeath(unittest.TestCase):
             httpd.server_close()
 
 
+# ======================================== region B of the GLM test port (plan B3); keep this line ========================================
+
+
 class DoneLineEngine(MockEngine):
     """The mock engine whose `last` comes from a DONE line, parsed as StrataEngine parses it."""
 
@@ -3779,6 +3782,9 @@ class ThinkingBudget(unittest.TestCase):
                 self.assertEqual(code, 400)
                 self.assertIn("reasoning_budget_tokens", b["error"]["message"])
         self.assertEqual(self.engine.prompts, [])
+
+
+# ======================================== region C of the GLM test port (plan B3); keep this line ========================================
 
 
 class CallingEngine(MockEngine):
