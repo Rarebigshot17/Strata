@@ -886,7 +886,7 @@ def write_results(res: dict, parent: Path, red, log_lines: list[str]) -> Path:
 # --------------------------------------------------------------------------------------------------------- main
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Measure this Strata install and write a shareable report (see the top of this file).")
-    ap.add_argument("--config", help="the model config to run (default: the newest strata-*.json of this folder)")
+    ap.add_argument("--config", help="the model config to run (default: the newest strata-glm-*.json of this folder)")
     ap.add_argument("--url", help="use the server already running at this address (http://127.0.0.1:8101) instead of starting one")
     ap.add_argument("--port", type=int, help="the port to start the server on (default: the config's)")
     ap.add_argument("--gpu", help="start the server on this GPU only (as the server's --gpu)")
