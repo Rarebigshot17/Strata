@@ -11,6 +11,7 @@ import contextlib
 import io
 import json
 import os
+import struct
 import sys
 import tempfile
 import unittest
@@ -303,6 +304,57 @@ class Listing(unittest.TestCase):
         self.assertIn("not enough free disk space", out)
         self.assertIn("need ~121 GB", out)
         self.assertEqual((rec["downloads"], rec["builds"]), ([], []))
+
+
+def tiny_gguf(path: Path, cut=0):
+    """A GGUF v3 file with one 8x8 F32 tensor (256 bytes of data), `cut` bytes short of whole."""
+    def text(s):
+        return struct.pack("<Q", len(s)) + s.encode()
+    head = struct.pack("<IIQQ", 0x46554747, 3, 1, 1) + text("general.architecture") + struct.pack("<I", 8) \
+        + text("glm5-next") + text("blk.0.attn_q.weight") + struct.pack("<I2QIQ", 2, 8, 8, 0, 0)
+    head += b"\0" * (-len(head) % 32)
+    path.write_bytes((head + b"\1" * 256)[:len(head) + 256 - cut])
+    return path
+
+
+class Shards(unittest.TestCase):
+    def test_a_whole_shard_passes_and_a_short_one_stops(self):
+        with tempfile.TemporaryDirectory() as d:
+            first = tiny_gguf(Path(d) / "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00002.gguf")
+            second = tiny_gguf(Path(d) / "GLM-5.3-Flash-UD-IQ3_XXS-00002-of-00002.gguf")
+            self.assertEqual(setup.shard_paths(first), [first, second])
+            quiet(setup.check_shards, [first, second])
+            tiny_gguf(second, cut=8)
+            out = io.StringIO()
+            with self.assertRaises(SystemExit), contextlib.redirect_stdout(out):
+                setup.check_shards([first, second])
+            self.assertIn("GLM-5.3-Flash-UD-IQ3_XXS-00002-of-00002.gguf is short", out.getvalue())
+            second.write_bytes(b"not a gguf")
+            with self.assertRaises(SystemExit):
+                quiet(setup.check_shards, [first, second])
+
+    def test_gguf_dir_finds_the_shards_in_a_sub_folder(self):
+        with tempfile.TemporaryDirectory() as d:
+            sub = Path(d) / "UD-IQ3_XXS"
+            sub.mkdir()
+            for i in (1, 2):
+                tiny_gguf(sub / f"GLM-5.3-Flash-UD-IQ3_XXS-0000{i}-of-00002.gguf")
+            tiny_gguf(Path(d) / "mmproj-UD-IQ3_XXS.gguf")
+            quant, got = setup.gguf_dir_model(Path(d), "UD-IQ3_XXS")
+            self.assertEqual((quant, [p.name for p in got]),
+                             ("UD-IQ3_XXS", [f"GLM-5.3-Flash-UD-IQ3_XXS-0000{i}-of-00002.gguf" for i in (1, 2)]))
+            with self.assertRaises(SystemExit):
+                quiet(setup.gguf_dir_model, Path(d), "IQ4_XS")              # no 4-bit files (nor UD-Q4_K_XL)
+
+    def test_a_finished_download_is_found_again(self):
+        with tempfile.TemporaryDirectory() as d:
+            folder = Path(d) / "models" / "glm-ud-q4_k_xl"
+            folder.mkdir(parents=True)
+            shards_ = [tiny_gguf(folder / f"GLM-5.3-Flash-UD-Q4_K_XL-0000{i}-of-00002.gguf") for i in (1, 2)]
+            setup.mark(shards_[0])
+            self.assertIsNone(setup.find_model("IQ4_XS", [Path(d) / "models"]))   # the second has no finish mark
+            setup.mark(shards_[1])
+            self.assertEqual(setup.find_model("IQ4_XS", [Path(d) / "models"]), ("UD-Q4_K_XL", shards_))
 
 
 class Gpus(unittest.TestCase):
