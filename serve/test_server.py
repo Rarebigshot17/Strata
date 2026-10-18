@@ -847,6 +847,18 @@ class ToolCallRecovery(unittest.TestCase):
     def test_the_templates_form_is_unchanged(self):
         self.check("Saving it." + call_text("write", path="a.md", content="hi"), [("write", self.CALL)], "Saving it.")
 
+    def test_two_json_calls_in_a_row(self):
+        two = {"path": "b.md", "content": "yo"}
+        self.check('<tool_call>{"name": "write", "arguments": {"path": "a.md", "content": "hi"}}</tool_call>\n'
+                   '<tool_call>{"name": "write", "arguments": {"path": "b.md", "content": "yo"}}</tool_call>',
+                   [("write", self.CALL), ("write", two)], "")
+
+    def test_json_without_the_wrapper_is_content(self):
+        fenced = 'Example:\n```json\n{"name": "write", "arguments": {"path": "a.md", "content": "hi"}}\n```'
+        self.check(fenced, [], fenced)
+        inline = 'Call it as {"name": "write", "arguments": {}} with a path.'
+        self.check(inline, [], inline)
+
     def test_json_of_an_unknown_tool_is_content(self):
         text = '<tool_call>\n{"name": "format_disk", "arguments": {}}\n</tool_call>'
         self.check(text, [], text)
