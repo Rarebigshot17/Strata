@@ -10,7 +10,8 @@ turn in the order they arrived.  Tools from MCP servers (serve/mcp.py, `"mcp_ser
 are offered only to requests that ask for them with `"strata_mcp": true` - the web app does; other clients see exactly
 the API they always saw.  GLM-5.3-Flash reads text only: a request with a picture is a 400.
 Requests whose prompt plus max tokens exceed the engine's context are REJECTED with 400, never truncated.
-An unset (or 0, or -1) max tokens means "unlimited": whatever the prompt leaves of the context.
+An unset (or 0, or -1) max tokens means "unlimited": whatever the prompt leaves of the context (on /v1/completions an
+unset one is 256 tokens: a plain prompt has no end of turn to stop at).
 
 The tokenizer and the chat template are the model's own, read from its GGUF (the engine's `-m`, the first shard).
 The engine boundary is `Engine.generate(prompt_ids, max_new, sampling, cancel) -> iterator of token ids`.
@@ -3845,7 +3846,7 @@ def make_handler(svc: Service):
 
 class Server(ThreadingHTTPServer):
     # On Windows SO_REUSEADDR lets a second server bind a port that is already serving, and requests then land on
-    # either one (a forgotten second start of run-<model>.bat).  Without it the second start fails loudly instead.
+    # either one (a forgotten second start of the run script).  Without it the second start fails loudly instead.
     allow_reuse_address = os.name != "nt"
     # socketserver listens with a backlog of 5: a burst of 30-40 clients at once got "connection reset by peer" on the
     # first ones (measured on 4 x R9700, also with one request at a time); the requests wait in the server, not the kernel
@@ -3886,7 +3887,7 @@ def lan_addresses() -> list[str]:
 
 def host_name(value) -> str:
     """The name in a Host header (or an origin's host[:port]): "Example.com:8101" -> "example.com",
-    "[::1]:8095" -> "::1"; "" when it is malformed."""
+    "[::1]:8101" -> "::1"; "" when it is malformed."""
     v = (value or "").strip().lower()
     if v.startswith("["):
         name, sep, rest = v[1:].partition("]")
@@ -4497,7 +4498,7 @@ def main() -> int:
                   "-Direction Inbound -Protocol TCP -LocalPort " + str(a.port) + " -Action Allow -Profile Private\n"
                   "       (and set this network to Private in Windows' network settings)", flush=True)
     if a.open and cfg.get("open_browser") is not False:   # #609: the config's "open_browser": false wins (an older
-        import webbrowser                                  # run-<model>.bat still passes --open)
+        import webbrowser                                  # run script still passes --open)
         webbrowser.open(f"http://{'127.0.0.1' if a.host in ('0.0.0.0', '') else a.host}:{a.port}/")
     # #96: docker stop sends SIGTERM, which Python ignores by default, so the container's PID 1 would be killed after
     # the grace period with the engine still running. SIGTERM takes Ctrl+C's path below (QUIT to the engine).
