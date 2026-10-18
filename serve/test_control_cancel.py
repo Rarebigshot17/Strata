@@ -53,6 +53,7 @@ class ControlCancelTest(unittest.TestCase):
         eng = self._engine(["HB", "HB", "PP 4096 4096 9.0 100.0", "DONE 0 4096 9.0 0.0 cancel 0 0 0 0 0 0 0 0.0 4096 0"])
         self.assertEqual(list(eng.generate([1, 2, 3], 8, {}, cancel)), [])
         self.assertEqual(self.sent(eng)[1:], ["STOP"])
+        self.assertIsNone(eng.progress)                 # the PP line came after the STOP: only drained, not read
         self.assertTrue(eng.lines.empty())
         self.assertEqual(eng.last["finish"], "cancel")
 
