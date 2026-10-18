@@ -113,7 +113,12 @@ def install(argv, ram=OWNER_RAM, smi=OWNER_SMI, listing=LISTING, configs=(), env
         if prepare is not None:
             prepare(base)
         argv = [x.replace("{base}", str(base)) for x in argv]
-        rec = {"downloads": [], "builds": [], "starts": [], "start_args": [], "commands": [], "updates": [], "urls": []}
+        rec = {"downloads": [], "builds": [], "starts": [], "start_args": [], "commands": [], "updates": [], "urls": [],
+               "disks": []}
+
+        def disk_usage(path):                          # --check
+            rec["disks"].append(Path(path))
+            return mock.Mock(free=free * GB)
 
         def download(url, dst, what=None):
             rec["downloads"].append((url, dst.relative_to(base).as_posix()))
@@ -141,7 +146,7 @@ def install(argv, ram=OWNER_RAM, smi=OWNER_SMI, listing=LISTING, configs=(), env
                    mock.patch.object(setup, "ram_gb", return_value=ram),
                    mock.patch.object(setup, "cpu_info", return_value=cpu),
                    mock.patch.object(setup, "free_gb", return_value=free),
-                   mock.patch.object(setup.shutil, "disk_usage", return_value=mock.Mock(free=free * GB)),   # --check
+                   mock.patch.object(setup.shutil, "disk_usage", disk_usage),
                    mock.patch.object(setup, "settings_path", return_value=base / "settings.json"),
                    mock.patch.object(setup, "other_installs", return_value=[base / o for o in others]),
                    mock.patch.object(setup.urllib.request, "urlopen", hub(listing, rec["urls"])),
@@ -558,6 +563,12 @@ class Build(unittest.TestCase):
         _, cmds, _ = self.build([86, 89], force=True)                         # --build
         self.assertEqual(len(cmds), 2)
 
+    def test_llama_cpp_is_the_commit_cmake_pins(self):
+        cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8-sig")
+        self.assertIn(f"GIT_TAG {setup.LLAMA_CPP_COMMIT}", cmake)
+        self.assertTrue((ROOT / "third_party" / "ggml" / "VERSION.txt").read_text().startswith(setup.LLAMA_CPP_COMMIT))
+        self.assertIn(setup.LLAMA_CPP_COMMIT, setup.LLAMA_CPP_ZIP)
+
     def test_the_source_hash_covers_the_engine_sources(self):
         self.assertEqual(setup.ENGINE_SOURCES, ("CMakeLists.txt", "src", "include", "third_party"))
         # the real function (setUp replaced it): a source edit changes it, llama.cpp's own files and CRLF do not
@@ -894,6 +905,16 @@ class Check(unittest.TestCase):
         self.assertEqual((cfgs, rec["downloads"], rec["builds"], rec["urls"]), ({}, [], [], []))
         self.assertFalse((Path(rec["base"]) / "Strata-GLM-data").exists())
         self.assertFalse((Path(rec["base"]) / "settings.json").exists())
+
+    def test_check_measures_the_drive_of_the_data_folder(self):
+        def prepare(base):
+            (base / "big" / "Strata-GLM-data").mkdir(parents=True)
+            (base / "settings.json").write_text(json.dumps({"data_dir": str(base / "big" / "Strata-GLM-data")}))
+        code, out, _, _, rec = install(["--check"], prepare=prepare, free=100.0)
+        self.assertEqual(rec["disks"], [Path(rec["base"]) / "big" / "Strata-GLM-data"])   # remembered by setup
+        self.assertIn("download ~170 GB, but only 100 GB of disk space is free", out)
+        _, _, _, _, rec = install(["--check", "--models-dir", "{base}/elsewhere/models"])
+        self.assertEqual(rec["disks"], [Path(rec["base"])])                  # the drive a new folder would be on
 
     def test_check_on_too_little_ram(self):
         code, out, _, _, _ = install(["--check"], ram=60.0)

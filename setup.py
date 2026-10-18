@@ -1360,8 +1360,7 @@ def installed_configs():
 
 def write_run_script(tag, cfg_path, port, open_browser=True):
     """run-<tag>.sh: the server with this config; `open_browser` False (#609: --no-browser) leaves --open out."""
-    serve = [sys.executable, str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config", str(cfg_path),
-             "--port", str(port)] + (["--open"] if open_browser else [])
+    serve = server_command(cfg_path, port, open_browser)
     script = ROOT / f"run-{tag}.sh"
     script.write_text(f"#!/bin/sh\ncd {shlex.quote(str(ROOT))}\nexec " + " ".join(shlex.quote(x) for x in serve) + "\n",
                       encoding="utf-8")
@@ -1525,7 +1524,7 @@ def check_pc(a) -> tuple:
 def check_only(a) -> int:
     """--check: step 1 and which size fits this PC's RAM, nothing installed or moved.  Exit code 1 when neither does."""
     _found, _sel, _named, ram = check_pc(a)
-    where = Path(a.models_dir or a.data_dir or ROOT.parent).expanduser().resolve()
+    where = Path(a.models_dir or a.data_dir or load_settings().get("data_dir") or ROOT.parent).expanduser().resolve()
     while not where.exists():                          # a folder setup would make: the drive it would be on
         where = where.parent
     free = shutil.disk_usage(where).free / 1e9
@@ -1702,17 +1701,18 @@ def main() -> int:
     # the model's files: --gguf-dir, a finished download (here or on another drive), or the repository's listing
     models_root = Path(a.models_dir)
     plan = []                                          # (listed file, where it goes) for step 5
+    found_model = None if a.gguf_dir else find_model(model, [models_root, *[r / "models" for r in roots]])
     if a.gguf_dir:
         quant, shards = gguf_dir_model(Path(a.gguf_dir).expanduser(), model)
         ok(f"model files: {shards[0].parent} ({quant}, {len(shards)} file{'s' if len(shards) > 1 else ''})")
-    elif find_model(model, [models_root, *[r / "models" for r in roots]]):
-        quant, shards = find_model(model, [models_root, *[r / "models" for r in roots]])
+    elif found_model:
+        quant, shards = found_model
         ok(f"model files: {shards[0].parent} (already downloaded)")
     else:
         say(f"  Listing the model's files on {hf_endpoint()} ({REPO}) ...")
         pick = pick_shards(repo_files(), model)
         if pick is None:
-            other = [q for q in d.get("fallback", ())]
+            other = list(d.get("fallback", ()))
             fail(f"{REPO} has no {model} files" + (f" (nor {', '.join(other)})" if other else ""),
                  "the repository may have renamed them: download them by hand (hf download) and run setup with "
                  "--gguf-dir <their folder>")
