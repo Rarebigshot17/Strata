@@ -1,7 +1,6 @@
 """docker-entrypoint.sh keeps the install config on the /data volume as the one that counts (#1244): with REINSTALL=0
 and a config on the volume, /opt/strata/strata-<tag>.json is a link to it, even when a regular file is already there.
-Runs the real script in a temporary tree with a stub for .venv/bin/python (POSIX sh and symlinks needed: skipped on
-Windows).
+Runs the real script in a temporary tree with a stub for .venv/bin/python (skipped where there is no sh).
 
     python -m unittest tools.test_docker_entrypoint
 """
@@ -18,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SH = shutil.which("sh")
 
 
-@unittest.skipIf(os.name == "nt" or SH is None, "needs POSIX sh and symlinks")
+@unittest.skipIf(SH is None, "needs a POSIX sh")
 class Entrypoint(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
