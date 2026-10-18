@@ -283,12 +283,17 @@ class OverHttp(unittest.TestCase):
                 mock.patch.object(self.svc, "ensure_loaded") as ensure_loaded, \
                 mock.patch.object(self.svc, "set_shared", return_value={}) as set_shared:
             for path in ("/unload", "/load", "/v1/unload", "/v1/load", "/settings", "/config"):
-                # a plain form POST from another site's page (it needs no CORS preflight)
-                code = self.req("POST", path, b"a=1", {"Content-Type": "application/x-www-form-urlencoded",
-                                                       "Origin": evil})[0]
-                self.assertEqual(code, 403 if path.startswith("/v1/") else 415, path)
-                self.assertEqual(self.req("POST", path, body, {"Content-Type": "application/json",
-                                                               "Origin": evil})[0], 403, path)
+                v1 = path.startswith("/v1/")
+                # the "simple" requests another site's page may send without a CORS preflight: a form or text/plain
+                for ctype, data in (("application/x-www-form-urlencoded", b"a=1"),
+                                    ("text/plain", json.dumps(body).encode())):
+                    code = self.req("POST", path, data, {"Content-Type": ctype, "Origin": evil})[0]
+                    self.assertEqual(code, 403 if v1 else 415, (path, ctype))
+                    if not v1:                           # not JSON: refused without an Origin as well
+                        self.assertEqual(self.req("POST", path, data, {"Content-Type": ctype})[0], 415, (path, ctype))
+                for origin in (evil, "null"):            # "null": a sandboxed frame or a file:// page
+                    self.assertEqual(self.req("POST", path, body, {"Content-Type": "application/json",
+                                                                   "Origin": origin})[0], 403, (path, origin))
                 # a DNS-rebinding page: its own name in Host
                 self.assertEqual(self.req("POST", path, body, {"Content-Type": "application/json"},
                                           host="rebind.example.com")[0], 403, path)
