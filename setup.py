@@ -1726,8 +1726,20 @@ def main() -> int:
         on_disk = sum(p.stat().st_size for s in shards for p in (s, s.with_name(s.name + ".part")) if p.is_file()) / 1e9
         ok(f"{quant}: {len(files)} file{'s' if len(files) > 1 else ''}, {total:.0f} GB")
         if quant != model:
-            warn(f"the repository has no {model} files: the {d['bits']} model is its {quant} ({total:.0f} GB), which "
-                 "may need more RAM than setup's estimate for the size")
+            # its experts, taken as the same share of its files as the size's own: what it leaves of the RAM
+            experts = total * d["experts_gb"] / d["download_gb"]
+            warn(f"the repository has no {model} files: the {d['bits']} model is its {quant} ({total:.0f} GB, about "
+                 f"{experts:.0f} GB of experts in RAM: " + (f"~{ram - experts:.0f} GB of RAM left beside them)"
+                                                            if ram >= experts else f"more than this PC's {ram:.0f} GB)"))
+            if fit != "no" and ram - experts < RAM_LEFT_MIN_GB:
+                confirm_risk(f"{quant}'s experts do not fit beside Linux and the server in this PC's {ram:.0f} GB of "
+                             "RAM: the OS would page them from the disk, so it would be very slow, or not start at all",
+                             bool(a.model), a.yes,
+                             f"{quant} needs about {experts + RAM_LEFT_MIN_GB:.0f} GB of RAM; this PC has {ram:.0f} GB",
+                             f"choose {names[0]}, or --model {model} --yes to install it anyway", "  Install it anyway?")
+            elif ram - experts < RAM_LEFT_GB and a.park_mib is None and park != PARK_MIB_TIGHT:
+                park = PARK_MIB_TIGHT
+                warn(f"parked conversations get {PARK_MIB_TIGHT} MiB instead of {PARK_MIB} (--park-mib {PARK_MIB_TIGHT})")
         need = max(total - on_disk, 0) + 1
         if free_gb(folder) < need:
             fail(f"not enough free disk space in {folder}: need ~{need:.0f} GB" +

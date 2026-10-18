@@ -314,6 +314,25 @@ class Listing(unittest.TestCase):
         self.assertTrue(all("/glm-ud-q4_k_xl/" in dst for _url, dst in rec["downloads"]))
         self.assertIn("strata-glm-iq4_xs.json", cfgs)                         # the config is named by the size
 
+    def test_a_fallback_too_big_for_the_ram_is_said_before_its_download(self):
+        listing = ([e for e in LISTING if not e["path"].startswith(("IQ4_XS/", "UD-Q4_K_XL/"))]
+                   + shards("UD-Q4_K_XL/GLM-5.3-Flash-UD-Q4_K_XL", 4, size=50 * GB))       # 200 GB
+        argv = ["--model", "IQ4_XS", "--context", "131072", "--no-start"]
+        code, out, cfgs, _, rec = install(argv, listing=listing)                 # asked, and no answer
+        self.assertEqual(code, 1)
+        self.assertIn("UD-Q4_K_XL (200 GB, about 191 GB of experts in RAM: more than this PC's 188 GB)", out)
+        self.assertIn("UD-Q4_K_XL's experts do not fit beside Linux and the server in this PC's 188 GB", out)
+        self.assertEqual((cfgs, rec["downloads"], rec["builds"]), ({}, [], []))
+        code, out, cfgs, _, rec = install(argv + ["--yes"], listing=listing)     # --model is the consent
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(rec["downloads"]), 4)
+        # on 230 GB the 4-bit size fits well, but its fallback leaves less than 40 GB: less RAM for parking
+        code, out, cfgs, _, _ = install(argv + ["--yes"], listing=listing, ram=230.0)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("do not fit", out)
+        args = cfgs["strata-glm-iq4_xs.json"]["args"]
+        self.assertEqual(args[args.index("--park-mib") + 1], "4096")
+
     def test_a_hub_that_refuses_the_listing_stops_at_once(self):
         def refuse(req, timeout=None):
             raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, None)
