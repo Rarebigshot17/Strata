@@ -1,6 +1,6 @@
 // Do two streams move host->device data faster than one (both copy engines)?  And what does one layer's worth of
 // expert-sized copies cost end to end (issue, copy, host function, sync)?  Standalone: not part of the build.
-//   nvcc -O2 -o h2d_bench tools/h2d_bench.cu && ./h2d_bench [device] [bytes of one expert, default 1382400]
+//   nvcc -O2 -o h2d_bench tools/h2d_bench.cu && ./h2d_bench [device] [bytes of one expert, default 9633792]
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <chrono>
@@ -14,7 +14,9 @@ static double ms_since(Clock::time_point t) { return std::chrono::duration<doubl
 
 int main(int argc, char** argv) {
     int dev = argc > 1 ? std::atoi(argv[1]) : 0;
-    const size_t blob = argc > 2 ? std::strtoull(argv[2], nullptr, 10) : 1382400;   // one expert's bytes
+    // one expert's bytes; the default is a GLM-5.3-Flash expert at IQ3_XXS: gate, up and down, 3 x 4096 x 2048
+    // weights at 98 bytes per 256, the blob the engine's expert cache copies in one piece
+    const size_t blob = argc > 2 ? std::strtoull(argv[2], nullptr, 10) : 9633792;
     if (blob == 0) { std::printf("the expert size must be a positive number of bytes\n"); return 2; }
     CK(cudaSetDevice(dev));
     cudaDeviceProp p;

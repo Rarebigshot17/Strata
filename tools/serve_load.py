@@ -83,13 +83,14 @@ def pct(v, p):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("url")
+    ap.add_argument("url", nargs="?", default="http://127.0.0.1:8101")
     ap.add_argument("--clients", default="1,2,4,8")
     ap.add_argument("--rounds", type=int, default=3)
     ap.add_argument("--max-tokens", type=int, default=256)
     ap.add_argument("--words", type=int, default=800, help="the essay length asked for (longer = longer prompt? no: the answer)")
     ap.add_argument("--model", default="strata")
-    ap.add_argument("--key", default=os.environ.get("STRATA_KEY", ""))
+    ap.add_argument("--key", default=os.environ.get("STRATA_API_KEY") or os.environ.get("STRATA_KEY", ""),
+                    help="the server's API key (default $STRATA_API_KEY, or $STRATA_KEY)")
     ap.add_argument("--nonce", default=str(int(time.time())), help="prefix of the per-request nonce (every round reads fresh prompts); '' = identical prompts every round; fix it to compare two runs")
     ap.add_argument("--think", action="store_true")
     ap.add_argument("--stagger", type=float, default=0.0, help="seconds between the starts of the clients of a burst")

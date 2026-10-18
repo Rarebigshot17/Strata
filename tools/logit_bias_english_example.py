@@ -29,7 +29,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--gguf", required=True, help="the model's GGUF (its first shard): the tokenizer")
     ap.add_argument("--url", default="http://127.0.0.1:8101")
-    ap.add_argument("--api-key", default=os.environ.get("STRATA_KEY", ""))
+    ap.add_argument("--api-key", default=os.environ.get("STRATA_API_KEY") or os.environ.get("STRATA_KEY", ""),
+                    help="the server's API key (default $STRATA_API_KEY, or $STRATA_KEY)")
     ap.add_argument("--word", default="Hello", help="the word to ban: it must be one token of the model")
     ap.add_argument("--output", type=Path, help="write every request and answer here (rows.json)")
     a = ap.parse_args(argv)

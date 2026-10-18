@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """A client that stops reading a streamed answer early must not leave its tokens to the next request.
 
-  STRATA_KEY=... python3 tools/early_close_test.py http://127.0.0.1:8101
+  STRATA_API_KEY=... python3 tools/early_close_test.py [http://127.0.0.1:8101]
 """
 import json, os, sys, threading, urllib.request
 
-URL = sys.argv[1].rstrip("/") + "/v1/chat/completions"
-KEY = os.environ.get("STRATA_KEY", "")
+URL = (sys.argv[1].rstrip("/") if len(sys.argv) > 1 else "http://127.0.0.1:8101") + "/v1/chat/completions"
+KEY = os.environ.get("STRATA_API_KEY") or os.environ.get("STRATA_KEY", "")     # the server's name, or the old one
 
 
 def req(content, stream, max_tokens=300):

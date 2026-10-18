@@ -44,15 +44,15 @@ BYTE_TO_UNICODE = bytes_to_unicode()
 UNICODE_TO_BYTE = {v: k for k, v in BYTE_TO_UNICODE.items()}
 
 # The `qwen35` pre-tokenizer, transcribed from the ORACLE rather than from the family resemblance:
-# `.ref/llama.cpp/src/llama-vocab.cpp` L396, `case LLAMA_VOCAB_PRE_TYPE_QWEN35`.  The commented-out line
+# llama.cpp's `src/llama-vocab.cpp`, `case LLAMA_VOCAB_PRE_TYPE_QWEN35`.  The commented-out line
 # above it is the `tokenizer.json` original, and llama.cpp's active version differs from it - it spells the
 # contraction classes out instead of using `(?i:...)`, which is behaviourally the same.
 #
-# THE `\p{M}` IS THE WHOLE POINT OF THIS BEING TRANSCRIBED.  The QWEN3 pattern two cases earlier (L389) is
+# THE `\p{M}` IS THE WHOLE POINT OF THIS BEING TRANSCRIBED.  The QWEN3 pattern two cases earlier is
 # the same shape with `\p{L}` where this has `[\p{L}\p{M}]` and without `\p{M}` in the punctuation negation.
 # Writing the QWEN3 pattern for `qwen35` looks right, round-trips perfectly, and is wrong: a combining mark
 # is `\p{M}`, so without it the mark gets swallowed into the following punctuation run and a token like `_j`
-# never forms.  It cost 3 strings out of 1875 and only `tokenize_oracle_check` could see it.
+# never forms.  It cost 3 strings out of 1875 and only a comparison with llama.cpp's tokenizer could see it.
 QWEN35_PATTERN = (
     r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])"
     r"|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+"

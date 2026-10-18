@@ -7,7 +7,7 @@ against a running server: stream an answer, read a few lines, close the connecti
 ~0.4 s (sometimes not at all, sometimes with a second request already sent), send the edited prompt, and check the
 answer.
 
-  STRATA_KEY=... python3 tools/stop_resend_test.py http://127.0.0.1:8101 [rounds=40] [seed=1]
+  STRATA_API_KEY=... python3 tools/stop_resend_test.py http://127.0.0.1:8101 [rounds=40] [seed=1]
 
 Exit 0 when every answer was real text, 1 otherwise.
 """
@@ -23,7 +23,7 @@ import urllib.request
 BASE = sys.argv[1].rstrip("/") if len(sys.argv) > 1 else "http://127.0.0.1:8101"
 ROUNDS = int(sys.argv[2]) if len(sys.argv) > 2 else 40
 SEED = int(sys.argv[3]) if len(sys.argv) > 3 else 1
-KEY = os.environ.get("STRATA_KEY", "")
+KEY = os.environ.get("STRATA_API_KEY") or os.environ.get("STRATA_KEY", "")     # the server's name, or the old one
 URL = BASE + "/v1/chat/completions"
 
 LONG = ["Describe the weather in Montpellier in great detail, at length.",

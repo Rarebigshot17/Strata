@@ -180,7 +180,7 @@ class RedactionTests(unittest.TestCase):
             self.assertNotIn(s, text)
         self.assertIn("<user>", text)
         self.assertIn("<ip>", text)
-        self.assertEqual(red("127.0.0.1:8080 and version 0.1.40.3 and driver 32.0.15.7"), "127.0.0.1:8080 and version 0.1.40.3 and driver 32.0.15.7")
+        self.assertEqual(red("127.0.0.1:8101 and version 0.1.40.3 and driver 32.0.15.7"), "127.0.0.1:8101 and version 0.1.40.3 and driver 32.0.15.7")
         self.assertNotIn(str(B.ROOT), red(f"loading {B.ROOT / 'strata-x.json'}"))
         self.assertIn("<strata>", red(f"loading {B.ROOT / 'strata-x.json'}"))
         self.assertNotIn(str(Path.home()), red(f"in {Path.home() / 'data'}"))
