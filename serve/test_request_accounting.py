@@ -180,6 +180,9 @@ class RequestAccounting(unittest.TestCase):
         self.assertEqual(response["usage"]["prompt_tokens_details"]["cached_tokens"], 5)
         timings = response["timings"]
         self.assertEqual((timings["prompt_ms"], timings["predicted_ms"]), (40.0, 200.0))
+        metrics = json.loads(self.request("/metrics")[1])
+        self.assertEqual((metrics["requests"][0]["hits"], metrics["requests"][0]["lookups"]), (9, 10))
+        self.assertEqual((metrics["totals"]["hits"], metrics["totals"]["lookups"]), (9, 10))
 
     def test_failed_continuation_does_not_count_the_first_done_twice(self):
         self.engine.fail_continuation = True

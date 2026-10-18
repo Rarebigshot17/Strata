@@ -449,6 +449,7 @@ class OverHttp(Server):
                     code, r = self.post(body(src), headers={"Origin": origin} if origin else None)
                     self.assertEqual(code, 400, r)
                     self.assertEqual(set(r["error"]), {"message", "type", "param", "code"})
+                    self.assertEqual(r["error"]["param"], "input")
                     self.assertIn("text only", r["error"]["message"])
         self.assertEqual(self.engine.last_prompt, [])   # none reached the engine
         result = [{"type": "input_text", "text": "x.png: "},
