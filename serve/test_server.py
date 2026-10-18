@@ -1527,6 +1527,26 @@ class SeveralGpus(unittest.TestCase):
         mine = args + ["--split", "1,1"]                              # the args' own: unchanged
         self.assertEqual(engine_args({"args": list(mine), "gpu": [0, 1], "split": [24, 12]}), mine)
 
+    def test_the_configs_split_forms_and_refusals(self):
+        """A list or a string, one positive share per card of "gpu"; anything else is refused with the format."""
+        from serve.server import split_value
+        cfg = {"args": [], "gpu": [2, 0, 1]}
+        self.assertIsNone(split_value(cfg))
+        for v in (None, "", []):
+            self.assertIsNone(split_value({**cfg, "split": v}))
+        for v in ([24, 12, 10], "24,12,10", " 24, 12 ,10 ", [24.0, "12", 10]):
+            self.assertEqual(split_value({**cfg, "split": v}), "24,12,10")
+        self.assertEqual(split_value({**cfg, "split": [1.5, 1, 1]}), "1.5,1,1")
+        for bad in ("x", "24,,10", [24, 0, 10], [-1, 1, 1], [True, 1, 1]):
+            with self.assertRaises(ValueError) as e:
+                split_value({**cfg, "split": bad})
+            self.assertIn("one positive number per card", str(e.exception))
+            self.assertIn("[24, 12, 10]", str(e.exception))             # the example
+        for bad in ("24,12", [24, 12, 10, 8]):
+            with self.assertRaises(ValueError) as e:
+                split_value({**cfg, "split": bad})
+            self.assertIn("for the 3 card(s)", str(e.exception))
+
 
 class RepeatStop(unittest.TestCase):
     """#606: one token repeated repeat_stop_tokens times in a row ends the reply as "length"; 0 turns it off."""
