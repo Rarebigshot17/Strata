@@ -1289,9 +1289,9 @@ def model_config_files(folder: Path) -> list:
     return [p for p in folder.glob("strata-glm-*.json") if not p.name.endswith(".shared-settings.json")]
 
 
-def older_configs(folder: Path = ROOT) -> list:
+def older_configs(folder: Path | None = None) -> list:
     """The strata-*.json model configs of the Qwen version of Strata this one replaced: never started here."""
-    return [p for p in folder.glob("strata-*.json")
+    return [p for p in (folder or ROOT).glob("strata-*.json")
             if not p.name.startswith("strata-glm-") and not p.name.endswith(".shared-settings.json")]
 
 

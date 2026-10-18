@@ -28,11 +28,12 @@ OWNER_SMI = ("0, NVIDIA GeForce RTX 3090 Ti, 24564, 8.6, 580.95.05\n"
              "2, NVIDIA GeForce RTX 3080, 10240, 8.6, 580.95.05\n")
 OWNER_RAM = 188.0
 GB = 10**9
+REAL_GPUS = setup.gpus          # the tests below put owner_gpus in its place
 
 
 def owner_gpus():
     with mock.patch.object(setup, "out", return_value=OWNER_SMI):
-        return setup.gpus()
+        return REAL_GPUS()
 
 
 def entry(path, size=GB, sha="ab" * 32):
