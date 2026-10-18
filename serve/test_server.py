@@ -1380,6 +1380,7 @@ class ClientHangUp(unittest.TestCase):
         import socket as so
         body = json.dumps({"model": "x", "max_tokens": 20, "stream": stream,
                            "messages": [{"role": "user", "content": "a long prompt"}]}).encode()
+        self.engine.cancelled_after = None             # not the previous test's, should this request start late
         c = so.create_connection(("127.0.0.1", self.port))
         c.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
                   b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
