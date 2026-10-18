@@ -105,10 +105,16 @@ class Gates(unittest.TestCase):
         self.check("Two steps." + CALL + CALL + "</think>done", 2)
 
     def test_an_opener_right_after_the_text_counts(self):
-        # GLM writes its call right after the text, with no line break: the opener's place in its line says nothing
+        # GLM writes its call right after the text, with no line break: text before the opener on its line is no
+        # sign of a quote
         self.check("I will write it now." + CALL, 1)
         self.check("Plan: " + RM, 1)
-        self.check("> " + RM, 1)
+
+    def test_a_blockquote_line_is_a_quote(self):
+        # a "> " line quotes what it holds, at any indent; the line after it is the model's own again
+        self.check("> " + RM, 0)
+        self.check("  > The doc says " + RM, 0)
+        self.check("> the doc's example\n" + CALL, 1)
 
     def test_a_value_may_quote_the_closing_tags(self):
         # #210: </arg_value> and </tool_call> inside a value are its text (the act-value-quotes-the-tags specimen)

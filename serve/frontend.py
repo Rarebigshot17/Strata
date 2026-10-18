@@ -1142,7 +1142,10 @@ class OutputParser:
                     if tool:
                         out.append(Event("reasoning", self._track(self.buf[:tool])))
                     self.buf = self.buf[tool:]
-                    if self._in_code():              # in a fence or inline code: a quote
+                    # in a fence, inline code or a "> " blockquote line: a quote, never run.  GLM writes its calls
+                    # right after text ("I will read it.<tool_call>read..."), so other text before it on the line is
+                    # no sign of a quote
+                    if self._in_code() or self.line.lstrip().startswith(">"):
                         out.append(Event("reasoning", self._track(CALL_START)))
                         self.buf = self.buf[len(CALL_START):]
                     else:
