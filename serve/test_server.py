@@ -371,7 +371,8 @@ class LiteralThinkTags(unittest.TestCase):
         self.assertEqual(self.ids(msgs, enable_thinking=False), self.old_ids(msgs, enable_thinking=False))
         # with a call, its result and the tools: also as the template writes them
         msgs = [{"role": "user", "content": "x"},
-                {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "f", "arguments": {"a": "<"}}}]},
+                {"role": "assistant", "content": "",
+                 "tool_calls": [{"function": {"name": "f", "arguments": {"a": "<"}}}]},
                 {"role": "tool", "content": "done"}]
         tools = [{"name": "f", "description": "<arg", "parameters": {}}]
         self.assertEqual(self.ids(msgs, tools), self.old_ids(msgs, tools))
@@ -420,7 +421,8 @@ class LiteralThinkTags(unittest.TestCase):
         # an assistant turn whose content opens with its own <think>...</think> block keeps that block's markers: the
         # template splits the reasoning off there (and drops it once a user turn follows), the quoted tag stays text
         msgs = [{"role": "user", "content": "hi"},
-                {"role": "assistant", "content": "<think>\nplan: say </x> hello\n</think>\n\nHello, </think> is a tag."},
+                {"role": "assistant",
+                 "content": "<think>\nplan: say </x> hello\n</think>\n\nHello, </think> is a tag."},
                 {"role": "user", "content": "again"}]
         ids = self.ids(msgs)
         self.assertEqual((ids.count(self.open), ids.count(self.close)), (1, 1))   # the history's </think>, the prompt's
@@ -918,7 +920,8 @@ class UnfinishedToolCall(unittest.TestCase):
                     self.assertEqual(json.loads(streamed), {"path": "notes.txt", "content": content})
 
     def answers(self, script, max_tokens=500):
-        """(finish reason, the call's arguments) from OpenAI and Anthropic, whole and streamed, for the model's `script`."""
+        """(finish reason, the call's arguments) from OpenAI and Anthropic, whole and streamed, for the model's
+        `script`."""
         tok = GlmTokenizer()
         svc = Service(MockEngine(tok, script, max_context=CTX), tok, glm_template())
         httpd = serve(svc, port=0)
@@ -952,7 +955,8 @@ class UnfinishedToolCall(unittest.TestCase):
                                                                  for tc in c["message"].get("tool_calls") or []])
                     else:
                         m = json.loads(raw)
-                        out[api, stream] = (m["stop_reason"], [b["input"] for b in m["content"] if b["type"] == "tool_use"])
+                        out[api, stream] = (m["stop_reason"],
+                                            [b["input"] for b in m["content"] if b["type"] == "tool_use"])
         finally:
             httpd.shutdown()
             httpd.server_close()
@@ -1005,7 +1009,8 @@ class UnfinishedToolCall(unittest.TestCase):
     def test_a_whole_call(self):
         whole = {"path": "notes.txt", "content": "all of it"}
         a = self.answers(self.WHOLE)
-        self.assertEqual((a["openai", False][0], [json.loads(x) for x in a["openai", False][1]]), ("tool_calls", [whole]))
+        self.assertEqual((a["openai", False][0], [json.loads(x) for x in a["openai", False][1]]),
+                         ("tool_calls", [whole]))
         self.assertEqual((a["openai", True][0], json.loads(a["openai", True][1])), ("tool_calls", whole))
         self.assertEqual(a["anthropic", False], ("tool_use", [whole]))
         self.assertEqual((a["anthropic", True][0], json.loads(a["anthropic", True][1])), ("tool_use", whole))
@@ -1055,7 +1060,8 @@ class ClientShapes(unittest.TestCase):
             "system": [{"type": "text", "text": "You are terse."}],
             "messages": [
                 {"role": "user", "content": [{"type": "text", "text": "1+1? digits only"}]},
-                {"role": "system", "content": [{"type": "text", "text": "<system-reminder>answer in digits</system-reminder>"}]}]})
+                {"role": "system",
+                 "content": [{"type": "text", "text": "<system-reminder>answer in digits</system-reminder>"}]}]})
         self.assertEqual(status, 200, b)
         text = self.prompt_text()
         self.assertIn("You are terse.", text)
@@ -1079,7 +1085,8 @@ class ClientShapes(unittest.TestCase):
         # was a user's query) answers 400, not a dropped connection
         with tempfile.TemporaryDirectory() as d:
             tpl = Path(d) / "chat_template.jinja"
-            tpl.write_text("{% if messages[-1].role != 'user' %}{{ raise_exception('No user query found in messages.') }}"
+            tpl.write_text("{% if messages[-1].role != 'user' %}"
+                           "{{ raise_exception('No user query found in messages.') }}"
                            "{% endif %}{{ messages[-1].content }}", encoding="utf-8")
             template, self.svc.template = self.svc.template, ChatTemplate(tpl)
             try:
@@ -1175,7 +1182,8 @@ class ClientShapes(unittest.TestCase):
 
     def test_leading_system_unchanged(self):
         from serve.frontend import anthropic_to_messages, openai_to_messages
-        msgs, _, _ = openai_to_messages({"messages": [{"role": "developer", "content": "D"}, {"role": "user", "content": "u"}]})
+        msgs, _, _ = openai_to_messages({"messages": [{"role": "developer", "content": "D"},
+                                                      {"role": "user", "content": "u"}]})
         self.assertEqual([m["role"] for m in msgs], ["system", "user"])
         msgs, _, _ = anthropic_to_messages({"system": "S", "messages": [{"role": "user", "content": "u"}]})
         self.assertEqual([m["role"] for m in msgs], ["system", "user"])
@@ -1210,8 +1218,10 @@ class ClientShapes(unittest.TestCase):
         from serve.frontend import openai_to_messages
         bad_call = [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{malformed_json"}}]
         msgs, tools, kwargs = openai_to_messages({"messages": [{"role": "user", "content": "u"},
-                                                               {"role": "assistant", "content": "", "tool_calls": bad_call}]})
-        self.assertEqual(msgs[1]["tool_calls"], [{"function": {"name": "f", "arguments": {"arguments": "{malformed_json"}}}])
+                                                               {"role": "assistant", "content": "",
+                                                                "tool_calls": bad_call}]})
+        self.assertEqual(msgs[1]["tool_calls"],
+                         [{"function": {"name": "f", "arguments": {"arguments": "{malformed_json"}}}])
         rendered = glm_template().render(msgs, tools=tools, **kwargs)
         self.assertIn("<tool_call>f<arg_key>arguments</arg_key><arg_value>{malformed_json</arg_value></tool_call>",
                       rendered)
@@ -1232,13 +1242,14 @@ class ToolArguments(unittest.TestCase):
         from serve.frontend import anthropic_to_messages, openai_to_messages
         for bad in ("{cut", "[1]", "3"):
             with self.subTest(bad=bad):
-                m = openai_to_messages({"messages": [{"role": "user", "content": "u"}, {"role": "assistant", "content": "",
+                m = openai_to_messages({"messages": [{"role": "user", "content": "u"}, {
+                    "role": "assistant", "content": "",
                     "tool_calls": [{"id": "c", "type": "function", "function": {"name": "f", "arguments": bad}}]}]})[0]
                 self.assertEqual(m[1]["tool_calls"][0]["function"]["arguments"], {"arguments": bad})
         for bad in ([1], 3, "{cut"):
             with self.subTest(anthropic=bad):
-                m = anthropic_to_messages({"messages": [{"role": "user", "content": "u"}, {"role": "assistant", "content": [
-                    {"type": "tool_use", "id": "t", "name": "f", "input": bad}]}]})[0]
+                m = anthropic_to_messages({"messages": [{"role": "user", "content": "u"}, {
+                    "role": "assistant", "content": [{"type": "tool_use", "id": "t", "name": "f", "input": bad}]}]})[0]
                 self.assertIn("arguments", m[1]["tool_calls"][0]["function"]["arguments"])
 
 
