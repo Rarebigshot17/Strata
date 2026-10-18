@@ -4539,161 +4539,46 @@ class LostStep(unittest.TestCase):
         self.run_mode("stop", stream=False)
 
 
-class ImageSources(unittest.TestCase):
-    """What an image source may name: never a network path (Windows signs in to the host at the first look), a URL up
-    to IMAGE_URL_MAX and downloaded outside the request FIFO, a file on this computer not for a page of another site."""
+class PicturesAreRefused(unittest.TestCase):
+    """The model reads text only: a picture from any source - a file of this computer named by a page of another site,
+    a URL, a data: URL - is a 400 that says so, and the request never reaches the engine (nothing is read for it)."""
 
-    NETWORK = [r"\\host\share\x.png", "//host/share/x.png", r"\\?\UNC\host\share\x.png", r"\\.\UNC\host\share\x.png",
-               r"\??\UNC\host\share\x.png", r"/\host\share\x.png", "file://host/share/x.png",
-               "file:////host/share/x.png", r"file://\\host\share\x.png"]
+    def test_every_source_on_both_apis(self):
+        tok = GlmTokenizer()
+        engine = MockEngine(tok, reply_text("", "ok"), max_context=CTX)
+        svc = Service(engine, tok, glm_template())
+        svc.cors_origins = ["*"]                                    # a page of any site may send JSON
+        httpd = serve(svc, port=0)
+        host = f"127.0.0.1:{httpd.server_address[1]}"
 
-    class Vision(ImageMarkers.FakeVision):
-        def __init__(self, d):
-            super().__init__(d)
-            self.got = []
+        def post(path, src, headers):
+            image = {"type": "image_url", "image_url": {"url": src}} if path.endswith("completions") else \
+                {"type": "image", "source": {"type": "url", "url": src}}
+            body = {"model": "m", "max_tokens": 8, "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "what is it?"}, image]}]}
+            req = urllib.request.Request(f"http://{host}{path}", data=json.dumps(body).encode(), headers=headers)
+            try:
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                with e:
+                    return e.code, json.loads(e.read())
 
-        def encode(self, source):
-            self.got.append(source)
-            return super().encode(source)
-
-    def test_network_paths_are_refused_before_any_look(self):
-        from serve.server import Vision
-        with mock.patch("os.path.isfile") as isfile, mock.patch.object(Path, "read_bytes") as read:
-            for src in self.NETWORK:
-                with self.subTest(src=src), self.assertRaisesRegex(ValueError, "network paths"):
-                    Vision.load(src)
-        isfile.assert_not_called()
-        read.assert_not_called()
-        with tempfile.TemporaryDirectory() as d:                    # files on this computer load as before
-            f = Path(d) / "x.png"
-            f.write_bytes(b"\x89PNG\r\n\x1a\n")
-            for src in (str(f), "file://" + str(f), "data:image/png;base64,iVBORw0KGgo="):
-                with self.subTest(src=src):
-                    self.assertEqual(Vision.load(src), b"\x89PNG\r\n\x1a\n")
-
-    def test_unreadable_sources_are_a_value_error(self):
-        """From #582: a bad data: URL or an unreadable file is a 400, not a dropped connection."""
-        from serve.server import Vision
-        for src in ("data:image/png", "data:image/png;base64,abcde"):
-            with self.subTest(src=src), self.assertRaisesRegex(ValueError, "data: URL could not be read"):
-                Vision.load(src)
-        with tempfile.TemporaryDirectory() as d:
-            f = Path(d) / "x.png"
-            f.write_bytes(b"x")
-            with mock.patch.object(Path, "read_bytes", side_effect=PermissionError("denied")),                     self.assertRaisesRegex(ValueError, "could not be read from"):
-                Vision.load(str(f))
-
-    def test_a_url_is_read_up_to_the_cap(self):
-        import http.server
-        import serve.server as server
-
-        class Files(http.server.BaseHTTPRequestHandler):
-            def log_message(self, *args):
-                pass
-
-            def do_GET(self):
-                body = {"/small": b"x" * 100, "/big": b"x" * 5000}.get(urllib.parse.urlsplit(self.path).path)
-                if body is None:
-                    self.send_error(404)
-                    return
-                self.send_response(200)
-                if "length" in self.path:                           # else the body ends when the connection does
-                    self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                try:
-                    self.wfile.write(body)
-                except OSError:                                     # the reader stopped at the cap
-                    pass
-
-        httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Files)
-        threading.Thread(target=httpd.serve_forever, daemon=True).start()
-        base = f"http://127.0.0.1:{httpd.server_address[1]}"
         try:
-            with mock.patch.object(server, "IMAGE_URL_MAX", 1000):
-                for q in ("", "?length"):
-                    with self.subTest(q=q):
-                        self.assertEqual(server.Vision.load(base + "/small" + q), b"x" * 100)
-                        with self.assertRaisesRegex(ValueError, "is over"):
-                            server.Vision.load(base + "/big" + q)
-                with self.assertRaisesRegex(ValueError, "could not be read: HTTP Error 404"):
-                    server.Vision.load(base + "/missing")
+            with tempfile.TemporaryDirectory() as d:
+                f = str(Path(d) / "secret.png")
+                for path in ("/v1/chat/completions", "/v1/messages"):
+                    for src in (f, "file://" + f, "https://example.com/x.png", "data:image/png;base64,iVBORw0KGgo="):
+                        for headers in ({"Content-Type": "application/json", "Origin": "https://evil.example"},
+                                        {"Content-Type": "application/json"}):          # curl, SDKs, agents
+                            with self.subTest(path=path, src=src[:20], origin="Origin" in headers):
+                                status, b = post(path, src, headers)
+                                self.assertEqual(status, 400, b)
+                                self.assertIn("text only", b["error"]["message"])
+            self.assertEqual(engine.last_prompt, [])                     # no request reached the engine
         finally:
             httpd.shutdown()
             httpd.server_close()
-
-    def test_a_url_is_downloaded_outside_the_fifo(self):
-        import serve.server as server
-        tok = GlmTokenizer()
-        with tempfile.TemporaryDirectory() as d:
-            vision = self.Vision(d)
-            svc = Service(MockEngine(tok, "ok", max_context=CTX), tok, glm_template(),
-                          vision=vision)
-            held = []
-
-            def download(url):
-                held.append(svc.fifo.locked())
-                return b"the picture"
-
-            msgs = [{"role": "user", "content": [{"type": "image", "source": "https://example.com/x.png"},
-                                                 {"type": "image", "source": "x.png"}]}]
-            with mock.patch.object(server.Vision, "download", side_effect=download):
-                svc.prepare(msgs, None, {})
-            self.assertEqual(held, [False])                         # not while every other request waits
-            self.assertEqual(vision.got, [b"the picture", "x.png"])
-            svc.embeddings.path.unlink(missing_ok=True)
-
-    def test_a_page_of_another_site_cannot_name_a_file(self):
-        tok = GlmTokenizer()
-        with tempfile.TemporaryDirectory() as d:
-            vision = self.Vision(d)
-            svc = Service(MockEngine(tok, reply_text("", "ok"), max_context=CTX), tok,
-                          glm_template(), vision=vision)
-            httpd = serve(svc, port=0)
-            host = f"127.0.0.1:{httpd.server_address[1]}"
-
-            def post(path, src, headers):
-                image = {"type": "image_url", "image_url": {"url": src}} if path.endswith("completions") else \
-                    {"type": "image", "source": {"type": "url", "url": src}}
-                body = {"model": "m", "max_tokens": 8, "messages": [{"role": "user", "content": [
-                    {"type": "text", "text": "what is it?"}, image]}]}
-                req = urllib.request.Request(f"http://{host}{path}", data=json.dumps(body).encode(), headers=headers)
-                try:
-                    with urllib.request.urlopen(req, timeout=30) as r:
-                        return r.status, json.loads(r.read())
-                except urllib.error.HTTPError as e:
-                    with e:
-                        return e.code, json.loads(e.read())
-
-            try:
-                f = str(Path(d) / "secret.png")
-                # a page on any site, no api_key (the default): text/plain needs no CORS preflight - 0.1.38 refuses
-                # such a page outright (403)
-                page = {"Content-Type": "text/plain;charset=UTF-8", "Origin": "https://evil.example"}
-                status, b = post("/v1/chat/completions", f, page)
-                self.assertEqual(status, 403, b)
-                # a page cors_origins lets in (here every page) may send JSON, and still cannot name a file
-                svc.cors_origins = ["*"]
-                page = {"Content-Type": "application/json", "Origin": "https://evil.example"}
-                for path in ("/v1/chat/completions", "/v1/messages"):
-                    for src in (f, "file://" + f):
-                        with self.subTest(path=path, src=src):
-                            status, b = post(path, src, page)
-                            self.assertEqual(status, 400, b)
-                            self.assertIn("another origin", b["error"]["message"])
-                self.assertEqual(vision.got, [])                    # nothing was read
-                svc.trusted_origins = ["https://app.example"]
-                data = "data:image/png;base64,iVBORw0KGgo="
-                for src, headers in ((data, page),                  # the page's own picture
-                                     (f, {"Content-Type": "application/json"}),           # curl, SDKs, agents
-                                     (f, {"Content-Type": "application/json", "Origin": "http://" + host}),
-                                     (f, {"Content-Type": "application/json", "Origin": "https://app.example"})):
-                    with self.subTest(src=src[:20], headers=headers):
-                        status, b = post("/v1/chat/completions", src, headers)
-                        self.assertEqual(status, 200, b)
-                self.assertEqual(vision.got, [data, f, f, f])
-            finally:
-                httpd.shutdown()
-                httpd.server_close()
 
 
 class CountingEngine(MockEngine):
@@ -4952,16 +4837,14 @@ class AnswerBeforeTheBody(unittest.TestCase):
         self.assertEqual(self.status("PUT", "/v1/chat/completions"), "HTTP/1.0 501 Unsupported method ('PUT')")
 
 
-class PromptProgressBatch(unittest.TestCase):
-    """#837: under --batch the engine's progress is one global line: prompt_progress() says nothing."""
+class PromptProgressFields(unittest.TestCase):
+    """The engine's last PP line as llama.cpp's four `prompt_progress` fields."""
 
-    def test_nothing_under_batch(self):
+    def test_the_four_fields(self):
         from serve.server import prompt_progress
-        engine = SimpleNamespace(progress=(512, 4096), progress_ms=900, reused=0, batch=0)
+        engine = SimpleNamespace(progress=(512, 4096), progress_ms=900, reused=0)
         svc = SimpleNamespace(engine=engine)
         self.assertEqual(prompt_progress(svc), {"total": 4096, "cache": 0, "processed": 512, "time_ms": 900})
-        engine.batch = 2
-        self.assertIsNone(prompt_progress(svc))
 
 
 class ClaudeCodeBillingStamp(unittest.TestCase):
@@ -5071,12 +4954,13 @@ class ToolOrder(unittest.TestCase):
 
 
 class UntimedReads(unittest.TestCase):
-    """#1317: a read of the engine's READY line or of the image encoder's pipe that never returns held the request
-    turn for good.  Each now has a timeout; a process that stays silent is ended and the read raises."""
+    """#1317: a read of the engine's READY line that never returns held the request turn for good.  It now has a
+    timeout; an engine that stays silent is ended and the read raises."""
 
     def test_engine_that_never_says_ready_is_ended(self):
         import serve.server as server
-        fake = "import time\nprint('INFO engine=0.0.0', flush=True)\ntime.sleep(600)\n"
+        fake = ("import time\nprint('INFO engine=0.2.0 backend=cpu-reference eos=259 park_mib=512 logit_bias=1', "
+                "flush=True)\ntime.sleep(600)\n")
         with tempfile.TemporaryDirectory() as d:
             script = Path(d) / "fake_strata.py"
             script.write_text(fake, encoding="utf-8")
