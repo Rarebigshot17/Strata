@@ -112,6 +112,16 @@ class Entrypoint(unittest.TestCase):
         self.assertIn("ARGS: setup.py --port 8101 --gpus 0,1,2", start)
         self.assertTrue((self.opt / "strata-glm-ud-iq3_xxs.json").is_symlink())   # linked right after the setup
 
+    def test_parking_ram_own_gguf_files_one_card_and_a_key(self):
+        out = self.run_entry("0", PARK_MIB="4096", GGUF_DIR="/models", GPU="1", API_KEY="k1")
+        self.assertIn("Setting up glm-ud-iq3_xxs from the GGUF files in /models", out)
+        setup = next(line for line in out.splitlines() if line.startswith("SETUP:"))
+        for part in ("--api-key k1", "--park-mib 4096", "--gguf-dir /models", "--gpu 1"):
+            self.assertIn(part, setup)
+        self.assertNotIn("--context", setup)                             # unset: setup's pick for the VRAM
+        start = next(line for line in out.splitlines() if line.startswith("STARTED WITH:"))
+        self.assertIn("ARGS: setup.py --port 8101 --gpu 1", start)
+
     def test_port_and_model_from_the_environment(self):
         (self.data / "config" / "strata-glm-iq4_xs.json").write_text('{"args": ["four-bit"]}\n')
         out = self.run_entry("0", MODEL="IQ4_XS", PORT="9000")
