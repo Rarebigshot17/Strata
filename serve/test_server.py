@@ -226,6 +226,9 @@ class TextOnly(unittest.TestCase):
 
     PICTURE = {"openai": {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
                "anthropic": {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}}
+    # a picture at a URL nothing answers on: it is never fetched
+    AT_URL = {"openai": {"type": "image_url", "image_url": {"url": "http://127.0.0.1:9/a.png"}},
+              "anthropic": {"type": "image", "source": {"type": "url", "url": "http://127.0.0.1:9/a.png"}}}
     CALL = {"openai": {"role": "assistant", "content": "", "tool_calls": [
                 {"id": "t1", "type": "function", "function": {"name": "Read", "arguments": '{"file_path": "a.png"}'}}]},
             "anthropic": {"role": "assistant", "content": [
@@ -264,19 +267,20 @@ class TextOnly(unittest.TestCase):
 
     def test_a_users_picture_is_a_400(self):
         for api in ("openai", "anthropic"):
-            with self.subTest(api=api):
-                status, b = self.post(api, [{"role": "user", "content": [{"type": "text", "text": "what is it?"},
-                                                                         self.PICTURE[api]]}])
-                self.assertEqual(status, 400, b)
-                self.assertIn("text only", b["error"]["message"])
+            for pic in (self.PICTURE[api], self.AT_URL[api]):
+                with self.subTest(api=api, picture=str(pic)[:50]):
+                    status, b = self.post(api, [{"role": "user", "content": [{"type": "text", "text": "what is it?"},
+                                                                             pic]}])
+                    self.assertEqual(status, 400, b)
+                    self.assertIn("text only", b["error"]["message"])
 
     def test_a_tools_picture_is_a_note_in_its_place(self):
         from serve.frontend import IMAGE_OMITTED
         for api in ("openai", "anthropic"):
             pic = self.PICTURE[api]
             for content, want in (([{"type": "text", "text": "a.png:"}, pic], "a.png:" + IMAGE_OMITTED),
-                                  ([pic], IMAGE_OMITTED), ([pic, {"type": "text", "text": "and"}, pic],
-                                                           IMAGE_OMITTED + "and" + IMAGE_OMITTED),
+                                  ([pic], IMAGE_OMITTED), ([self.AT_URL[api]], IMAGE_OMITTED),
+                                  ([pic, {"type": "text", "text": "and"}, pic], IMAGE_OMITTED + "and" + IMAGE_OMITTED),
                                   ([{"type": "text", "text": "r"}], "r"), ("r", "r")):   # a text-only result: its text
                 with self.subTest(api=api, content=str(content)[:40]):
                     status, b = self.post(api, self.with_result(api, content))
