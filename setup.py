@@ -1555,8 +1555,8 @@ def main() -> int:
     ap.add_argument("--park-mib", type=int, metavar="N",
                     help=f"RAM in MiB for parked conversations and checkpoints (default {PARK_MIB}, {PARK_MIB_TIGHT} "
                          "where little RAM is left beside the experts); saved for this model, also when starting")
-    ap.add_argument("--port", type=int, help=f"the server's port (default: the one the install was set up with, {PORT} "
-                                             "for a new one)")
+    ap.add_argument("--port", type=int, help=f"the server's port (default {PORT}); when starting an installed model it is "
+                                             "for that start only, and the model's own port is the default")
     ap.add_argument("--gpu", help="one GPU, numbered as nvidia-smi numbers them (default: every GPU that can run the "
                                   "engine; with --setup it is saved, when starting it is for that start only)")
     ap.add_argument("--gpus", help="the GPUs the model's layers are shared across, as nvidia-smi numbers them: \"0,2\", "
