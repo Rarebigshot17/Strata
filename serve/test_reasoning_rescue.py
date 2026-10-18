@@ -67,7 +67,8 @@ class Corpus(unittest.TestCase):
                     with self.subTest(name=sp["name"], width=width, stream_tools=st):
                         evs = parse(sp["input"], width, tools, sp["finish"], st)
                         self.assertEqual(calls(evs), sp["calls"])
-                        seen.add((reasoning(evs), tuple(e.call.name for e in evs if e.kind == "tool_call")))
+                        seen.add((reasoning(evs), tuple((e.call.name, json.dumps(e.call.arguments, sort_keys=True))
+                                                        for e in evs if e.kind == "tool_call")))
             self.assertEqual(len(seen), 1, sp["name"])        # streamed and whole agree
 
     def test_nothing_is_lost(self):
@@ -108,6 +109,14 @@ class Gates(unittest.TestCase):
         self.check("I will write it now." + CALL, 1)
         self.check("Plan: " + RM, 1)
         self.check("> " + RM, 1)
+
+    def test_a_value_may_quote_the_closing_tags(self):
+        # #210: </arg_value> and </tool_call> inside a value are its text (the act-value-quotes-the-tags specimen)
+        value = "Close a value with </arg_value> and the call with </tool_call>."
+        for width in WIDTHS:
+            with self.subTest(width=width):
+                evs = parse("go\n" + call_text("write", path=value), width)
+                self.assertEqual([e.call.arguments for e in evs if e.kind == "tool_call"], [{"path": value}])
 
     def test_recovered_call_keeps_the_text_before_it(self):
         evs = parse("Let me think.\n\n" + CALL, 3)

@@ -124,6 +124,7 @@ class ReasoningLoopRecovery(unittest.TestCase):
     def test_status_and_history_record_the_stop(self):
         engine, service = self.service([self.loop, 'Done.</think>Answer.'])
         events = list(service.run(self.ids, True, [], 40000, {}, threading.Event()))
+        self.assertEqual(len(engine.calls), 1)                   # the second script is never asked for
         self.assertEqual(events[-1][1]['finish'], 'length')
         self.assertEqual(service.history[-1]['finish'], 'length')
         self.assertGreaterEqual(service.history[-1]['reasoning_repeat_coverage'], .25)
