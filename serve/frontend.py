@@ -238,8 +238,9 @@ def _image_source(part: dict) -> str:
 
 
 def _parts_of(content):
-    """Message content for the template: a string when there is no image (unchanged behaviour), otherwise the
-    template's list form - text items and image items, in order - whose image items carry their source."""
+    """Message content for the template: a string when there is no image, otherwise the template's list form - text
+    items and image items, in order - whose image items carry their source (the template renders the text items;
+    images_of finds the pictures)."""
     if not _has_image(content):
         return _text_of(content)
     items = []
@@ -285,39 +286,53 @@ def _check_parts(content, path: str, kinds):
     return out
 
 
+# A tool result's picture, in the text the model reads instead (see _tool_text)
+IMAGE_OMITTED = "[image omitted: the model reads text only]"
+
+
+def _tool_text(content) -> str:
+    """A tool result's content as one string, as GLM's template takes it (a list would be rendered item by item as
+    Python reprs): its text parts in order, with IMAGE_OMITTED in place of each picture.  The model reads no images,
+    and a tool's picture (Claude Code's Read of an image file) must not fail the request: clients send the whole
+    history again every turn."""
+    if not _has_image(content):
+        return _text_of(content)
+    return "".join(IMAGE_OMITTED if p.get("type") in IMAGE_PARTS else p.get("text", "") for p in content
+                   if isinstance(p, dict) and (p.get("type") in IMAGE_PARTS or p.get("type") in TEXT_PARTS))
+
+
 def images_of(messages: list[dict]) -> list[str]:
-    """The image sources of the rendered conversation, in prompt order (the template renders one
-    <|vision_start|><|image_pad|><|vision_end|> per image item, message by message)."""
+    """The image sources of the conversation's user and assistant messages, in order (a tool's pictures are already
+    text, see _tool_text)."""
     return [item["source"] for m in messages if isinstance(m.get("content"), list)
             for item in m["content"] if item.get("type") == "image"]
 
 
-# #537: a literal <think> / </think> inside a message's text is plain text, not the model's reasoning markers.  The
-# tokenizer matches those two strings as their special tokens everywhere (GGUF token type 4, as llama.cpp does), so
-# a user quoting "</think>" used to hand the model a real end-of-reasoning token.  Before the template is rendered
-# they are swapped for these private-use characters, and the server encodes the spans they mark as ordinary text.
-THINK_TAGS = {"<think>": "\U000F0E01", "</think>": "\U000F0E02"}
-# #554: the vision markers the same way.  They are special tokens only where the template writes them for an image
-# item; the same strings in a message's text (an agent reading chat_template.jinja, a tool result quoting it) became
-# the same special ids, so text with <|vision_start|><|image_pad|> before a picture took that picture's embeddings
-VISION_TAGS = {"<|vision_start|>": "\U000F0E03", "<|image_pad|>": "\U000F0E04", "<|vision_end|>": "\U000F0E05",
-               "<|video_pad|>": "\U000F0E06"}
-# #2026: `</tool_call>` the same way.  A user asking for the string verbatim handed the model the real end-of-call token
-# (type 4, matched everywhere); it copied that token into its answer and the reply came back empty.  An assistant
-# message keeps its own: a client replaying the model's raw call text sends the tokens the model wrote.
-TOOL_LITERAL_TAGS = {"</tool_call>": "\U000F0E07"}
-LITERAL_TAGS = {**THINK_TAGS, **VISION_TAGS, **TOOL_LITERAL_TAGS}
-THINK_MARKS = {v: k for k, v in LITERAL_TAGS.items()}
-CONTROL_MARK0 = 0xF0E10      # the control tokens' marks start here, clear of the two sets above
+# #537 / #2026: special-token text inside a message is plain text.  The tokenizer matches GLM's tags (<think>,
+# </think>, <tool_call>, <arg_key>, <tool_response>, ...) and its control tokens (<|user|>, <|observation|>, [gMASK],
+# ...) as their special ids everywhere, so a user quoting "</think>", a tool result that contains "</tool_response>" or
+# a file that contains "<|user|>" handed the model a real end of reasoning, of a result or of the turn.  Before the
+# template is rendered such texts are swapped for private-use characters, and the server encodes the spans they mark
+# as ordinary text.
+GLM_TAGS = (THINK_START, THINK_END, CALL_START, CALL_END, KEY_START, KEY_END, VALUE_START, VALUE_END, RESPONSE_START,
+            RESPONSE_END)
+# The tags of a call.  An assistant message's content keeps them: a client replaying the model's raw call text sends
+# the tokens the model wrote.
+CALL_TAGS = (CALL_START, CALL_END, KEY_START, KEY_END, VALUE_START, VALUE_END)
+MARK0 = 0xF0E01              # the first mark (plane 15's private use area)
+LITERAL_TAGS = {tag: chr(MARK0 + k) for k, tag in enumerate(GLM_TAGS)}
+LITERAL_MARKS = {v: k for k, v in LITERAL_TAGS.items()}
 
 
-def literal_tags(controls) -> dict[str, str]:
-    """LITERAL_TAGS plus a mark for each control token's text (`controls`: the tokenizer's CONTROL literals,
-    <|im_start|>, <|im_end|>, <|endoftext|>, ...).  The rendered prompt is encoded with those literals parsed, so one
-    written inside a message - a file an agent reads, a pasted chat template - opened or ended a turn there.  Longest
-    first, as the tokenizer matches them: a literal inside a longer one is not marked before it."""
-    tags = {**LITERAL_TAGS, **{c: chr(CONTROL_MARK0 + k) for k, c in enumerate(c for c in controls
-                                                                                if c not in LITERAL_TAGS)}}
+def literal_tags(texts) -> dict[str, str]:
+    """LITERAL_TAGS plus a mark for each text in `texts`: the server passes every special token of the tokenizer
+    (GGUF token types 3 and 4: <|user|>, <|observation|>, [gMASK], ... and GLM's tags), whose text written inside a
+    message - a file an agent reads, a pasted chat template - would otherwise be that token.  Longest first, as the
+    tokenizer matches them: a text inside a longer one is not marked before it."""
+    tags = dict(LITERAL_TAGS)
+    for text in texts:
+        if text and text not in tags:
+            tags[text] = chr(MARK0 + len(tags))
     return dict(sorted(tags.items(), key=lambda t: -len(t[0])))
 
 
@@ -348,39 +363,37 @@ def _has_tag(v, tags: dict[str, str] = LITERAL_TAGS) -> bool:
 
 
 def mark_think_literals(messages: list[dict], tools: list[dict] | None, tags: dict[str, str] = LITERAL_TAGS):
-    """#537: (messages, tools) with every literal <think> / </think> (#554: and vision marker) in their text swapped for
-    LITERAL_TAGS' marks (or `tags`': literal_tags() adds the control tokens' texts), and
-    whether there was one (None: no change, the same objects back - a prompt without them renders as it always did).
-    An assistant message whose content opens with a whole <think>...</think> block (clients that send the reasoning
-    inline) keeps that one block as the model's markers, as before."""
+    """#537: (messages, tools) with every special-token text in their text swapped for its mark (LITERAL_TAGS, or
+    `tags`: literal_tags() adds the tokenizer's special tokens), and whether there was one (None: no change, the same
+    objects back - a prompt without them renders as it always did).  An assistant message's content keeps its call
+    tags, and one that opens with a whole <think>...</think> block (clients that send the reasoning inline) keeps
+    that block's two tags as the model's markers: the template reads them to split the reasoning off."""
     if not _has_tag(messages, tags) and not _has_tag(tools, tags):
         return messages, tools, False
+    own = {t: v for t, v in tags.items() if t not in CALL_TAGS}     # what an assistant's content keeps as written
     out = []
-    own = {t: v for t, v in tags.items() if t not in TOOL_LITERAL_TAGS}     # what an assistant message keeps as written
     for m in messages:
-        m = dict(m)
+        assistant = m.get("role") == "assistant"
+        marked = {k: v if k == "role" else _mark_deep(v, own if assistant and k == "content" else tags)
+                  for k, v in m.items()}
         content = m.get("content")
-        mine = own if m.get("role") == "assistant" else tags
-        for k, v in m.items():
-            if k != "role":
-                m[k] = _mark_deep(v, mine)
-        if m.get("role") == "assistant" and isinstance(content, str) and content.lstrip().startswith("<think>") \
-                and "</think>" in content:
-            i, j = content.index("<think>") + len("<think>"), content.index("</think>")
-            m["content"] = (content[:i] + _mark(content[i:j], own) + "</think>" +
-                            _mark(content[j + len("</think>"):], own))
-        out.append(m)
+        if assistant and isinstance(content, str) and content.lstrip().startswith(THINK_START) \
+                and THINK_END in content:
+            i, j = content.index(THINK_START) + len(THINK_START), content.index(THINK_END)
+            marked["content"] = (content[:i] + _mark(content[i:j], own) + THINK_END +
+                                 _mark(content[j + len(THINK_END):], own))
+        out.append(marked)
     return out, _mark_deep(tools, tags), True
 
 
-_THINK_MARK_RE = re.compile("|".join(THINK_MARKS))
+_LITERAL_MARK_RE = re.compile("|".join(LITERAL_MARKS))
 
 
 def unmark_think_literals(prompt: str, tags: dict[str, str] = LITERAL_TAGS) -> tuple[str, list[tuple[int, int]]]:
-    """The rendered prompt with THINK_TAGS' marks turned back into the tags' text, and the (start, end) spans of those
-    tags in it: the server encodes them as ordinary text (the tokenizer's encode_plain_spans)."""
-    marks = THINK_MARKS if tags is LITERAL_TAGS else {v: k for k, v in tags.items()}
-    mark_re = _THINK_MARK_RE if tags is LITERAL_TAGS else re.compile("|".join(map(re.escape, marks)))
+    """The rendered prompt with the marks turned back into the texts they stand for, and the (start, end) spans of
+    those texts in it: the server encodes them as ordinary text (the tokenizer's encode_plain_spans)."""
+    marks = LITERAL_MARKS if tags is LITERAL_TAGS else {v: k for k, v in tags.items()}
+    mark_re = _LITERAL_MARK_RE if tags is LITERAL_TAGS else re.compile("|".join(map(re.escape, marks)))
     out, spans, pos, n = [], [], 0, 0
     for m in mark_re.finditer(prompt):
         out.append(prompt[pos:m.start()])
@@ -395,7 +408,7 @@ def unmark_think_literals(prompt: str, tags: dict[str, str] = LITERAL_TAGS) -> t
 
 
 def _late_system_to_user(messages: list[dict]) -> list[dict]:
-    """The chat template takes a system message only at the start ("System message must be at the beginning").
+    """Some chat templates take a system message only at the start ("System message must be at the beginning").
     Clients also send them mid-conversation - Claude Code's hook context as {"role": "system"} after the first user
     turn, some OpenAI clients a late "developer" message (issue #56) - so those become user messages, in place:
     merging them into the first one would change the prompt's start and cost the conversation cache every turn."""
@@ -503,11 +516,13 @@ def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
         role = m.get("role")
         if role == "developer":
             role = "system"
-        # an image is read in a user, tool or assistant message; the system prompt takes text only, as _text_of reads
+        # an image stays an image item in a user or assistant message (images_of finds it) and becomes a note in a
+        # tool result (_tool_text); the system prompt takes text only, as _text_of reads
         images = role in ("user", "tool", "assistant")
         content = _check_parts(m.get("content"), f"messages[{i}].content",
                                TEXT_PARTS + IMAGE_PARTS if images else TEXT_PARTS)
-        out = {"role": role, "content": _parts_of(content) if images else _text_of(content)}
+        out = {"role": role, "content": _tool_text(content) if role == "tool" else
+               _parts_of(content) if images else _text_of(content)}
         if m.get("reasoning_content"):
             out["reasoning_content"] = m["reasoning_content"]
         if m.get("tool_calls"):
@@ -589,9 +604,8 @@ def anthropic_to_messages(req: dict, think_unasked: bool = True) -> tuple[list[d
             elif kind == "tool_use":
                 calls.append({"function": {"name": block.get("name"), "arguments": tool_arguments(block.get("input"))}})
             elif kind == "tool_result":
-                # A tool's image (Claude Code's Read of a picture) reaches the encoder like a user's, as the OpenAI
-                # path's tool messages already do; a text-only result is one string, as before.
-                messages.append({"role": "tool", "content": _parts_of(_check_parts(
+                # one string, a tool's picture (Claude Code's Read of an image file) as a note, as on the OpenAI path
+                messages.append({"role": "tool", "content": _tool_text(_check_parts(
                     block.get("content"), f"messages[{i}].content[{j}].content", TEXT_PARTS + IMAGE_PARTS))})
         if text or calls or reasoning or parts:
             # an image sent beside tool results stays in this turn instead of being dropped
