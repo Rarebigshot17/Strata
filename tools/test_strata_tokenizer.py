@@ -139,6 +139,10 @@ class PreTokenizers(unittest.TestCase):
             self.assertEqual("".join(t.pieces(text)), text)
             self.assertEqual(t.decode(t.encode(text)), text)
 
+    def test_without_a_pre_it_is_glm5(self):
+        t = ST.Tokenizer(merge_vocab("glm5").tokens, ["q z", "x q", "xq z"])
+        self.assertEqual((t.pre, t.ignore_merges, t.pre_patterns), ("glm5", True, (ST.GLM4_PATTERN,)))
+
     def test_an_unknown_pre_is_refused(self):
         with self.assertRaises(ValueError) as c:
             merge_vocab("llama-bpe")

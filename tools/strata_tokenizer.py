@@ -99,8 +99,9 @@ PRE_TYPES = {
 
 
 class Tokenizer:
+    # `pre` defaults to GLM-5.x's own; from_gguf passes the GGUF's (a vocabulary built by hand names its own)
     def __init__(self, tokens: list[str], merges: list[str], token_types: list[int] | None = None,
-                 pre: str = "qwen35", special_ids: dict[str, int] | None = None):
+                 pre: str = "glm5", special_ids: dict[str, int] | None = None):
         self.tokens = tokens
         self.pre = pre
         self.token_types = token_types
