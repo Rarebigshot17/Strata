@@ -100,7 +100,7 @@ class Entrypoint(unittest.TestCase):
     def test_setup_and_start_command_lines(self):
         out = self.run_entry("0", CONTEXT="131072", GPUS="0,1,2")
         setup = next(line for line in out.splitlines() if line.startswith("SETUP:"))
-        self.assertIn("--setup --yes --model UD-IQ3_XXS", setup)
+        self.assertIn("setup.py --setup --yes --model UD-IQ3_XXS", setup)
         self.assertIn(f"--data-dir {self.data}", setup)
         self.assertIn("--host 0.0.0.0", setup)
         self.assertIn("--port 8101", setup)
@@ -110,7 +110,7 @@ class Entrypoint(unittest.TestCase):
         self.assertNotIn("--park-mib", setup)                          # unset: setup's own pick
         self.assertNotIn("--gguf-dir", setup)
         start = next(line for line in out.splitlines() if line.startswith("STARTED WITH:"))
-        self.assertIn("ARGS: --port 8101 --gpus 0,1,2", start)
+        self.assertIn("ARGS: setup.py --port 8101 --gpus 0,1,2", start)
         self.assertTrue((self.opt / "strata-glm-ud-iq3_xxs.json").is_symlink())   # linked right after the setup
 
     def test_port_and_model_from_the_environment(self):
