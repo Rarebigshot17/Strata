@@ -102,8 +102,8 @@ def install(argv, ram=OWNER_RAM, smi=OWNER_SMI, listing=LISTING, configs=(), env
     file, the engine build writes build/strata-glm and the start is recorded (`real_start`: setup's own start() runs,
     and the server command it would run is recorded).  `prepare(base)` makes files beside the Strata folder first,
     "{base}" in `argv` and in `configs` is that folder, and `others` are the earlier GLM Strata folders there.
-    Returns (exit code, output, {config name: config}, {script name: text}, a record of the downloads, builds, starts
-    (and the GPUs and settings a start was given), server commands, engine updates and Hub requests)."""
+    Returns (exit code, output, {config name: config}, {script name: text}, a record of the downloads, builds, starts,
+    server commands, engine updates, Hub requests and the disks --check measured)."""
     with tempfile.TemporaryDirectory() as d:
         base = Path(d)
         root = base / "Strata"
@@ -113,7 +113,7 @@ def install(argv, ram=OWNER_RAM, smi=OWNER_SMI, listing=LISTING, configs=(), env
         if prepare is not None:
             prepare(base)
         argv = [x.replace("{base}", str(base)) for x in argv]
-        rec = {"downloads": [], "builds": [], "starts": [], "start_args": [], "commands": [], "updates": [], "urls": [],
+        rec = {"downloads": [], "builds": [], "starts": [], "commands": [], "updates": [], "urls": [],
                "disks": []}
 
         def disk_usage(path):                          # --check
@@ -134,7 +134,6 @@ def install(argv, ram=OWNER_RAM, smi=OWNER_SMI, listing=LISTING, configs=(), env
 
         def start(cfg_path, port, gpu=None, keep=None):
             rec["starts"].append((cfg_path.name, port))
-            rec["start_args"].append((gpu, {k: v for k, v in (keep or {}).items() if v is not None}))
             return 0
 
         def call(cmd):
