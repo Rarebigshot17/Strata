@@ -4,8 +4,8 @@ A long text is built from files in this repository (its docs and source code, an
 into third_party/), a code word is hidden in it at a chosen depth, and the model is asked for it through the normal
 API (thinking off, greedy). One line per test: length, depth, found or not, prompt tokens, time.
 
-    python tools/needle_bench.py                                  # 32K at depths 10/50/90, http://127.0.0.1:8080
-    python tools/needle_bench.py --lengths 32k,128k,262k --depths 10,50,90 --url http://127.0.0.1:8081
+    python tools/needle_bench.py                                  # 32K at depths 10/50/90, http://127.0.0.1:8101
+    python tools/needle_bench.py --lengths 32k,128k --depths 10,50,90 --url http://127.0.0.1:8102
     python tools/needle_bench.py --out needles.json --api-key KEY
 
 The lengths are targets, 2% under so that "128k" fits a 128K context: the text is cut by characters (about 3.2 per
@@ -67,7 +67,7 @@ def ask(url: str, key: str, prompt: str, timeout: float) -> tuple[str, int, floa
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--url", default="http://127.0.0.1:8080")
+    ap.add_argument("--url", default="http://127.0.0.1:8101")
     ap.add_argument("--api-key", default="")
     ap.add_argument("--lengths", default="32k", help="comma-separated, e.g. 1k,32k,128k,262k")
     ap.add_argument("--depths", default="10,50,90", help="where the code word sits, percent of the text")

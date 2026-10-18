@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Small load generator for the OpenAI-compatible server: C clients at once, each a different prompt.
 
-    python3 tools/serve_load.py http://127.0.0.1:8080 --clients 1,2,4,8 --rounds 3 --max-tokens 256
+    python3 tools/serve_load.py http://127.0.0.1:8101 --clients 1,2,4,8 --rounds 3 --max-tokens 256
 
 For every client count it sends C streamed chat requests at the same moment (each prompt starts with its own nonce, so
 the prompt cache cannot help), and reports per round and as medians: total tokens/s (all generated tokens over the

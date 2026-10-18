@@ -1,19 +1,19 @@
 """A scripted research run against a running Strata server: one long document, then many different questions.
 
-Reads the document once, then asks each question and reports, per question, the time to the first streamed token and
-the whole request, and the run's total.  Greedy (temperature 0), so two runs of the same file give the same answers and
-a change in how the server keeps the document (the shared prefix below) can be compared answer by answer.
+Sends the document with each question and reports, per question, the time to the first streamed token and the whole
+request, and the run's total.  Greedy (temperature 0), so two runs of the same file give the same answers and a change
+in how the server keeps the document between questions can be compared answer by answer.
 
-    python tools/research_run.py --url http://127.0.0.1:8080 --doc paper.txt --questions questions.txt
-    python tools/research_run.py --doc paper.txt --questions q.txt --prefix off --json base.json
-    python tools/research_run.py --doc paper.txt --questions q.txt --prefix on  --json fork.json
-    python tools/research_run.py --compare base.json fork.json
+    python tools/research_run.py --url http://127.0.0.1:8101 --doc paper.txt --questions questions.txt --json base.json
+    python tools/research_run.py --doc paper.txt --questions q.txt --json new.json
+    python tools/research_run.py --compare base.json new.json
 
 --layout split  (the default): the document is the first message, the question the second.
 --layout joined: one message, "document + question" (a client that cannot split them).
---prefix on: the request carries "strata_prefix" naming the document as the shared prefix (docs/DETAILS.md): the
-server reads it once and every question starts from it.  off: the field is left out.
---parallel N: N questions at a time (the server needs "parallel": N for them to run together).
+--prefix on: the request also carries "strata_prefix", naming the document as the part every question shares
+({"messages": 1}, or its characters in the joined layout).  Strata's server accepts the field and ignores it.
+off (the default): the field is left out.
+--parallel N: N questions sent at once (Strata's server answers one request at a time; the others wait their turn).
 """
 from __future__ import annotations
 
@@ -115,14 +115,14 @@ def compare(a_path: str, b_path: str) -> int:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--url", default="http://127.0.0.1:8080")
+    ap.add_argument("--url", default="http://127.0.0.1:8101")
     ap.add_argument("--api-key", default="")
     ap.add_argument("--model", default=None)
     ap.add_argument("--doc")
     ap.add_argument("--questions", help="a text file, one question per line")
     ap.add_argument("--n", type=int, default=0, help="only the first N questions")
     ap.add_argument("--layout", choices=("split", "joined"), default="split")
-    ap.add_argument("--prefix", choices=("on", "off"), default="on")
+    ap.add_argument("--prefix", choices=("on", "off"), default="off")
     ap.add_argument("--parallel", type=int, default=1)
     ap.add_argument("--max-tokens", type=int, default=128)
     ap.add_argument("--limit-chars", type=int, default=0, help="use only the first N characters of the document")
