@@ -45,7 +45,7 @@ class Entrypoint(unittest.TestCase):
         return r.stdout
 
     def test_edited_volume_config_wins_over_a_regular_file_in_opt(self):
-        (self.data / "config" / "strata-glm-ud-iq3_xxs.json").write_text('{"args": ["edited", "--kv-resident", "32768"]}\n')
+        (self.data / "config" / "strata-glm-ud-iq3_xxs.json").write_text('{"args": ["edited", "--ctx", "262144"]}\n')
         (self.opt / "strata-glm-ud-iq3_xxs.json").write_text('{"args": ["stale"]}\n')      # left by an earlier setup
         out = self.run_entry("0")
         self.assertIn("edited", out)

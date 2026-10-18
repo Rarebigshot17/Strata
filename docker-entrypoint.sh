@@ -34,8 +34,8 @@ case "$MODEL" in
   *) echo "MODEL=$MODEL: use UD-IQ3_XXS (3-bit) or IQ4_XS (4-bit)." >&2; exit 1 ;;
 esac
 
-# setup.py starts the newest strata-glm-*.json it finds, so link in exactly the one
-# this model was set up with. The config is the recorded output of that setup (the
+# setup.py starts the strata-glm-*.json it finds (and asks which one when it finds
+# several), so link in exactly the one this model was set up with. The config is the recorded output of that setup (the
 # shards, the context, the parking RAM), not settings the entry point could rebuild
 # from env vars. Its name is setup.py's: strata-glm-<model in lower case>.json.
 tag="glm-$(printf '%s' "$MODEL" | tr 'A-Z' 'a-z')"

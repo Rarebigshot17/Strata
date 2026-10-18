@@ -94,9 +94,9 @@ def quiet(fn, *args, **kw):
 
 def install(argv, ram=OWNER_RAM, smi=OWNER_SMI, listing=LISTING, configs=(), env=None, free=10000.0):
     """setup.main() with `argv` in a temporary Strata folder, everything outside it mocked: nvidia-smi says `smi`, the
-    PC has `ram` GiB and `free` GB of disk, the Hub lists `listing`, a download writes an empty file, the engine build writes build/strata-glm
-    and the start is recorded.  Returns (exit code, output, {config name: config}, {script name: text}, a record of
-    the downloads, builds and starts)."""
+    PC has `ram` GiB and `free` GB of disk, the Hub lists `listing`, a download writes an empty file, the engine build
+    writes build/strata-glm and the start is recorded.  Returns (exit code, output, {config name: config}, {script
+    name: text}, a record of the downloads, builds, starts and Hub requests)."""
     with tempfile.TemporaryDirectory() as d:
         base = Path(d)
         root = base / "Strata"
