@@ -18,10 +18,10 @@ import urllib.request
 from pathlib import Path
 
 from serve import server
-from serve.glm_fixtures import glm_template
-from serve.server import ByteTokenizer, EngineDied, Service, StrataEngine, serve
+from serve.glm_fixtures import GlmTokenizer, glm_template
+from serve.server import EngineDied, Service, StrataEngine, serve
 
-# Every request is answered "ok, done." and GLM's end of turn, <|user|> (259 in server.ByteTokenizer).  Markers in
+# Every request is answered "ok, done." and GLM's end of turn, <|user|> (259 in GlmTokenizer).  Markers in
 # the prompt's bytes: REFUSEME is refused (ERR, no DONE); NFSOLO ends its first request with DONE ... nonfinite and
 # nothing emitted; LONGREPLY reads its prompt for 15 s first (a PP line every 0.25 s).  A STOP ends the last GEN's
 # request, as the engine's does.  --log gets a line for each GEN.
@@ -98,7 +98,7 @@ class RestartWaiters(unittest.TestCase):
         self.engine = StrataEngine(str(script), ['--log', str(self.log)])
         self.addCleanup(self.engine.close)
         self.engine.RESTART_RETRY_S = 0.0              # a start that fails is tried again at once
-        self.svc = Service(self.engine, ByteTokenizer(), glm_template())
+        self.svc = Service(self.engine, GlmTokenizer(), glm_template())
         self.httpd = serve(self.svc, port=0)
         self.addCleanup(self.httpd.server_close)
         self.addCleanup(self.httpd.shutdown)
@@ -271,6 +271,11 @@ class RestartWaiters(unittest.TestCase):
         self.assertEqual((len(ok), errs[:2]), (60, []))
         self.assertEqual(len(self.gens()), 60)
         self.clean()
+        # each request recorded its own row, with the figures of its own DONE (read after its end-of-turn token)
+        with self.svc.status_lock:
+            rows = list(self.svc.history)
+        self.assertEqual(len(rows), 60)
+        self.assertEqual({(r['finish'], r['output_tokens'], r['engine_generated']) for r in rows}, {('stop', 10, 10)})
 
     def test_a_request_waiting_for_a_reload_is_counted_as_queued(self):
         """#1603: with the model unloaded, a request waits for the turn to start the engine: it is queued the whole

@@ -17,11 +17,11 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from serve.glm_fixtures import glm_template
-from serve.server import ByteTokenizer, EngineDied, EngineError, Service, StrataEngine, serve
+from serve.glm_fixtures import GlmTokenizer, glm_template
+from serve.server import EngineDied, EngineError, Service, StrataEngine, serve
 
 # The first GEN line fails as --mode says; every later one (and every one after a restart: the state file says the
-# first was attempted) answers "Z" and GLM's end of turn, <|user|> (259 in server.ByteTokenizer).
+# first was attempted) answers "Z" and GLM's end of turn, <|user|> (259 in GlmTokenizer).
 FAKE = r'''
 import sys
 from pathlib import Path
@@ -68,7 +68,7 @@ class FatalRecovery(unittest.TestCase):
         return e
 
     def service(self, e):
-        svc = Service(e, ByteTokenizer(), glm_template())
+        svc = Service(e, GlmTokenizer(), glm_template())
         self.addCleanup(lambda: svc.engine.close())
         return svc
 
@@ -77,6 +77,10 @@ class FatalRecovery(unittest.TestCase):
         while e.alive() and time.monotonic() < end:
             time.sleep(.01)
         self.assertFalse(e.alive(), 'an engine that exited must not count as loaded for the next request')
+        # alive() turns False as soon as the process is gone or its output closed; the pump notes the last ERR line
+        # a moment later, and death_note needs both that and the exit code
+        e.pump.join(5)
+        e.proc.wait(5)
 
     def run_request(self, svc):
         return list(svc.run([1], False, [], 8, {}, threading.Event()))

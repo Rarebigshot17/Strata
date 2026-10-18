@@ -18,7 +18,7 @@ from unittest import mock
 import urllib.request
 
 from serve import server
-from serve.glm_fixtures import glm_template
+from serve.glm_fixtures import GlmTokenizer, glm_template
 
 
 # strata-glm's serve protocol (src/glm/serve_loop.cpp): INFO and READY, then T and DONE lines for each GEN; a STOP
@@ -52,14 +52,12 @@ while True:
     stop.clear()
     note('request_' + str(count))
     fields = line.split()
-    max_new, n = int(fields[1]), len(fields[-1].split(','))
+    n = len(fields[-1].split(','))
     if count == 1:
         # The test's cleanup (engine.close) also sends STOP, so even a failed assertion leaves no long-lived child.
         stop.wait(15)
         time.sleep(.15)  # STOP was received, but the current chunk has not finished yet: it must drain.
         print('DONE 0 %d 150.0 0.0 cancel 0 0 0 0 0 0 0 0.0 0 0' % n, flush=True)
-    elif max_new > 1:
-        print('T 90\nT 259\nDONE 2 %d 1.0 1.0 stop 0 0 0 0 0 0 0 0.0 %d 0' % (n, n), flush=True)
     else:
         print('T 90\nDONE 1 %d 1.0 1.0 length 0 0 0 0 0 0 0 0.0 %d 0' % (n, n), flush=True)
 '''
@@ -73,7 +71,7 @@ class QuietPromptCancel(unittest.TestCase):
             script.write_text(f'#!{sys.executable}\n' + FAKE, encoding='utf-8')
             script.chmod(0o755)
             engine = server.StrataEngine(str(script), ['--events', str(events)])
-            service = server.Service(engine, server.ByteTokenizer(), glm_template())
+            service = server.Service(engine, GlmTokenizer(), glm_template())
             http = server.serve(service, port=0)
             port = http.server_address[1]
             sock = None
