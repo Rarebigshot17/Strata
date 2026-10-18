@@ -22,7 +22,8 @@ from serve.server import MockEngine, Service, serve  # noqa: E402
 CTX = 8192
 CALL = call_text("read_file", limit=120, path="file.txt")
 OTHER = CALL.replace("read_file", "not_declared")
-TOOLS = [{"name": "read_file", "parameters": {"properties": {"limit": {"type": "integer"}, "path": {"type": "string"}}}}]
+TOOLS = [{"name": "read_file",
+          "parameters": {"properties": {"limit": {"type": "integer"}, "path": {"type": "string"}}}}]
 
 
 def run(text, width, tools=TOOLS, thinking=True, stream_tools=True):
@@ -106,10 +107,14 @@ class Parser(unittest.TestCase):
         from serve import frontend
         text = ("a\n<tool_call>read_file<arg_key>path</arg_key><arg_value>" + "thinking on and on " * 3000 +
                 "</think>answer")
+        p, fed = OutputParser(thinking=True, tools=TOOLS, stream_tools=True), []    # (the feed it came from, event)
         with unittest.mock.patch.object(frontend, "RCALL_MAX", 1000):
-            evs = run(text, 50)
-        first_reasoning_at = next(i for i, e in enumerate(evs) if e.kind == "reasoning" and len(e.text) > 100)
-        self.assertLess(first_reasoning_at, 100)                     # streamed, not kept until </think>
+            for k, i in enumerate(range(0, len(text), 50)):
+                fed += [(k, e) for e in p.feed(text[i:i + 50])]
+            fed += [(len(text) // 50 + 1, e) for e in p.finish()]
+        evs = [e for k, e in fed]
+        first_reasoning_at = next(k for k, e in fed if e.kind == "reasoning" and len(e.text) > 100)
+        self.assertLess(first_reasoning_at, 100)    # streamed after RCALL_MAX characters, not kept until </think>
         self.assertEqual(joined(evs, "reasoning"), text.split("</think>")[0])
         self.assertEqual(joined(evs, "content"), "answer")
 
@@ -123,6 +128,21 @@ class Parser(unittest.TestCase):
 class ThinkEnd(unittest.TestCase):
     """GLM writes the answer right after `</think>`, so every `</think>` ends the thinking, quoted or not (Qwen's #537
     rule, which kept a quoted tag as reasoning text, is gone)."""
+
+    def test_a_quoted_tag_ends_the_thinking(self):
+        # the quotes Qwen's #537 rule kept as reasoning: under GLM the first </think> ends the thinking, and the rest
+        # (a second </think> too) is the answer's text
+        for quote in ("in rcall, `</think>` could arrive inside the held body",
+                      'the mock engine returns "</think>\\n\\n2", no tool call',
+                      '```python\ntext = ("</think>\\n\\nI will use the tag now.")\n```',
+                      "split it on '</think>' first"):
+            text = "plan\n" + quote + "\ndone\n</think>\n\nanswer"
+            head, tail = text.split("</think>", 1)
+            for width in (1, 7, 100_000):
+                with self.subTest(quote=quote[:24], width=width):
+                    evs = run(text, width)
+                    self.assertEqual(joined(evs, "reasoning"), head)
+                    self.assertEqual(joined(evs, "content"), tail)
 
     def test_the_end_after_a_quote_ends_the_thinking(self):
         for thought in ('she said "yes"', "it is `x`", "it is 'x'", "split it on '"):
@@ -210,7 +230,7 @@ class OverHttp(unittest.TestCase):
         self.assertEqual(order, ["thinking", "tool_use", "text"])
         self.assertEqual(json.loads(a["anthropic", True][1]), {"path": "file.txt"})
 
-    def test_a_quoted_call_is_the_answer_text(self):
+    def test_a_call_quoted_in_the_thinking_is_no_call(self):
         script = "Let me look.\n" + call_text("write", path="file.txt") + " is the shape.</think>done"
         a = answers(script)
         self.assertEqual(a["openai", False], ("stop", []))

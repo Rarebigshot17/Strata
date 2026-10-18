@@ -3,8 +3,14 @@ thinking repeats whole passages is ended there as "length".
 
     python -m unittest serve.test_reasoning_loop_recovery
 """
+import io
+import json
+import sys
+import tempfile
 import threading
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from serve.glm_fixtures import GlmTokenizer
 from serve.server import MockEngine, Service, reasoning_repeat_coverage
@@ -124,11 +130,56 @@ class ReasoningLoopRecovery(unittest.TestCase):
     def test_status_and_history_record_the_stop(self):
         engine, service = self.service([self.loop, 'Done.</think>Answer.'])
         events = list(service.run(self.ids, True, [], 40000, {}, threading.Event()))
+        self.assertEqual(len(engine.calls), 1)                   # the second script is never asked for
         self.assertEqual(events[-1][1]['finish'], 'length')
         self.assertEqual(service.history[-1]['finish'], 'length')
         self.assertGreaterEqual(service.history[-1]['reasoning_repeat_coverage'], .25)
         self.assertEqual(service.history[-1]['output_tokens'], events[-1][1]['completion_tokens'])
         self.assertFalse(service.status['busy'])
+
+
+class _Reached(Exception):
+    """main() got as far as serving."""
+
+
+class Config(unittest.TestCase):
+    """The run config's "reasoning_loop_recovery": false (the default) or "stop" (true); "recover" is gone."""
+
+    def run_main(self, cfg):
+        """-> the service's reasoning_loop_recovery, or the SystemExit main() stopped with."""
+        import serve.server as S
+        seen = {}
+
+        def fake_serve(svc, host=None, port=None):
+            seen["mode"] = svc.reasoning_loop_recovery
+            raise _Reached
+
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(S, "serve", fake_serve), \
+                mock.patch.object(sys, "stdout", new=io.StringIO()):
+            p = Path(d) / "cfg.json"
+            p.write_text(json.dumps(cfg), encoding="utf-8")
+            with mock.patch.object(sys, "argv", ["server.py", "--engine", "mock", "--port", "0", "--config", str(p)]):
+                try:
+                    S.main()
+                except _Reached:
+                    return seen["mode"]
+                except SystemExit as e:
+                    return e
+        self.fail("main() returned without serving")
+
+    def test_the_accepted_values(self):
+        for cfg, mode in (({}, False), ({"reasoning_loop_recovery": False}, False),
+                          ({"reasoning_loop_recovery": True}, "stop"), ({"reasoning_loop_recovery": "stop"}, "stop")):
+            with self.subTest(cfg=cfg):
+                got = self.run_main(cfg)
+                self.assertEqual((got, type(got)), (mode, type(mode)))
+
+    def test_recover_and_other_values_are_refused(self):
+        for value in ("recover", "on", 1, None):
+            with self.subTest(value=value):
+                stopped = self.run_main({"reasoning_loop_recovery": value})
+                self.assertIsInstance(stopped, SystemExit)
+                self.assertIn('"reasoning_loop_recovery" must be false or "stop"', str(stopped))
 
 
 if __name__ == '__main__':
