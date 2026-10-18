@@ -1488,8 +1488,8 @@ def check_pc(a) -> tuple:
     if not found:
         fail("no NVIDIA GPU found (nvidia-smi did not answer)",
              f"install the NVIDIA driver ({MIN_DRIVER} or newer; Ubuntu: sudo ubuntu-drivers install) and restart")
+    sel, name_gpus = choose_gpus(a, found)            # a choice it cannot use stops with the table of GPUs
     gpu_table(found)
-    sel, name_gpus = choose_gpus(a, found)
     cards = [g for g in found if g["index"] in sel]
     ok("GPUs: " + " + ".join(gpu_name(g) for g in cards) + (" (the model's layers are shared across them)"
                                                              if len(cards) > 1 else ""))
