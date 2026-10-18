@@ -22,6 +22,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -265,6 +266,29 @@ class CheckpointTests(unittest.TestCase):
         self.assertEqual(self.svc.engine.last_checkpoint, cp)
         self.assertIsNone(self.svc.checkpoint.at)       # taken by that run, not left for another
 
+    def test_the_next_turn_goes_on_from_the_checkpoint(self):
+        # the next turn's prompt starts with this one's up to the checkpoint; after it the reply is written again
+        # without its reasoning, so the engine's state after the generation prompt could not have been continued
+        turn1 = self.messages[:2]
+        ids1, _, _ = self.svc.prepare(turn1, None, {})
+        cp1 = self.svc.checkpoint.at
+        turn2 = turn1 + [{"role": "assistant", "content": "Hello!", "reasoning_content": "Greet back."},
+                         {"role": "user", "content": "More"}]
+        ids2, _, _ = self.svc.prepare(turn2, None, {})
+        self.assertEqual(ids2[:cp1], ids1[:cp1])
+        self.assertNotEqual(ids2[:len(ids1)], ids1)
+        self.assertEqual(self.tok.decode(ids2[cp1:]), "<|assistant|></think>Hello!<|user|>More<|assistant|><think>")
+        self.assertGreater(self.svc.checkpoint.at, cp1)
+
+    def test_no_checkpoint_when_the_conversation_is_not_a_prefix(self):
+        self.svc.template = ChatTemplate(
+            source="{{ messages[0].content }}{% if add_generation_prompt %}!{% else %}?{% endif %}")
+        ids, thinking, max_new = self.svc.prepare([{"role": "user", "content": "x"}], None, {})
+        self.assertEqual(self.tok.decode(ids), "x!")
+        self.assertIsNone(self.svc.checkpoint.at)
+        list(self.svc.run(ids, thinking, None, max_new, {}, threading.Event()))
+        self.assertIsNone(self.svc.engine.last_checkpoint)   # GEN without cp=
+
     def test_tool_results_are_text(self):
         msgs = self.messages + [{"role": "assistant", "content": "", "tool_calls": [
             {"function": {"name": "ls", "arguments": {"path": "."}}}]},
@@ -340,6 +364,43 @@ class FifoTests(unittest.TestCase):
         self.assertFalse(fifo.acquire(blocking=False))
         fifo.release()
         self.assertTrue(fifo.acquire(blocking=False))
+
+    def test_the_turn_follows_the_ticket_not_the_thread(self):
+        fifo, order, threads = S.Fifo(), [], []
+        first = fifo.join()
+        self.assertTrue(fifo.wait(first, 0))
+        tickets = [fifo.join() for _ in range(5)]
+
+        def worker(i):
+            deadline = time.monotonic() + 10
+            while not fifo.wait(tickets[i], 0.05):
+                if time.monotonic() > deadline:
+                    return
+            order.append(i)
+            fifo.release()
+        for i in reversed(range(5)):                     # started in the opposite order to their tickets
+            threads.append(threading.Thread(target=worker, args=(i,)))
+            threads[-1].start()
+        fifo.release()
+        for t in threads:
+            t.join(15)
+        self.assertEqual(order, [0, 1, 2, 3, 4])
+        self.assertEqual(fifo.waiting(), 0)
+
+    def test_a_request_closed_while_queued_gives_up_its_place(self):
+        tok = GlmBytes()
+        svc = S.Service(S.MockEngine(tok, "x"), tok, ChatTemplate(GLM_TEMPLATE))
+        svc.fifo.acquire()
+        with mock.patch.object(S, "QUEUE_BEAT_S", 0.0):
+            run = svc.run([1, 2], False, None, 8, {}, threading.Event())
+            self.assertEqual(next(run), ("ping", None))  # a keep-alive while it waits
+            self.assertEqual(svc.fifo.waiting(), 1)
+            run.close()                                  # the client left
+        self.assertEqual((svc.fifo.waiting(), svc.status["queued"]), (0, 0))
+        svc.fifo.release()
+        events = list(svc.run([1, 2], False, None, 8, {}, threading.Event()))   # the next one gets the turn
+        self.assertEqual(events[-1][1]["finish"], "stop")
+        self.assertFalse(svc.fifo.locked())
 
     def test_a_cancelled_request_leaves_the_queue(self):
         tok = GlmBytes()
@@ -425,6 +486,13 @@ class CompletionsTests(HttpBase):
         self.assertEqual(d["error"]["type"], "not_supported_error")
         self.assertEqual(self.call("/v1/vram")[0], 404)
         self.assertEqual(self.call("/v1/vram", {})[0], 404)
+
+    def test_every_slot_action_is_501_and_reaches_no_engine(self):
+        for path in ("/slots/0?action=restore", "/slots/0?action=save", "/slots/1?action=save",
+                     "/slots/0?action=erase"):
+            status, d = self.call(path, {"filename": "a.bin"})
+            self.assertEqual((status, d["error"]["type"]), (501, "not_supported_error"), path)
+        self.assertEqual(self.engine.last_prompt, [])
 
     def test_health_says_text_only(self):
         status, d = self.call("/health")
