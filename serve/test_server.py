@@ -3889,8 +3889,8 @@ class ForcedToolChoice(unittest.TestCase):
                     self.assertEqual(second, first + self.tok.encode(CallingEngine.THOUGHT + "</think>" + opening))
 
     def test_a_thinking_that_ends_the_turn_opens_the_call(self):
-        # the reply's last token before the end of the turn is the </think> (after a quote, which Qwen's parser held
-        # back, #537): the thinking is over there and the call opens
+        # the reply's last token before the end of the turn is a </think> right after a quote (Qwen's parser held
+        # such a </think> back, #537; GLM's does not): the thinking is over there and the call opens
         thought, calling = 'I will search for "2+2"', self.engine.generate
 
         def generate(ids, max_new, sampling, cancel, checkpoint=None):
@@ -4182,8 +4182,7 @@ class RestartWindow(unittest.TestCase):
 
     def test_context_zero_is_503(self):
         tok = GlmTokenizer()
-        svc = Service(MockEngine(tok, reply_text("", "ok"), max_context=0), tok,
-                      glm_template())
+        svc = Service(MockEngine(tok, reply_text("", "ok"), max_context=0), tok, glm_template())
         httpd = serve(svc, port=0)
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
         try:
@@ -4715,8 +4714,7 @@ class ConnectionClose(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         tok = GlmTokenizer()
-        cls.svc = Service(MockEngine(tok, reply_text("", "ok"), max_context=CTX), tok,
-                          glm_template())
+        cls.svc = Service(MockEngine(tok, reply_text("", "ok"), max_context=CTX), tok, glm_template())
         cls.httpd = serve(cls.svc, port=0)
         cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
 
