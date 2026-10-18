@@ -1438,6 +1438,9 @@ class EngineDeath(unittest.TestCase):
 # ======================================== region B of the GLM test port (plan B3); keep this line ========================================
 
 
+from serve.glm_fixtures import GlmTokenizer, glm_template, reply_text  # noqa: E402
+
+
 class DoneLineEngine(MockEngine):
     """The mock engine whose `last` comes from a DONE line, parsed as StrataEngine parses it."""
 
@@ -1445,53 +1448,22 @@ class DoneLineEngine(MockEngine):
         super().__init__(*a, **kw)
         self.done_lines = list(done_lines)
 
-    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+    def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
         try:
-            yield from super().generate(ids, max_new, sampling, cancel, embeddings)
+            yield from super().generate(ids, max_new, sampling, cancel, checkpoint)
         finally:
             StrataEngine._parse_done(self, self.done_lines.pop(0))
-
-
-class DraftCounts(unittest.TestCase):
-    """#457: GET /metrics gives each request's speculative draft counts (offered / accepted, from the engine's DONE
-    line; None when the line has no such fields) and their running sums in the totals."""
-
-    def test_drafts_in_history_and_totals(self):
-        tok = ByteTokenizer()
-        engine = DoneLineEngine(tok, "</think>\n\nok", max_context=CTX, done_lines=[
-            "DONE 4 20 40.0 30.0 stop 7 12 0",                  # 7 of 12 drafts accepted
-            "DONE 4 20 40.0 30.0 stop",                          # an engine that reports no drafts
-            "DONE 4 20 40.0 30.0 stop 3 5 0 9 10"])
-        svc = Service(engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
-        self.assertEqual((svc.totals["drafts_offered"], svc.totals["drafts_accepted"]), (0, 0))
-        httpd = serve(svc, port=0)
-        base = f"http://127.0.0.1:{httpd.server_address[1]}"
-        try:
-            for _ in range(3):
-                body = json.dumps({"model": "m", "max_tokens": 10, "messages": [{"role": "user", "content": "hi"}]})
-                with urllib.request.urlopen(urllib.request.Request(base + "/v1/chat/completions", data=body.encode(),
-                                                                   headers={"Content-Type": "application/json"}),
-                                            timeout=30) as r:
-                    self.assertEqual(r.status, 200)
-            with urllib.request.urlopen(base + "/metrics", timeout=10) as r:
-                m = json.loads(r.read())
-        finally:
-            httpd.shutdown()
-            httpd.server_close()
-        rows = m["requests"]                                      # newest first
-        self.assertEqual([(r["drafts_offered"], r["drafts_accepted"]) for r in rows], [(5, 3), (None, None), (12, 7)])
-        self.assertEqual((m["totals"]["drafts_offered"], m["totals"]["drafts_accepted"]), (17, 10))
 
 
 class PrometheusMetrics(unittest.TestCase):
     """GET /metrics/prometheus: the totals in Prometheus' text format, under llama-server's names."""
 
     def test_totals(self):
-        tok = ByteTokenizer()
-        engine = DoneLineEngine(tok, "</think>\n\nok", max_context=CTX, done_lines=[
-            "DONE 4 20 400.0 200.0 stop 7 12 5",                # 5 of the prompt's tokens reused
-            "DONE 4 20 400.0 200.0 stop 3 5 0"])
-        svc = Service(engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        engine = DoneLineEngine(tok, reply_text("", "ok"), max_context=CTX, done_lines=[
+            "DONE 4 20 400.0 200.0 stop 0 0 5",                 # 5 of the prompt's tokens reused
+            "DONE 4 20 400.0 200.0 stop 0 0 0"])
+        svc = Service(engine, tok, glm_template())
         httpd = serve(svc, port=0)
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
         try:
@@ -1515,109 +1487,56 @@ class PrometheusMetrics(unittest.TestCase):
         self.assertEqual(m["llamacpp:tokens_predicted_total"], t["output_tokens"])
         self.assertEqual(m["llamacpp:tokens_predicted_seconds_total"], 0.4)
         self.assertEqual((m["llamacpp:requests_processing"], m["llamacpp:requests_deferred"]), (0, 0))
-        self.assertEqual((m["strata:requests_total"], m["strata:drafts_offered_total"],
-                          m["strata:drafts_accepted_total"]), (2, 17, 10))
+        self.assertEqual(m["strata:requests_total"], 2)
 
 
-class PcieShare(unittest.TestCase):
-    """#588: the hit rate stays the VRAM share of the lookups; the routed experts the GPU read over PCIe (the DONE
-    line's 16th field, engine 0.1.39+) are given as their own share of all routed experts."""
+class ExpertCacheHits(unittest.TestCase):
+    """The expert cache's hit rate while the reply was written (the DONE line's hits / lookups, counted during decode):
+    each request's in the history and in its line in the server window, the sums in the totals; None from a DONE line
+    without them."""
 
-    def test_history(self):
-        tok = ByteTokenizer()
-        engine = DoneLineEngine(tok, "</think>\n\nok", max_context=CTX, done_lines=[
-            "DONE 4 20 40.0 30.0 stop 3 5 0 60 100 0 0 0.0 20 25",     # 25 more over PCIe: 20% of 125 routed
-            "DONE 4 20 40.0 30.0 stop 3 5 0 60 100 0 0 0.0 20 0",
-            "DONE 4 20 40.0 30.0 stop 3 5 0 60 100 0 0 0.0 20"])       # an older engine
-        svc = Service(engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+    def test_history_totals_and_log(self):
+        tok = GlmTokenizer()
+        engine = DoneLineEngine(tok, "ok", max_context=CTX, done_lines=[
+            "DONE 4 20 40.0 30.0 stop 0 0 0 60 100 0 0 0.0 20 0",
+            "DONE 4 20 40.0 30.0 stop 0 0 0 30 40 0 0 0.0 20 0",
+            "DONE 4 20 40.0 30.0 stop 0 0 0"])
+        svc = Service(engine, tok, glm_template())
         with contextlib.redirect_stdout(io.StringIO()) as out:
             for _ in range(3):
                 list(svc.run(tok.encode("hi"), False, None, 10, {}, threading.Event()))
         rows = list(svc.history)
-        self.assertEqual([r["hit_rate"] for r in rows], [0.6, 0.6, 0.6])
-        self.assertEqual([r["pcie_share"] for r in rows], [0.2, 0.0, None])
-        self.assertIn("expert cache 60.0% hit (+20.0% of the routed experts over PCIe)", out.getvalue())
+        self.assertEqual([r["hit_rate"] for r in rows], [0.6, 0.75, None])
+        self.assertEqual((svc.totals["hits"], svc.totals["lookups"]), (90, 140))
+        self.assertIn("expert cache 60.0% hit", out.getvalue())
+        self.assertIn("expert cache 75.0% hit", out.getvalue())
+        self.assertEqual(out.getvalue().count("% hit"), 2)
 
 
-class PeerDevice(unittest.TestCase):
-    """#665: several GPUs in the config are a layer split, but --peer-device uses the second card as an expert-cache
-    tier, and the engine refuses it beside --layer-split: the server must not add one then."""
-
-    def test_a_vision_section_starts_the_engine_with_images_1322(self):
-        args = ["--native", "x"]
-        got = engine_args({"args": list(args), "vision": {"exe": "v", "gpu": True}})
-        self.assertEqual(got, args + ["--vision", "--vram-reserve-mib", "700"])
-        got = engine_args({"args": list(args), "vision": {"exe": "v", "gpu": False}})
-        self.assertEqual(got, args + ["--vision"])
-        mine = args + ["--vram-reserve-mib", "1500"]
-        self.assertEqual(engine_args({"args": list(mine), "vision": {"gpu": True}}), mine + ["--vision"])
-        done = args + ["--vision", "--vram-reserve-mib", "700"]                  # setup wrote it: unchanged
-        self.assertEqual(engine_args({"args": list(done), "vision": {"gpu": True}}), done)
-        self.assertEqual(engine_args({"args": list(args)}), args)                # no section: no images
-
-    def test_split_added_for_several_gpus(self):
-        self.assertEqual(engine_args({"args": ["--native", "x"], "gpu": [0, 1]}),
-                         ["--native", "x", "--layer-split", "auto"])
-
-    def test_no_split_with_a_peer(self):
-        args = ["--native", "x", "--peer-device", "1"]
-        self.assertEqual(engine_args({"args": list(args), "gpu": [0, 1]}), args)
-        self.assertEqual(engine_args({"args": list(args), "gpu": [0, 1], "split_skip_if_fits": True}), args)
+class SeveralGpus(unittest.TestCase):
+    """Several GPUs in the config: the engine sees them all, in the order given, and splits the layers by each card's
+    VRAM unless the config's "split" says otherwise."""
 
     def test_both_cards_visible(self):
         from serve.server import child_env
-        env = child_env({"args": ["--peer-device", "1"], "gpu": [0, 1]})
+        env = child_env({"args": [], "gpu": [0, 1]})
         self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "0,1")
 
-
-class LearnedProfile(unittest.TestCase):
-    """#477: "expert_profile_save" in the config: the engine saves its learned profile there, and the next start
-    begins from it when it is a profile of the same model; without the key the arguments are unchanged."""
-
-    def write(self, path, nl=48, ne=512, n=4):
-        sys.path.insert(0, str(ROOT / "tools"))
-        import make_profile
-        old = make_profile.N_LAYER
-        make_profile.N_LAYER = nl
-        try:
-            make_profile.write_profile(path, [(i % nl, i // nl) for i in range(n)], n_expert=ne)
-        finally:
-            make_profile.N_LAYER = old
-
-    def test_without_the_key_nothing_changes(self):
-        args = ["--native", "x", "--expert-profile", "data/expert-profile.bin", "--adapt-every", "4"]
-        self.assertEqual(engine_args({"args": list(args)}), args)
-        self.assertEqual(engine_args({"args": list(args), "expert_profile_save": ""}), args)
-
-    def test_save_and_start_from_it(self):
-        d = Path(tempfile.mkdtemp())
-        self.write(d / "base.bin")
-        cfg = {"args": ["--expert-profile", "base.bin"], "cwd": str(d), "expert_profile_save": "learned.bin",
-               "expert_profile_save_every": 5}
-        # nothing saved yet: the config's profile, and the engine is told where to save
-        self.assertEqual(engine_args(cfg), ["--expert-profile", "base.bin", "--expert-profile-save", "learned.bin",
-                                            "--expert-profile-save-every", "5"])
-        self.write(d / "learned.bin")
-        self.assertEqual(engine_args(cfg)[:2], ["--expert-profile", "learned.bin"])
-        self.write(d / "learned.bin", ne=256)                    # another model's: not used
-        self.assertEqual(engine_args(cfg)[:2], ["--expert-profile", "base.bin"])
-        (d / "learned.bin").write_bytes(b"STRP" + bytes(20))     # not a whole profile
-        self.assertEqual(engine_args(cfg)[:2], ["--expert-profile", "base.bin"])
-        self.write(d / "learned.bin")
-        (d / "learned.bin").write_bytes((d / "learned.bin").read_bytes()[:30])   # truncated
-        self.assertEqual(engine_args(cfg)[:2], ["--expert-profile", "base.bin"])
-
-    def test_no_profile_in_the_args(self):
-        cfg = {"args": ["--native", "x"], "expert_profile_save": "learned.bin"}
-        self.assertEqual(engine_args(cfg), ["--native", "x", "--expert-profile-save", "learned.bin"])
+    def test_a_split_only_when_the_config_has_one(self):
+        args = ["-m", "x.gguf"]
+        self.assertEqual(engine_args({"args": list(args), "gpu": [0, 1]}), args)
+        self.assertEqual(engine_args({"args": list(args), "gpu": [0, 1], "split": [24, 12]}),
+                         args + ["--split", "24,12"])
+        mine = args + ["--split", "1,1"]                              # the args' own: unchanged
+        self.assertEqual(engine_args({"args": list(mine), "gpu": [0, 1], "split": [24, 12]}), mine)
 
 
 class RepeatStop(unittest.TestCase):
     """#606: one token repeated repeat_stop_tokens times in a row ends the reply as "length"; 0 turns it off."""
 
     def run_reply(self, script, limit=None):
-        tok = ByteTokenizer()
-        svc = Service(MockEngine(tok, script, max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        svc = Service(MockEngine(tok, script, max_context=CTX), tok, glm_template())
         if limit is not None:
             svc.repeat_stop_tokens = limit
         ids = tok.encode("hi")
@@ -1651,14 +1570,14 @@ class NonFiniteEngine(MockEngine):
         self.plan, self.calls = list(plan), []
         self.last, self.flushed = None, False
 
-    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+    def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
         self.calls.append(list(ids))
         cut = self.plan.pop(0) if self.plan else None
         # (set before the tokens: the service closes a pass at its end-of-turn token, before the code after the loop)
         self.last = {"prompt_tokens": len(ids), "reused": 0 if self.flushed else len(ids) - 1,
                      "finish": "nonfinite" if cut is not None else "stop"}
         self.flushed = False
-        for i, t in enumerate(super().generate(ids, max_new, sampling, cancel, embeddings)):
+        for i, t in enumerate(super().generate(ids, max_new, sampling, cancel, checkpoint)):
             if cut is not None and i >= cut:
                 break
             yield t
@@ -1672,9 +1591,9 @@ class NonFiniteLogits(unittest.TestCase):
     reply ends as "length"; again on the retry -> an error, no loop."""
 
     def run_reply(self, plan):
-        tok = ByteTokenizer()
+        tok = GlmTokenizer()
         eng = NonFiniteEngine(tok, "hello", max_context=CTX, plan=plan)
-        svc = Service(eng, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        svc = Service(eng, tok, glm_template())
         ids = tok.encode("hi")
         events, done, error = [], None, None
         with contextlib.redirect_stdout(io.StringIO()) as out:
@@ -1717,9 +1636,8 @@ class NonFiniteLogits(unittest.TestCase):
         self.assertEqual(svc.metrics()["requests"][0]["finish"], "error")
 
     def test_twice_over_http(self):
-        tok = ByteTokenizer()
-        svc = Service(NonFiniteEngine(tok, "ok", max_context=CTX, plan=[0, 0]), tok,
-                      ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        svc = Service(NonFiniteEngine(tok, "ok", max_context=CTX, plan=[0, 0]), tok, glm_template())
         httpd = serve(svc, port=0)
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
         try:
@@ -1750,7 +1668,7 @@ class NonFiniteLogits(unittest.TestCase):
         import queue as queue_
         eng = object.__new__(StrataEngine)
         eng.lines = queue_.Queue()
-        for line in ("T 5", "T 6", "DONE 2 3 1.0 2.0 nonfinite 0 0 0"):
+        for line in ("T 5", "T 6", "DONE 2 3 1.0 2.0 nonfinite 0 0 0 0 0 0 0 0.0 3 0"):
             eng.lines.put(line)
         eng.proc = SimpleNamespace(stdin=io.StringIO())
         eng.alive = lambda: True
@@ -1764,96 +1682,6 @@ class NonFiniteLogits(unittest.TestCase):
         self.assertNotIn("STOP", eng.proc.stdin.getvalue())   # the DONE was read: nothing to stop or drain
 
 
-class LayerSplit(unittest.TestCase):
-    """#644: "layer_split" is the first layer of each later GPU; a list is accepted, counts per card are not."""
-
-    def cfg(self, split, gpus=(2, 0, 1, 3)):
-        c = {"args": ["--native", "x"], "gpu": list(gpus)}
-        if split is not ...:
-            c["layer_split"] = split
-        return c
-
-    def test_auto_and_absent(self):
-        for v in (..., None, "", "auto", "AUTO"):
-            self.assertEqual(engine_args(self.cfg(v))[-2:], ["--layer-split", "auto"])
-
-    def test_string_and_list(self):
-        self.assertEqual(engine_args(self.cfg("24,36,42"))[-2:], ["--layer-split", "24,36,42"])
-        self.assertEqual(engine_args(self.cfg(" 24, 36 ,42 "))[-2:], ["--layer-split", "24,36,42"])
-        self.assertEqual(engine_args(self.cfg([24, 36, 42]))[-2:], ["--layer-split", "24,36,42"])
-        self.assertEqual(engine_args(self.cfg(18, gpus=(0, 1)))[-2:], ["--layer-split", "18"])
-        self.assertEqual(engine_args(self.cfg([18], gpus=(0, 1)))[-2:], ["--layer-split", "18"])
-
-    def test_counts_per_card_are_refused_with_the_format(self):
-        for bad in ("24,16,12,12", [24, 16, 12, 12], "24,16,12", "24,36", "x", [24.5, 30, 40], "1,20,30", [True]):
-            with self.assertRaises(ValueError) as e:
-                layer_split_value(self.cfg(bad))
-            self.assertIn("first layer of each later GPU", str(e.exception))
-            self.assertIn('"12,24,36"', str(e.exception))   # the example for 4 GPUs
-
-    def test_one_gpu_ignores_it(self):
-        self.assertEqual(engine_args({"args": ["--native", "x"], "gpu": [0], "layer_split": "24,16"}),
-                         ["--native", "x"])
-
-
-class DraftHeadHint(unittest.TestCase):
-    """#474: a start that stopped at "the draft head does not fit" says what to change, from this start's log lines."""
-
-    def log(self, text, before=""):
-        d = tempfile.mkdtemp()
-        p = Path(d) / "engine.log"
-        p.write_text(before + text, encoding="utf-8")
-        return str(p), len(before.encode())
-
-    def test_the_engines_hint_is_relayed(self):
-        p, off = self.log("strata mtp: the draft head over 106299 tokens needs 348 MiB of VRAM and 120 MiB is free.\n"
-                          "strata mtp: hint: a smaller draft vocabulary needs less VRAM: --draft-vocab en (...)\n"
-                          "strata serve: mtp: the draft head does not fit\n")
-        h = start_failure_hint(p, off)
-        self.assertIn("the draft head does not fit", h)
-        self.assertIn("348 MiB", h)
-        self.assertIn("--draft-vocab en", h)
-
-    def test_an_older_engine_gets_the_advice_in_words(self):
-        p, off = self.log("strata serve: mtp: the draft head does not fit\n")
-        self.assertIn("--draft-vocab en", start_failure_hint(p, off))
-
-    def test_other_failures_and_earlier_starts_add_nothing(self):
-        p, off = self.log("strata serve: cannot open the pack\n")
-        self.assertEqual(start_failure_hint(p, off), "")
-        # an earlier start's failure (before this start's offset) is not this one's
-        p, off = self.log("strata serve: cannot open the pack\n",
-                          before="strata serve: mtp: the draft head does not fit\n")
-        self.assertEqual(start_failure_hint(p, off), "")
-        self.assertEqual(start_failure_hint(None, 0), "")
-        self.assertEqual(start_failure_hint(str(Path(tempfile.mkdtemp()) / "missing.log"), 0), "")
-
-
-class DesktopVramNote(unittest.TestCase):
-    """#560 #516: an AMD card on a Linux desktop with little VRAM left after the start gets a recommended reserve."""
-
-    def test_when_it_applies(self):
-        from serve.server import desktop_vram_note
-        note = desktop_vram_note("hip", 624, ["--kv", "int8"], True)
-        self.assertIn("624 MiB of VRAM free", note)
-        self.assertIn("--vram-reserve-mib 3072", note)
-        self.assertIn("2.3 GB less", note)
-
-    def test_when_it_does_not(self):
-        from serve.server import desktop_vram_note
-        self.assertEqual(desktop_vram_note(None, 624, [], True), "")               # NVIDIA
-        self.assertEqual(desktop_vram_note("hip", 624, [], False), "")             # no desktop session
-        self.assertEqual(desktop_vram_note("hip", 2994, [], True), "")             # room left
-        self.assertEqual(desktop_vram_note("hip", None, [], True), "")             # lazy start: no INFO yet
-        self.assertEqual(desktop_vram_note("hip", 900, ["--vram-reserve-mib", "4000"], True), "")   # already raised
-
-    def test_desktop_detection(self):
-        from serve import server
-        with mock.patch.object(server.os, "name", "posix"), mock.patch.object(server.sys, "platform", "linux"):
-            self.assertTrue(server.linux_desktop({"WAYLAND_DISPLAY": "wayland-0"}))
-            self.assertFalse(server.linux_desktop({}))
-
-
 class StartFailureLog(unittest.TestCase):
     """#496: whatever stopped the engine before READY, the error carries this start's last log lines."""
 
@@ -1861,12 +1689,12 @@ class StartFailureLog(unittest.TestCase):
         from serve.server import start_log_tail
         d = tempfile.mkdtemp()
         p = Path(d) / "engine.log"
-        before = "strata serve: an earlier start's line\n"
-        p.write_text(before + "".join(f"strata serve: line {i}\n" for i in range(30)) + "\n"
-                     "strata serve: cannot open the pack\n", encoding="utf-8")
+        before = "strata-glm: an earlier start's line\n"
+        p.write_text(before + "".join(f"strata-glm: line {i}\n" for i in range(30)) + "\n"
+                     "strata-glm: cannot open the model\n", encoding="utf-8")
         tail = start_log_tail(str(p), len(before.encode()))
         self.assertIn("the engine log's last lines:", tail)
-        self.assertIn("cannot open the pack", tail)
+        self.assertIn("cannot open the model", tail)
         self.assertIn("line 29", tail)
         self.assertNotIn("line 10\n", tail + "\n")                 # 20 lines: 11..29 and the last one
         self.assertIn("line 11", tail)
@@ -1879,7 +1707,7 @@ class StartFailureLog(unittest.TestCase):
 
     def test_the_start_error_has_them(self):
         import serve.server as server
-        fake = "import sys\nsys.stderr.write('strata serve: cannot open the pack packs/x\\n')\nsys.exit(2)\n"
+        fake = "import sys\nsys.stderr.write('strata-glm: cannot open the model models/x.gguf\\n')\nsys.exit(2)\n"
         with tempfile.TemporaryDirectory() as d:
             script, log = Path(d) / "fake_strata.py", Path(d) / "strata.log"
             script.write_text(fake, encoding="utf-8")
@@ -1892,51 +1720,47 @@ class StartFailureLog(unittest.TestCase):
                     StrataEngine("strata", [], log=str(log))
             text = str(cm.exception)
             self.assertIn("exited before it was ready", text)
-            self.assertIn("cannot open the pack packs/x", text)
+            self.assertIn("cannot open the model models/x.gguf", text)
             self.assertNotIn("an earlier start", text)
 
 
 class StartNarrator(unittest.TestCase):
-    """#505: the start's words say what happens to the experts - --mmap-experts loads nothing into RAM up front."""
+    """While the engine starts, the server window says what it does, from this start's log lines: the layers on each
+    GPU, the expert cache, then the warm-up that reads the experts in before READY (a heartbeat repeats its latest
+    line)."""
 
-    def test_the_words_follow_the_flags(self):
-        from serve.server import experts_loading_words
-        self.assertIn("loading the experts into RAM (about 38 GB)", experts_loading_words([], "about 38 GB"))
-        mapped = experts_loading_words(["--mmap-experts"], "about 47 GB")
-        self.assertIn("mapping the experts from the model files (about 47 GB", mapped)
-        self.assertIn("not loaded into RAM", mapped)
-        self.assertIn("the GPU does not hold", experts_loading_words(["--resident-experts"], "about 47 GB"))
-        budget = experts_loading_words(["--mmap-experts", "--resident-budget-gib", "71"], "about 50 GB")
-        self.assertIn("up to 71 GiB", budget)
-        self.assertNotIn("about 50 GB", budget)
-
-    def narrate(self, args, lines):
-        import contextlib
-        import io
+    def narrate(self, lines, before="", heartbeat=20.0, wait=0.8):
         from serve.server import narrate_start
         d = tempfile.mkdtemp()
         log = Path(d) / "engine.log"
-        log.write_text("".join(x + "\n" for x in lines), encoding="utf-8")
+        log.write_text(before + "".join(x + "\n" for x in lines), encoding="utf-8")
         done, out = threading.Event(), io.StringIO()
         with contextlib.redirect_stdout(out):
-            t = threading.Thread(target=narrate_start, args=(str(log), 0, args, done))
+            t = threading.Thread(target=narrate_start, args=(str(log), len(before.encode()), None, done, heartbeat))
             t.start()
-            time.sleep(0.8)
+            time.sleep(wait)
             done.set()
             t.join(5)
         return out.getvalue()
 
-    def test_a_mapped_start(self):
-        said = self.narrate(["--mmap-experts"], ["strata generate: experts via mmap (--mmap-experts; the GGUF shards "
-                                                 "in place, no experts.bin)"])
-        self.assertIn("mapping the experts from the model files", said)
-        self.assertNotIn("loading the experts into RAM", said)
+    def test_the_words_follow_the_log(self):
+        said = self.narrate(["GPU 0: layers 0-30, 21.40 GB weights and buffers, 1.20 GB expert cache",
+                             "GPU 1: layers 31-46, 11.02 GB weights and buffers, 0.80 GB expert cache",
+                             "expert cache: 1920 slots over 46 layers (2.00 GB)",
+                             "warming the experts: 12.0 of 140.0 GB (6 s, 2.00 GB/s)"],
+                            before="GPU 0: an earlier start's line\n")
+        self.assertIn("[strata] starting the engine: mapping the model", said)
+        self.assertIn("[strata] GPU 0: layers 0-30, 21.40 GB weights", said)
+        self.assertIn("[strata] GPU 1: layers 31-46", said)
+        self.assertNotIn("an earlier start", said)
+        self.assertIn("[strata] expert cache: 1920 slots over 46 layers", said)
+        self.assertIn("reading the experts into memory", said)
 
-    def test_an_arena_start(self):
-        said = self.narrate([], ["strata generate: expert arena: resident, 31.64 GiB",
-                                 "strata generate: loaded 31.64 GiB at 3.17 GiB/s"])
-        self.assertIn("loading the experts into RAM (tens of GB)", said)
-        self.assertIn("experts loaded: 31.64 GiB at 3.17 GiB/s", said)
+    def test_the_heartbeat_repeats_the_warm_up(self):
+        said = self.narrate(["warming the experts: 12.0 of 140.0 GB (6 s, 2.00 GB/s)"], heartbeat=0.3, wait=1.5)
+        self.assertIn("[strata] warming the experts: 12.0 of 140.0 GB", said)
+        said = self.narrate([], heartbeat=0.3, wait=1.5)              # nothing logged yet: still starting
+        self.assertIn("[strata] still starting", said)
 
 
 class CancelledRead(unittest.TestCase):
@@ -1945,26 +1769,26 @@ class CancelledRead(unittest.TestCase):
 
     def test_parse_done_read_field(self):
         e = SimpleNamespace()
-        StrataEngine._parse_done(e, "DONE 0 98179 17565.0 0.0 cancel 0 0 0 0 0 0 0 0.0 12288")
+        StrataEngine._parse_done(e, "DONE 0 98179 17565.0 0.0 cancel 0 0 0 0 0 0 0 0.0 12288 0")
         self.assertEqual((e.last["prompt_tokens"], e.last["prompt_read"], e.last["finish"]), (98179, 12288, "cancel"))
-        StrataEngine._parse_done(e, "DONE 0 98179 17565.0 0.0 cancel 0 0 0 0 0 0 0 0.0")
+        StrataEngine._parse_done(e, "DONE 0 98179 17565.0 0.0 cancel 0 0 0 0 0 0 0 0.0")      # a line without it
         self.assertNotIn("prompt_read", e.last)
 
     def test_prompt_tokens_seen(self):
         last = {"finish": "cancel", "reused": 1000, "prompt_read": 2000}
         self.assertEqual(prompt_tokens_seen(98179, last), 3000)
         self.assertEqual(prompt_tokens_seen(98179, {**last, "finish": "stop"}), 98179)   # read in full: all of it
-        self.assertEqual(prompt_tokens_seen(98179, {"finish": "cancel", "reused": 0}), 98179)   # an older engine
+        self.assertEqual(prompt_tokens_seen(98179, {"finish": "cancel", "reused": 0}), 98179)   # no read count
         self.assertEqual(prompt_tokens_seen(98179, {}), 98179)                          # no DONE at all
         self.assertEqual(prompt_tokens_seen(10, {**last, "prompt_read": 50}), 10)       # never past the prompt
 
     def test_history_and_totals(self):
-        tok = ByteTokenizer()
-        engine = DoneLineEngine(tok, "</think>\n\nok", max_context=CTX, done_lines=[
-            "DONE 0 20 400.0 0.0 cancel 0 0 0 0 0 0 0 0.0 8",      # stopped after 8 prompt tokens
-            "DONE 4 20 40.0 30.0 stop 0 0 0 0 0 0 0 0.0 20",
-            "DONE 0 20 400.0 0.0 cancel 0 0 0"])                   # an older engine: no read count
-        svc = Service(engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        engine = DoneLineEngine(tok, reply_text("", "ok"), max_context=CTX, done_lines=[
+            "DONE 0 20 400.0 0.0 cancel 0 0 0 0 0 0 0 0.0 4 0",    # stopped after 4 prompt tokens
+            "DONE 4 20 40.0 30.0 stop 0 0 0 0 0 0 0 0.0 20 0",
+            "DONE 0 20 400.0 0.0 cancel 0 0 0"])                   # a line without the read count
+        svc = Service(engine, tok, glm_template())
         httpd = serve(svc, port=0)
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
         try:
@@ -1981,10 +1805,10 @@ class CancelledRead(unittest.TestCase):
             httpd.server_close()
         rows = m["requests"][::-1]                                # oldest first
         total = rows[0]["prompt_total"]
-        self.assertGreater(total, 8)
+        self.assertGreater(total, 4)
         self.assertEqual([r["prompt_total"] for r in rows], [total] * 3)
-        self.assertEqual([(r["prompt_tokens"], r["prompt_read"]) for r in rows], [(8, 8), (total, 20), (total, None)])
-        self.assertEqual(m["totals"]["prompt_tokens"], 8 + 2 * total)
+        self.assertEqual([(r["prompt_tokens"], r["prompt_read"]) for r in rows], [(4, 4), (total, 20), (total, None)])
+        self.assertEqual(m["totals"]["prompt_tokens"], 4 + 2 * total)
 
 
 class HeldBackArgKeepalive(unittest.TestCase):
@@ -1996,28 +1820,27 @@ class HeldBackArgKeepalive(unittest.TestCase):
     TOOLS = [{"name": "f", "parameters": {"properties": {}}}]
 
     def test_a_held_back_call_still_pings(self):
-        tok = ByteTokenizer()
+        tok = GlmTokenizer()
         clock = [0.0]
 
         class HeldEngine(MockEngine):   # ~1 s to generate each token, none of it leaving the stream
-            def generate(self, ids, max_new, sampling, cancel, embeddings=None):
-                for t in super().generate(ids, max_new, sampling, cancel):
+            def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
+                for t in super().generate(ids, max_new, sampling, cancel, checkpoint):
                     clock[0] += 1.0
                     yield t
 
         # a call inside the thinking is held whole until </tool_call> (the frontend's rcall state): every token
         # after the opener produces no stream event - the same silence a long array argument makes
-        svc = Service(HeldEngine(tok, "<tool_call><function=f>" + "x" * 30, max_context=CTX), tok,
-                      ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        svc = Service(HeldEngine(tok, "<tool_call>f<arg_key>a</arg_key><arg_value>" + "x" * 30, max_context=CTX),
+                      tok, glm_template())
         with mock.patch("serve.server.time.perf_counter", lambda: clock[0]):
             kinds = [k for k, _ in svc.run(tok.encode("hi"), True, self.TOOLS, 60, {}, threading.Event())]
         self.assertIn("ping", kinds)
         self.assertIn("done", kinds)
 
     def test_an_ordinary_answer_does_not_ping(self):
-        tok = ByteTokenizer()
-        svc = Service(MockEngine(tok, "ok", max_context=CTX), tok,
-                      ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        svc = Service(MockEngine(tok, "ok", max_context=CTX), tok, glm_template())
         kinds = [k for k, _ in svc.run(tok.encode("hi"), False, None, 10, {}, threading.Event())]
         self.assertNotIn("ping", kinds)
         self.assertIn("done", kinds)
@@ -2035,9 +1858,9 @@ class LiveRate(unittest.TestCase):
     TOKENS = 30
 
     def setUp(self):
-        self.tok = ByteTokenizer()
+        self.tok = GlmTokenizer()
         self.engine = MockEngine(self.tok, "x" * self.TOKENS, max_context=CTX, delay_s=self.PACE_S)
-        self.svc = Service(self.engine, self.tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        self.svc = Service(self.engine, self.tok, glm_template())
         self.httpd = serve(self.svc, port=0)
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
 
@@ -2120,15 +1943,14 @@ class LiveRate(unittest.TestCase):
         class HalfDead(MockEngine):
             last = {"generated": 99, "prompt_tokens": 9, "prompt_ms": 10.0, "decode_ms": 100.0, "finish": "stop"}
 
-            def generate(self, ids, max_new, sampling, cancel, embeddings=None):
-                for i, t in enumerate(super().generate(ids, max_new, sampling, cancel, embeddings)):
+            def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
+                for i, t in enumerate(super().generate(ids, max_new, sampling, cancel, checkpoint)):
                     if i == 3:
                         raise EngineDied("the engine stopped unexpectedly (exit code -9)")
                     yield t
 
-        tok = ByteTokenizer()
-        svc = Service(HalfDead(tok, "x" * self.TOKENS, max_context=CTX), tok,
-                      ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        svc = Service(HalfDead(tok, "x" * self.TOKENS, max_context=CTX), tok, glm_template())
         httpd = serve(svc, port=0)
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
         try:
@@ -2162,18 +1984,18 @@ class PromptProgress(unittest.TestCase):
             super().__init__(*args, **kwargs)
             self.progress, self.progress_ms, self.reused, self.total = None, 0.0, 0, 0
 
-        def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+        def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
             for read, ms in ((8192, 2200.0), (16384, 4400.0), (24576, 6600.0)):
                 self.progress, self.progress_ms = (read, self.total), ms
                 yield None
-            yield from super().generate(ids, max_new, sampling, cancel, embeddings)
+            yield from super().generate(ids, max_new, sampling, cancel, checkpoint)
 
     def setUp(self):
-        tok = ByteTokenizer()
+        tok = GlmTokenizer()
         self.engine = self.Reading(tok, "y" * self.TOKENS, max_context=CTX)
         self.engine.total = self.TOTAL
         self.engine.reused = 4096                     # RESUME: the conversation checkpoint's reused prefix
-        self.svc = Service(self.engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        self.svc = Service(self.engine, tok, glm_template())
         self.httpd = serve(self.svc, port=0)
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
 
@@ -2205,13 +2027,34 @@ class PromptProgress(unittest.TestCase):
         self.assertIn(": keep-alive", text, "the PP line still keeps the connection alive as it used to")
 
     def test_the_line_that_says_the_prompt_is_read_is_dropped(self):
-        # the batched path leaves up to --short-read tokens to the verify windows, so its last PP stops short of the
-        # prompt.  A prompt under one --prefill chunk sends only that line, and it would show a bar already full.
-        for short in (PP_DONE_TAIL, PP_DONE_TAIL - 1, 1):
-            self.engine.progress, self.engine.progress_ms = (self.TOTAL - short, self.TOTAL), 6600.0
-            self.assertIsNone(prompt_progress(self.svc), f"a PP {short} token(s) short of the end says it is read")
-        self.engine.progress = (self.TOTAL - PP_DONE_TAIL - 1, self.TOTAL)
-        self.assertEqual(prompt_progress(self.svc)["processed"], self.TOTAL - PP_DONE_TAIL - 1)
+        # the engine always sends a PP at done == total; a prompt under one chunk sends only that line, and it would
+        # show a bar already full
+        self.engine.progress, self.engine.progress_ms = (self.TOTAL, self.TOTAL), 6600.0
+        self.assertIsNone(prompt_progress(self.svc), "the PP at the end says the prompt is read")
+        self.engine.progress = (self.TOTAL - 1, self.TOTAL)
+        self.assertEqual(prompt_progress(self.svc)["processed"], self.TOTAL - 1)
+
+    def test_the_engines_pp_and_resume_lines(self):
+        """StrataEngine.generate reads GLM's `RESUME <n>` and `PP <done> <total> <ms> <tok/s>` lines into what
+        prompt_progress reports; each PP reaches the HTTP layer as a ping (None)."""
+        import queue as queue_
+        eng = object.__new__(StrataEngine)
+        eng.lines = queue_.Queue()
+        for line in ("RESUME 4096", "PP 12288 25000 2200 3723.6", "HB", "PP 25000 25000 6600 4654.5", "T 65",
+                     "DONE 1 25000 6600.0 10.0 stop 0 0 4096 0 0 0 0 0.0 20904 0"):
+            eng.lines.put(line)
+        eng.proc = SimpleNamespace(stdin=io.StringIO(), poll=lambda: None)
+        eng.alive = lambda: True
+        eng.silence_s, eng.can_stop, eng.last = 0, True, {}
+        self.svc.engine = eng
+        gen = eng.generate([1] * 25000, 10, {}, threading.Event())
+        self.assertIsNone(next(gen))
+        self.assertEqual(prompt_progress(self.svc), {"total": 25000, "cache": 4096, "processed": 12288, "time_ms": 2200})
+        self.assertIsNone(next(gen))                  # the HB is no progress and, this soon, no ping either
+        self.assertEqual(eng.progress, (25000, 25000))
+        self.assertIsNone(prompt_progress(self.svc))
+        self.assertEqual(list(gen), [65])
+        self.assertEqual((eng.last["reused"], eng.last["prompt_read"]), (4096, 20904))
 
     def test_nothing_before_the_first_chunk(self):
         self.engine.progress = None
@@ -2227,8 +2070,8 @@ class ConfigReasoningEffort(unittest.TestCase):
     its "args" (not an engine option) is lifted into that key."""
 
     def svc(self, effort=None, shared=None):
-        tok = ByteTokenizer()
-        svc = Service(MockEngine(tok, "ok", max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        svc = Service(MockEngine(tok, "ok", max_context=CTX), tok, glm_template())
         svc.config_effort = effort
         svc.shared = shared or {}
         return svc
@@ -2273,13 +2116,13 @@ class SharedSettings(unittest.TestCase):
         import tempfile
 
         class Sampled(RecordingEngine):
-            def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+            def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
                 self.last_sampling = dict(sampling or {})
-                yield from super().generate(ids, max_new, sampling, cancel, embeddings)
+                yield from super().generate(ids, max_new, sampling, cancel, checkpoint)
 
-        tok = ByteTokenizer()
-        cls.engine = Sampled(tok, "</think>\n\nhello", max_context=CTX)
-        cls.svc = Service(cls.engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        cls.engine = Sampled(tok, reply_text("", "hello"), max_context=CTX)
+        cls.svc = Service(cls.engine, tok, glm_template())
         cls.tmp = tempfile.TemporaryDirectory()
         cls.svc.shared_path = os.path.join(cls.tmp.name, "strata-x.shared-settings.json")
         cls.httpd = serve(cls.svc, port=0)
@@ -2309,7 +2152,7 @@ class SharedSettings(unittest.TestCase):
 
     def test_other_apps_get_the_chat_settings(self):
         d = {"temperature": 0.3, "top_p": 0.9, "top_k": 10, "seed": 7, "max_tokens": 77,
-             "reasoning_effort": "low", "experimental_speed_projection": False}
+             "reasoning_effort": "low"}
         code, b = self.req("/settings", {"defaults": d})
         self.assertEqual(code, 200, b)
         self.assertTrue(b["shared"])
@@ -2317,7 +2160,7 @@ class SharedSettings(unittest.TestCase):
         code, _ = self.chat()                                        # a client that sets nothing
         self.assertEqual(code, 200)
         got = self.engine.last_sampling
-        for k in ("temperature", "top_p", "top_k", "seed", "experimental_speed_projection"):
+        for k in ("temperature", "top_p", "top_k", "seed"):
             self.assertEqual(got[k], d[k], k)
         self.assertEqual(self.engine.last_max_new, 77)
         code, _ = self.chat(temperature=0.9, max_tokens=5)          # its own values win
@@ -2334,7 +2177,7 @@ class SharedSettings(unittest.TestCase):
         self.assertEqual((code, b["shared"]), (200, False))
         self.assertFalse(os.path.exists(self.svc.shared_path))
         self.chat()
-        self.assertNotIn("temperature", self.engine.last_sampling)
+        self.assertEqual(self.engine.last_sampling["temperature"], 1.0)    # GLM's default again, not the Chat's 0.3
 
     def test_a_body_without_the_defaults_wrapper_is_rejected(self):
         """A body with no "defaults" key is a mistake, not the documented "clear them" ({"defaults": null})."""
@@ -2412,9 +2255,8 @@ class WebApp(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        tok = ByteTokenizer()
-        cls.svc = Service(RecordingEngine(tok, "</think>\n\nhello", max_context=CTX), tok,
-                          ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        cls.svc = Service(MockEngine(tok, reply_text("", "hello"), max_context=CTX), tok, glm_template())
         cls.httpd = serve(cls.svc, port=0)
         cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
 
@@ -2463,50 +2305,48 @@ class WebApp(unittest.TestCase):
 
     def test_model_discovery_and_props(self):
         svc = self.svc
-        previous = svc.engine.max_context, svc.vision, svc.sampling_defaults, svc.shared
+        previous = svc.engine.max_context, svc.sampling_defaults, svc.shared
         try:
             svc.engine.max_context = 262144
             svc.sampling_defaults = {"temperature": 1.0, "repetition_penalty": 1.1}
             svc.shared = {"temperature": 0.7, "max_tokens": 4096}
-            for vision in (None, object()):
-                svc.vision = vision
-                for path in ("/models", "/v1/models"):
-                    code, _, body = self.get(path)
-                    self.assertEqual(code, 200)
-                    models = json.loads(body)["data"]
-                    self.assertEqual(len(models), 1)
-                    model = models[0]
-                    self.assertEqual(model["id"], svc.model)
-                    self.assertEqual(model["status"]["value"], "loaded")
-                    self.assertEqual(model["meta"]["n_ctx"], 262144)
-                    self.assertEqual(model["architecture"]["input_modalities"],
-                                     ["text", "image"] if vision else ["text"])
-                code, _, body = self.get("/props?model=" + svc.model + "&autoload=false")
+            for path in ("/models", "/v1/models"):
+                code, _, body = self.get(path)
                 self.assertEqual(code, 200)
-                props = json.loads(body)
-                self.assertEqual(props["default_generation_settings"]["n_ctx"], 262144)
-                self.assertEqual(props["default_generation_settings"]["params"],
-                                 {"temperature": 0.7, "repeat_penalty": 1.1, "n_predict": 4096})
-                self.assertEqual(props["chat_template"], (ROOT / "serve/chat_template.jinja").read_text(encoding="utf-8"))
-                for key in ("supports_tools", "supports_tool_calls", "supports_system_role",
-                            "supports_parallel_tool_calls", "supports_preserve_reasoning"):
-                    self.assertIs(props["chat_template_caps"][key], True)
-                self.assertEqual(props["modalities"]["vision"], vision is not None)
-                self.assertEqual(props["total_slots"], 1)
-                self.assertFalse(props["models_autoload"])
+                models = json.loads(body)["data"]
+                self.assertEqual(len(models), 1)
+                model = models[0]
+                self.assertEqual(model["id"], svc.model)
+                self.assertEqual(model["status"]["value"], "loaded")
+                self.assertEqual(model["meta"]["n_ctx"], 262144)
+                self.assertEqual(model["architecture"]["input_modalities"], ["text"])     # the model reads text only
+            code, _, body = self.get("/props?model=" + svc.model + "&autoload=false")
+            self.assertEqual(code, 200)
+            props = json.loads(body)
+            self.assertEqual(props["default_generation_settings"]["n_ctx"], 262144)
+            self.assertEqual(props["default_generation_settings"]["params"],
+                             {"temperature": 0.7, "repeat_penalty": 1.1, "n_predict": 4096})
+            self.assertEqual(props["chat_template"], (ROOT / "serve/chat_template.jinja").read_text(encoding="utf-8"))
+            for key in ("supports_tools", "supports_tool_calls", "supports_system_role",
+                        "supports_parallel_tool_calls", "supports_preserve_reasoning"):
+                self.assertIs(props["chat_template_caps"][key], True)
+            self.assertIs(props["modalities"]["vision"], False)
+            self.assertEqual(props["total_slots"], 1)                 # one request at a time
+            self.assertFalse(props["models_autoload"])
             svc.shared = {}
             props = json.loads(self.get("/props")[2])
             self.assertEqual(props["default_generation_settings"]["params"]["n_predict"], -1)
             self.assertEqual(self.get("/props?model=not-loaded&autoload=true")[0], 404)
         finally:
-            svc.engine.max_context, svc.vision, svc.sampling_defaults, svc.shared = previous
+            svc.engine.max_context, svc.sampling_defaults, svc.shared = previous
 
     def test_props_caps_follow_the_active_template(self):
         source = self.svc.template.source
-        cases = [("{# tools tool_calls reasoning_content <tool_call> <function= #}{{ messages[-1].content }}",
+        cases = [("{# tools tool_calls reasoning_content <tool_call> <arg_key> #}{{ messages[-1].content }}",
                   {"supports_tools": False, "supports_tool_calls": False, "supports_system_role": False,
                    "supports_parallel_tool_calls": False, "supports_preserve_reasoning": False}),
-                 ("{% set preserve_thinking = false %}" + source, {"supports_preserve_reasoning": False}),
+                 # GLM's template keeps earlier turns' reasoning only when clear_thinking is false
+                 ("{% set clear_thinking = true %}" + source, {"supports_preserve_reasoning": False}),
                  ("{% for m in messages %}{% if m.tool_calls and m.tool_calls|length > 1 %}"
                   "{{ raise_exception('Only one tool call is supported.') }}{% endif %}{% endfor %}" + source,
                   {"supports_tool_calls": True, "supports_parallel_tool_calls": False}),
@@ -2546,7 +2386,7 @@ class WebApp(unittest.TestCase):
 
         original = self.svc.template
         try:
-            self.svc.template = ChatTemplate(ROOT / "serve/chat_template.jinja")
+            self.svc.template = glm_template()
             with mock.patch.object(self.svc.template, "render", side_effect=AssertionError("render during request")):
                 with ThreadPoolExecutor(max_workers=4) as pool:
                     results = list(pool.map(lambda _: self.get("/props"), range(4)))
@@ -2572,18 +2412,6 @@ class WebApp(unittest.TestCase):
                 self.svc.status.pop("prompt_tokens", None)
         self.assertEqual(json.loads(self.get("/slots")[2])[0]["n_prompt_tokens"], 0)
 
-    def test_slots_lists_every_batch_slot(self):
-        engine = self.svc.engine
-        engine.batch, engine.max_context = 2, CTX
-        engine.slots_view = lambda: [{"slot": 0, "state": "decoding", "prompt_tokens": 500},
-                                     {"slot": 1, "state": "idle", "held_tokens": 77}]
-        try:
-            slots = json.loads(self.get("/slots")[2])
-        finally:
-            del engine.batch, engine.slots_view
-        self.assertEqual(slots, [{"id": 0, "n_ctx": CTX, "is_processing": True, "n_prompt_tokens": 500},
-                                 {"id": 1, "n_ctx": CTX, "is_processing": False, "n_prompt_tokens": 77}])
-
     def test_the_endpoints_keep_the_context_while_the_engine_restarts(self):
         """#351: max_context is 0 until READY; the endpoints report the last known one."""
         engine = self.svc.engine
@@ -2597,20 +2425,6 @@ class WebApp(unittest.TestCase):
             engine.max_context = had
             del engine.known_ctx
 
-    def test_props_total_slots_follows_the_batch_slots(self):
-        # llama.cpp clients read total_slots as the number of requests the server runs at once
-        engine, had = self.svc.engine, hasattr(self.svc.engine, "batch")
-        previous = getattr(engine, "batch", None)
-        try:
-            for batch, slots in ((0, 1), (3, 3)):
-                engine.batch = batch
-                self.assertEqual(json.loads(self.get("/props")[2])["total_slots"], slots)
-        finally:
-            if had:
-                engine.batch = previous
-            else:
-                del engine.batch
-
     def test_discovery_needs_the_api_key(self):
         self.svc.api_key = "secret"
         try:
@@ -2623,11 +2437,11 @@ class WebApp(unittest.TestCase):
     def test_build_model_path_and_slot_status(self):
         engine = self.svc.engine
         engine.model_path = "models/example.gguf"
-        engine.info = {"version": "0.1.21"}
+        engine.info = {"version": "glm-0.1"}
         try:
             props = json.loads(self.get("/props")[2])
             self.assertEqual(props["model_path"], engine.model_path)
-            self.assertEqual(props["build_info"], "Strata 0.1.21")
+            self.assertEqual(props["build_info"], "Strata glm-0.1")
             for busy in (True, False):
                 with self.svc.status_lock:
                     self.svc.status["busy"] = busy
@@ -2670,10 +2484,10 @@ class ClockedEngine(MockEngine):
     holding the first REUSED tokens of every prompt."""
     REUSED = 5
 
-    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+    def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
         n = 0
         try:
-            for t in super().generate(ids, max_new, sampling, cancel, embeddings):
+            for t in super().generate(ids, max_new, sampling, cancel, checkpoint):
                 n += 1
                 yield t
         finally:          # as StrataEngine reads its DONE line: also when the server closes the request at a stop token
@@ -2687,9 +2501,9 @@ class UsageAndStatus(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        tok = ByteTokenizer()
-        cls.engine = ClockedEngine(tok, "</think>\n\nok", max_context=CTX)
-        cls.svc = Service(cls.engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        cls.engine = ClockedEngine(tok, reply_text("", "ok"), max_context=CTX)
+        cls.svc = Service(cls.engine, tok, glm_template())
         cls.httpd = serve(cls.svc, port=0)
         cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
 
@@ -2802,9 +2616,8 @@ class UsageAndStatus(unittest.TestCase):
 
     def test_no_clock(self):
         """An engine without a clock (MockEngine): no timings, nothing cached."""
-        tok = ByteTokenizer()
-        svc = Service(MockEngine(tok, "</think>\n\nok", max_context=CTX), tok,
-                      ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        svc = Service(MockEngine(tok, reply_text("", "ok"), max_context=CTX), tok, glm_template())
         httpd = serve(svc, port=0)
         try:
             data = json.dumps({"model": "x", "max_tokens": 5, "messages": [{"role": "user", "content": "hi"}]}).encode()
@@ -2820,15 +2633,18 @@ class UsageAndStatus(unittest.TestCase):
             httpd.server_close()
 
 
-class TimingsDrafts(unittest.TestCase):
-    """`timings` carries the speculative draft counts (PR #83's fields) only when the engine reported them."""
+class Timings(unittest.TestCase):
+    """request_timings: a request's `timings` in llama.cpp's names from the engine's DONE figures (the GLM engine
+    drafts nothing, so there are no draft counts); None without an engine clock."""
 
-    def test_draft_fields(self):
-        base = {"prompt_ms": 100.0, "decode_ms": 200.0, "generated": 20, "reused": 4}
-        t = request_timings(24, 20, dict(base, drafts_offered=15, drafts_accepted=11))
-        self.assertEqual((t["draft_n"], t["draft_n_accepted"]), (15, 11))
+    def test_fields(self):
+        base = {"prompt_ms": 100.0, "decode_ms": 200.0, "generated": 20, "reused": 4, "finish": "stop"}
+        t = request_timings(24, 20, base)
         self.assertEqual((t["prompt_n"], t["cache_n"]), (20, 4))
-        self.assertNotIn("draft_n", request_timings(24, 20, base))
+        self.assertEqual((t["prompt_per_second"], t["predicted_per_second"]), (200.0, 100.0))
+        self.assertNotIn("draft_n", t)
+        t = request_timings(24, 20, dict(base, prompt_read=10))      # #1870: the engine read 10, the rest was kept
+        self.assertEqual((t["prompt_n"], t["cache_n"]), (10, 14))
         self.assertIsNone(request_timings(24, 20, {}))
 
 
@@ -2854,9 +2670,9 @@ class SharingTheGpu(unittest.TestCase):
     """Idle unload, POST /unload and /load, the free-VRAM guard and the before_load hook (all off by default)."""
 
     def setUp(self):
-        tok = ByteTokenizer()
-        self.engine = UnloadableEngine(tok, "</think>\n\nok", max_context=CTX)
-        self.svc = Service(self.engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        self.engine = UnloadableEngine(tok, reply_text("", "ok"), max_context=CTX)
+        self.svc = Service(self.engine, tok, glm_template())
         self.httpd = serve(self.svc, port=0)
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
 
@@ -3030,39 +2846,15 @@ class SharingTheGpu(unittest.TestCase):
             self.assertLess(time.time() - t0, 5)
         self.assertTrue(self.engine.alive())
 
-    def test_vision_encoder_unloads_and_starts_first(self):
-        order = []
-
-        class FakeVision:
-            running = True
-
-            def alive(self):
-                return self.running
-
-            def unload(self):
-                self.running = False
-
-            def restart(self):
-                order.append("vision")
-                self.running = True
-
-        engine_restart = self.engine.restart
-        self.engine.restart = lambda: (order.append("engine"), engine_restart())
-        self.svc.vision = FakeVision()
-        self.assertEqual(self.svc.unload(), "unloaded")
-        self.assertFalse(self.svc.vision.alive())
-        self.assertEqual(self.chat()[0], 200)
-        self.assertEqual(order, ["vision", "engine"])             # the encoder first, as at a start
-        self.assertTrue(self.svc.vision.alive())
-
     def test_off_by_default(self):
         self.assertEqual((self.svc.idle_unload_s, self.svc.min_free_vram_mib, self.svc.before_load), (0, 0, None))
         self.assertEqual(self.req("/health")[1]["loaded"], True)
 
 
 class ThinkingEngine(MockEngine):
-    """Thinks THOUGHT, then answers; a prompt that already ends its thinking (the budget's wrap-up) gets the answer
-    at once, the way the model continues after </think>.  Records every prompt it is given."""
+    """Thinks THOUGHT, then answers; a prompt that already ends its thinking (the budget's wrap-up, or the generation
+    prompt with thinking off) gets the answer at once, the way GLM continues after </think>.  Each reply ends with
+    GLM's end of turn (<|user|>).  Records every prompt it is given."""
     THOUGHT = "Let me think step by step about two plus two. " * 4          # 184 reasoning tokens (one per byte)
     ANSWER = "The answer is 4."
 
@@ -3070,11 +2862,13 @@ class ThinkingEngine(MockEngine):
         super().__init__(tok, "x", max_context=CTX)
         self.prompts = []
 
-    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+    def reply(self, closed):
+        return self.ANSWER if closed else reply_text(self.THOUGHT, self.ANSWER)
+
+    def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
         self.prompts.append(list(ids))
-        done = self.tok.decode(ids).endswith("</think>\n\n")
-        text = self.ANSWER if done else self.THOUGHT + "</think>\n\n" + self.ANSWER
-        for t in (self.tok.encode(text) + self.tok.encode("<|im_end|>", parse_special=True))[:max_new]:
+        text = self.reply(self.tok.decode(ids).endswith("</think>"))
+        for t in (self.tok.encode(text) + self.tok.encode("<|user|>", parse_special=True))[:max_new]:
             if cancel.is_set():
                 return
             yield t
@@ -3085,23 +2879,17 @@ class EndsInsideThinkingEngine(ThinkingEngine):
     thinking (the retry) gets the answer."""
     THOUGHT = "Let me think: two plus two is four."
 
-    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
-        self.prompts.append(list(ids))
-        done = self.tok.decode(ids).endswith("</think>" + chr(10) + chr(10))
-        text = self.ANSWER if done else self.THOUGHT
-        for t in (self.tok.encode(text) + self.tok.encode("<|im_end|>", parse_special=True))[:max_new]:
-            if cancel.is_set():
-                return
-            yield t
+    def reply(self, closed):
+        return self.ANSWER if closed else self.THOUGHT
 
 
 class ReasoningCloseRetry(unittest.TestCase):
     """#1053 (opt-in): a reply that ends inside <think> with no answer is continued once with the thinking closed."""
 
     def setUp(self):
-        self.tok = ByteTokenizer()
+        self.tok = GlmTokenizer()
         self.engine = EndsInsideThinkingEngine(self.tok)
-        self.svc = Service(self.engine, self.tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        self.svc = Service(self.engine, self.tok, glm_template())
         self.httpd = serve(self.svc, port=0)
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
 
@@ -3125,20 +2913,20 @@ class ReasoningCloseRetry(unittest.TestCase):
         self.svc.reasoning_close_retry = True
         c = self.chat()
         self.assertEqual(len(self.engine.prompts), 2)
-        self.assertTrue(self.tok.decode(self.engine.prompts[1]).endswith("</think>" + chr(10) + chr(10)))
+        self.assertTrue(self.tok.decode(self.engine.prompts[1]).endswith(self.engine.THOUGHT + "</think>"))
         self.assertEqual(c["message"]["content"], EndsInsideThinkingEngine.ANSWER)
         self.assertIn("two plus two is four", c["message"]["reasoning_content"])
         self.assertEqual(c["finish_reason"], "stop")
 
     def test_a_reply_that_answered_is_not_touched(self):
         self.svc.reasoning_close_retry = True
-        self.engine.THOUGHT = "ok</think>" + chr(10) + chr(10) + "Fine."
+        self.engine.THOUGHT = reply_text("ok", "Fine.")
         c = self.chat()
         self.assertEqual(len(self.engine.prompts), 1)
         self.assertEqual(c["message"]["content"], "Fine.")
 
     def test_a_reply_that_closed_its_thinking_right_after_a_quote_is_not_touched(self):
-        # #537: that </think> waits for the character after it; the end of the turn makes it the end of the thinking
+        # a </think> with nothing after it but the end of the turn is the end of the thinking: no answer, no retry
         self.svc.reasoning_close_retry = True
         self.engine.THOUGHT = 'two plus two is "4"</think>'
         c = self.chat()
@@ -3152,9 +2940,9 @@ class ThinkingBudget(unittest.TestCase):
     continuing from the prompt plus what it generated plus the wrap-up (a prefix the engine already holds)."""
 
     def setUp(self):
-        self.tok = ByteTokenizer()
+        self.tok = GlmTokenizer()
         self.engine = ThinkingEngine(self.tok)
-        self.svc = Service(self.engine, self.tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        self.svc = Service(self.engine, self.tok, glm_template())
         self.httpd = serve(self.svc, port=0)
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
 
@@ -3254,9 +3042,10 @@ class ThinkingBudget(unittest.TestCase):
               "max_tokens": 6400, "thinking_budget": 2048}
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            self.svc._progress(0, st=st)
-            self.svc._progress(0, st={**st, "phase": "answering"})
-            self.svc._progress(0, st={**st, "thinking_budget": None})
+            for s in (st, {**st, "phase": "answering"}, {**st, "thinking_budget": None}):
+                with self.svc.status_lock:
+                    self.svc.status.update(s)
+                self.svc._progress(0)
         lines = out.getvalue().splitlines()
         self.assertIn("thinking: 10 of budget 2048 (max 6400) tokens", lines[0])
         self.assertIn("answering: 10 of max 6400 tokens", lines[1])
