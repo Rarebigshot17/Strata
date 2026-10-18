@@ -177,7 +177,7 @@ def _off(value) -> bool:
     return not value or (isinstance(value, str) and value.strip().lower() in ("false", "off", "no", "0"))
 
 
-def template_kwargs(kwargs: dict, extra) -> dict:
+def merge_template_kwargs(kwargs: dict, extra) -> dict:
     """`kwargs` (from the request's own effort or thinking fields) with the client's chat_template_kwargs on top - the
     vLLM / llama.cpp convention, {"chat_template_kwargs": {"enable_thinking": false, "clear_thinking": false}}.  Every
     key reaches the template (GLM's reads clear_thinking: false keeps the reasoning of earlier turns), except the
@@ -513,12 +513,7 @@ def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
     # OpenAI Chat Completions: "reasoning_effort"; Responses style: "reasoning": {"effort": ...}
     reasoning = req.get("reasoning") if isinstance(req.get("reasoning"), dict) else {}
     kwargs.update(effort_kwargs(req.get("reasoning_effort") or reasoning.get("effort")))
-    # the vLLM / llama.cpp convention: {"chat_template_kwargs": {"enable_thinking": false, "reasoning_effort": "low"}}
-    for k, v in (req.get("chat_template_kwargs") or {}).items():
-        if k == "enable_thinking" and not v:
-            kwargs = {"enable_thinking": False}
-        elif k == "reasoning_effort" and "enable_thinking" not in kwargs:
-            kwargs.update(effort_kwargs(v))
+    kwargs = merge_template_kwargs(kwargs, req.get("chat_template_kwargs"))
     return _late_system_to_user(messages), tools, kwargs
 
 
@@ -615,6 +610,7 @@ def anthropic_to_messages(req: dict, think_unasked: bool = True) -> tuple[list[d
         # A config's reasoning_effort still applies: Service.with_shared sets output_config before this runs.  A
         # request that gives its own reasoning_budget_tokens (#123) asks for thinking, so it thinks as before.
         kwargs["enable_thinking"] = False
+    kwargs = merge_template_kwargs(kwargs, req.get("chat_template_kwargs"))
     return _late_system_to_user(messages), tools, kwargs
 
 
