@@ -9,8 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
-from serve.frontend import ChatTemplate
-from serve.server import ByteTokenizer, EngineDied, MockEngine, Service, serve
+from serve.glm_fixtures import GlmTokenizer, glm_template, reply_text
+from serve.server import EngineDied, MockEngine, Service, serve
 
 
 class ReloadableEngine(MockEngine):
@@ -32,9 +32,8 @@ class MonitorOff(unittest.TestCase):
     """#332 is opt-in: by default no prompt or answer is kept, and the monitor's endpoints do not exist."""
 
     def test_off_by_default(self):
-        tok = ByteTokenizer()
-        svc = Service(MockEngine(tok, "Hello.", max_context=4096), tok,
-                      ChatTemplate(Path(__file__).parent / "chat_template.jinja"))
+        tok = GlmTokenizer()
+        svc = Service(MockEngine(tok, "Hello.", max_context=4096), tok, glm_template())
         httpd = serve(svc, port=0)
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
         try:
@@ -55,9 +54,10 @@ class MonitorOff(unittest.TestCase):
 
 class Monitor(unittest.TestCase):
     def setUp(self):
-        self.tok = ByteTokenizer()
-        self.engine = ReloadableEngine(self.tok, "Thought.</think>\nHello <script>alert(1)</script>.", max_context=16384)
-        self.svc = Service(self.engine, self.tok, ChatTemplate(Path(__file__).parent / "chat_template.jinja"))
+        self.tok = GlmTokenizer()
+        self.engine = ReloadableEngine(self.tok, reply_text("Thought.", "Hello <script>alert(1)</script>."),
+                                       max_context=16384)
+        self.svc = Service(self.engine, self.tok, glm_template())
         self.svc.api_monitor = True                       # opt-in ("api_monitor": true / --api-monitor)
         self.httpd = serve(self.svc, port=0)
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
@@ -195,56 +195,68 @@ class Monitor(unittest.TestCase):
 
 
 class ConversationCacheCard(unittest.TestCase):
-    """#596: /metrics' "conversation_cache": the parked conversations from the engine's log lines, the budget and
-    slots from its INFO line, and how much of the prompts the cache gave back."""
+    """#596: /metrics' "conversation_cache": the parked conversations and checkpoints from the engine's
+    "conversations:" log lines, the budget from its INFO line (park_mib), and how much of the prompts the cache gave
+    back."""
 
-    PARK = ("strata serve: conversation cache: parked 5000 tokens in 12.0 ms; parked=1 bytes=104857600 evictions=0 "
-            "snapshot_bytes=104857600 reused_kv_bytes=0\n")
-    RESTORE = "strata serve: conversation cache: restored 4000 tokens (exact) in 30.0 ms; parked=2 bytes=209715200\n"
+    PARK = "conversations: parked 5000 tokens (100.000 MiB, 12 ms) for a new conversation\n"
+    ONE = "conversations: 1 parked, 0 checkpoints, 100.000 of 8192.0 MiB\n"
+    RESUME = "conversations: resumed a parked conversation at 4000 of 4100 prompt tokens (30 ms)\n"
+    TWO = "conversations: 2 parked, 1 checkpoints, 200.000 of 8192.0 MiB\n"
+    DROP = "conversations: dropped a parked conversation of 5000 tokens (memory)\n"
 
     def test_the_log(self):
         from serve.server import ConvCacheLog
         import tempfile
         with tempfile.TemporaryDirectory() as d:
             log = Path(d) / "strata.log"
-            log.write_text("an earlier run\n" + self.PARK, encoding="utf-8")
+            log.write_text("an earlier run\n" + self.PARK + self.ONE, encoding="utf-8")
             start = log.stat().st_size                 # this run starts here: the earlier run's park is not counted
             c = ConvCacheLog()
-            self.assertEqual(c.poll(str(log), start)["parked"], 0)
-            with open(log, "a", encoding="utf-8") as f:
-                f.write("strata serve: something else\n" + self.PARK + self.RESTORE + "strata serve: conversation ca")
             st = c.poll(str(log), start)
-            self.assertEqual((st["parked"], st["bytes"], st["parks"], st["restores"]), (2, 209715200, 1, 1))
-            self.assertEqual((st["last_event"], st["last_tokens"]), ("restored", 4000))
+            self.assertEqual((st["parked"], st["parks"]), (0, 0))
+            with open(log, "a", encoding="utf-8") as f:
+                f.write("something else\n" + self.PARK + self.ONE + self.RESUME + self.TWO + self.DROP
+                        + "conversations: 1 par")
+            st = c.poll(str(log), start)
+            self.assertEqual((st["parked"], st["checkpoints"], st["bytes"]), (2, 1, 209715200))
+            self.assertEqual((st["parks"], st["restores"], st["evictions"]), (1, 1, 1))
+            self.assertEqual((st["last_event"], st["last_from"], st["last_tokens"]),
+                             ("resumed", "a parked conversation", 4000))
             with open(log, "a", encoding="utf-8") as f:   # the cut line is read once it is whole
-                f.write("che: dropped 1 superseded copy of this conversation; parked=1\n")
-            self.assertEqual(c.poll(str(log), start)["parked"], 1)
+                f.write("ked, 0 checkpoints, 100.000 of 8192.0 MiB\n")
+            st = c.poll(str(log), start)
+            self.assertEqual((st["parked"], st["checkpoints"], st["bytes"]), (1, 0, 104857600))
             self.assertEqual(c.poll(str(log), log.stat().st_size)["parked"], 0)   # the engine started again
             self.assertEqual(c.poll(None, None)["parked"], 0)
 
     def test_metrics(self):
-        tok = ByteTokenizer()
-        engine = MockEngine(tok, "Thought.</think>\nHello.", max_context=4096)
-        engine.info = {"conversation_cache_mib": 8192, "conversation_cache_slots": 4}
-        svc = Service(engine, tok, ChatTemplate(Path(__file__).parent / "chat_template.jinja"))
+        tok = GlmTokenizer()
+        engine = MockEngine(tok, reply_text("Thought.", "Hello."), max_context=4096)
+        engine.info = {"park_mib": 8192}
+        svc = Service(engine, tok, glm_template())
         httpd = serve(svc, port=0)
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
-        try:
+
+        def card():
             with urllib.request.urlopen(base + "/metrics", timeout=10) as r:
-                c = json.loads(r.read())["conversation_cache"]
-            self.assertEqual((c["enabled"], c["budget_mib"], c["slots"], c["parked"], c["requests"]),
-                             (True, 8192, 4, 0, 0))
+                return json.loads(r.read())["conversation_cache"]
+        try:
+            c = card()
+            self.assertEqual((c["enabled"], c["budget_mib"], c["parked"], c["checkpoints"], c["requests"]),
+                             (True, 8192, 0, 0, 0))
+            self.assertNotIn("slots", c)                   # the GLM engine has no batch slots
             req = urllib.request.Request(base + "/v1/chat/completions", headers={"Content-Type": "application/json"},
                                          data=json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode())
             with urllib.request.urlopen(req, timeout=10) as r:
                 r.read()
-            with urllib.request.urlopen(base + "/metrics", timeout=10) as r:
-                c = json.loads(r.read())["conversation_cache"]
+            c = card()
             self.assertEqual(c["requests"], 1)
             self.assertGreater(c["last_prompt"], 0)
+            engine.info = {"park_mib": 0}                  # --park-mib 0: parking off
+            self.assertEqual((card()["enabled"], card()["budget_mib"]), (False, 0))
             engine.info = {}
-            with urllib.request.urlopen(base + "/metrics", timeout=10) as r:
-                self.assertFalse(json.loads(r.read())["conversation_cache"]["enabled"])   # off: the reuse lines only
+            self.assertFalse(card()["enabled"])            # an engine that says nothing: the reuse lines only
         finally:
             httpd.shutdown()
             httpd.server_close()
