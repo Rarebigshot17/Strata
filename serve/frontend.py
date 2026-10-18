@@ -967,7 +967,9 @@ class OutputParser:
     <arg_value>V</arg_value>...</tool_call>` in the content (the prompt usually opens the `<think>`; `thinking` says
     it did).  Events: "reasoning" and "content" text, and for each call "tool_call" with its name and arguments.
     `state` is "reasoning", "rcall" (a call inside the reasoning, held), "content", "call" (a call being read) or
-    "json" (recover: a JSON call).  `buf` is the text held back in the reasoning and content states."""
+    "json" (recover: a JSON call).  `buf` is the text held back: a tag still arriving or newlines that may come
+    before a call in the reasoning and content states (never a whole `</think>`: it ends the thinking at once), the
+    held call in "rcall" and "json", nothing in "call" (the CallReader holds it)."""
 
     def __init__(self, thinking: bool = True, tools: list[dict] | None = None, stream_tools: bool = False,
                  recover: bool = False):
