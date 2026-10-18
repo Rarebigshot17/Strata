@@ -1727,18 +1727,28 @@ class StartNarrator(unittest.TestCase):
     GPU, the expert cache, then the warm-up that reads the experts in before READY (a heartbeat repeats its latest
     line)."""
 
-    def narrate(self, lines, before="", heartbeat=20.0, wait=0.8):
+    class Polls:
+        """narrate_start's `done`: `n` reads of the log, each one moving the test's clock on by the poll's half
+        second, then the end of the start (no sleeps racing the poll)."""
+
+        def __init__(self, n, clock):
+            self.n, self.clock = n, clock
+
+        def wait(self, timeout):
+            if self.n <= 0:
+                return True
+            self.n -= 1
+            self.clock[0] += timeout
+            return False
+
+    def narrate(self, lines, before="", heartbeat=20.0, polls=1):
         from serve.server import narrate_start
         d = tempfile.mkdtemp()
         log = Path(d) / "engine.log"
         log.write_text(before + "".join(x + "\n" for x in lines), encoding="utf-8")
-        done, out = threading.Event(), io.StringIO()
-        with contextlib.redirect_stdout(out):
-            t = threading.Thread(target=narrate_start, args=(str(log), len(before.encode()), None, done, heartbeat))
-            t.start()
-            time.sleep(wait)
-            done.set()
-            t.join(5)
+        clock, out = [1000.0], io.StringIO()
+        with mock.patch("serve.server.time.time", lambda: clock[0]), contextlib.redirect_stdout(out):
+            narrate_start(str(log), len(before.encode()), None, self.Polls(polls, clock), heartbeat)
         return out.getvalue()
 
     def test_the_words_follow_the_log(self):
@@ -1753,11 +1763,16 @@ class StartNarrator(unittest.TestCase):
         self.assertNotIn("an earlier start", said)
         self.assertIn("[strata] expert cache: 1920 slots over 46 layers", said)
         self.assertIn("reading the experts into memory", said)
+        self.assertNotIn("warming the experts", said)                 # no heartbeat yet
+        self.assertNotIn("still starting", said)
 
-    def test_the_heartbeat_repeats_the_warm_up(self):
-        said = self.narrate(["warming the experts: 12.0 of 140.0 GB (6 s, 2.00 GB/s)"], heartbeat=0.3, wait=1.5)
-        self.assertIn("[strata] warming the experts: 12.0 of 140.0 GB", said)
-        said = self.narrate([], heartbeat=0.3, wait=1.5)              # nothing logged yet: still starting
+    def test_the_heartbeat_repeats_the_latest_warm_up_line(self):
+        said = self.narrate(["warming the experts: 12.0 of 140.0 GB (6 s, 2.00 GB/s)",
+                             "warming the experts: 30.0 of 140.0 GB (15 s, 2.00 GB/s)"], heartbeat=0.3, polls=2)
+        self.assertEqual(said.count("reading the experts into memory"), 1)
+        self.assertIn("[strata] warming the experts: 30.0 of 140.0 GB", said)
+        self.assertNotIn("12.0 of 140.0 GB", said)
+        said = self.narrate([], heartbeat=0.3)                        # nothing logged yet: still starting
         self.assertIn("[strata] still starting", said)
 
 
