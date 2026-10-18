@@ -940,10 +940,6 @@ class UnfinishedToolCall(unittest.TestCase):
                          (("length", self.CUT_ARGS), ("max_tokens", self.CUT_ARGS)))
         self.assertEqual((a["openai", False][0], a["anthropic", False][0]), ("length", "max_tokens"))
 
-    # BUG: the whole (non-streamed) answers report a cut call as a call to run: openai_collect drops only calls whose
-    # arguments are not JSON (#211), and the parser now closes a cut call's JSON, so the OpenAI message has the call
-    # with the cut arguments; anthropic_collect keeps its tool_use block with the cut input
-    @unittest.expectedFailure
     def test_whole_answers_leave_a_cut_call_out(self):
         # the call has no arguments to give: a client must not run a write of half a file
         a = self.answers(self.CUT)

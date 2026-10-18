@@ -2469,9 +2469,11 @@ def prompt_progress(svc: Service):
             "time_ms": int(getattr(engine, "progress_ms", 0) or 0)}
 
 
-def openai_chunks(svc: Service, req: dict, ids, thinking, tools, max_new, cancel, run=None, force=None):
+def openai_chunks(svc: Service, req: dict, ids, thinking, tools, max_new, cancel, run=None, force=None,
+                  unfinished: set | None = None):
     """`run`: the events to send instead of Service.run's (run_with_mcp); its ("mcp", {...}) items become chunks with
-    an empty delta and a `strata_mcp` field, which only the web app reads.  `force`: see Service.run."""
+    an empty delta and a `strata_mcp` field, which only the web app reads.  `force`: see Service.run.  `unfinished`
+    gets the index of every streamed call the output ended inside (#211), for openai_collect."""
     cid, created = "chatcmpl-" + uuid.uuid4().hex[:24], int(time.time())
     model = svc.model_for(req)
     # llama.cpp's flag, and its default: a client that wants prompt progress asks for it, and nothing changes for one
@@ -2519,6 +2521,8 @@ def openai_chunks(svc: Service, req: dict, ids, thinking, tools, max_new, cancel
         else:
             # a streamed call without its final tool_call is one the output ended inside: not "tool_calls" (#211)
             whole = calls and streamed.keys() <= finished
+            if unfinished is not None:
+                unfinished.update(streamed[c] for c in streamed.keys() - finished)
             finish = "tool_calls" if whole and x["finish"] == "stop" else {"cancel": "stop"}.get(x["finish"], x["finish"])
             last = chunk({}, finish)
             pt = x.get("prompt_tokens", len(ids))     # after MCP rounds: the last round's prompt
@@ -2593,7 +2597,10 @@ def _is_json(text: str) -> bool:
         return False
 
 
-def openai_collect(chunks) -> dict:
+def openai_collect(chunks, unfinished: set | frozenset = frozenset()) -> dict:
+    """The non-streamed answer from openai_chunks' stream.  A call the output ended inside is left out (#211): the
+    indices openai_chunks put in `unfinished` (the GLM parser closes such a call's JSON, so it parses), and any call
+    whose arguments do not parse when the finish is not "tool_calls"."""
     content, reasoning, by_index, last, mcp = [], [], {}, None, []
     for c in chunks:
         if c is None:                              # a heartbeat
@@ -2611,7 +2618,7 @@ def openai_collect(chunks) -> dict:
             cur["function"]["name"] += fn.get("name") or ""
             cur["function"]["arguments"] += fn.get("arguments") or ""
         last = c
-    calls = [by_index[i] for i in sorted(by_index)]
+    calls = [by_index[i] for i in sorted(by_index) if i not in unfinished]
     if last["choices"][0]["finish_reason"] != "tool_calls":
         calls = [c for c in calls if _is_json(c["function"]["arguments"])]   # a call the output ended inside (#211)
     msg = {"role": "assistant", "content": "".join(content) or None}
@@ -2655,7 +2662,10 @@ def structured_chunks(chunks, validator):
 
 
 # ------------------------------------------------------------------------------------------------ Anthropic
-def anthropic_events(svc: Service, req: dict, ids, thinking, tools, max_new, cancel, force=None):
+def anthropic_events(svc: Service, req: dict, ids, thinking, tools, max_new, cancel, force=None,
+                     unfinished: set | None = None):
+    """Anthropic's stream events.  `unfinished` gets the block index of every streamed call the output ended inside
+    (#211), for anthropic_collect."""
     mid = "msg_" + uuid.uuid4().hex[:24]
     yield "message_start", {"type": "message_start", "message": {
         "id": mid, "type": "message", "role": "assistant", "model": svc.model_for(req), "content": [],
@@ -2665,7 +2675,7 @@ def anthropic_events(svc: Service, req: dict, ids, thinking, tools, max_new, can
     def close():
         return ("content_block_stop", {"type": "content_block_stop", "index": index})
 
-    streamed, finished = set(), set()              # calls sent piece by piece; those whose final tool_call came (#211)
+    streamed, finished = {}, set()                 # calls sent in pieces (id -> block); whose tool_call came (#211)
     for kind, x in svc.run(ids, thinking, tools, max_new, req, cancel, force=force):
         if kind == "ping":
             yield None
@@ -2683,7 +2693,7 @@ def anthropic_events(svc: Service, req: dict, ids, thinking, tools, max_new, can
             if ev.kind not in ("tool_call", "tool_start") and not ev.text:
                 continue
             if ev.kind == "tool_start":
-                streamed.add(ev.call.id)
+                streamed[ev.call.id] = index + 1        # the block it opens just below
                 used_tool = True
             if open_kind != want or want == "tool_use":
                 if open_kind is not None:
@@ -2708,10 +2718,12 @@ def anthropic_events(svc: Service, req: dict, ids, thinking, tools, max_new, can
                 yield "content_block_delta", {"type": "content_block_delta", "index": index, "delta": {
                     "type": "input_json_delta", "partial_json": json.dumps(ev.call.arguments, ensure_ascii=False)}}
         else:
+            if unfinished is not None:
+                unfinished.update(streamed[c] for c in streamed.keys() - finished)
             if open_kind is not None:
                 yield close()
             stop = "stop_sequence" if x.get("stop_sequence") is not None else \
-                "tool_use" if used_tool and streamed <= finished and x["finish"] == "stop" else \
+                "tool_use" if used_tool and streamed.keys() <= finished and x["finish"] == "stop" else \
                 {"stop": "end_turn", "length": "max_tokens", "cancel": "end_turn"}[x["finish"]]
             # the final counts, Anthropic's way: input_tokens leaves out what the conversation cache already held,
             # which is cache_read_input_tokens (message_start could only say the whole prompt).  At least the last
@@ -2725,7 +2737,9 @@ def anthropic_events(svc: Service, req: dict, ids, thinking, tools, max_new, can
             yield "message_stop", {"type": "message_stop"}
 
 
-def anthropic_collect(events) -> dict:
+def anthropic_collect(events, unfinished: set | frozenset = frozenset()) -> dict:
+    """The non-streamed message from anthropic_events' stream.  A call the output ended inside is left out (#211):
+    the blocks anthropic_events put in `unfinished`, and any call whose input does not parse."""
     msg, blocks = None, []
     for item in events:
         if item is None:                           # a heartbeat
@@ -2734,7 +2748,7 @@ def anthropic_collect(events) -> dict:
         if name == "message_start":
             msg = e["message"]
         elif name == "content_block_start":
-            blocks.append(dict(e["content_block"]))
+            blocks.append({**e["content_block"], "_index": e["index"]})
         elif name == "content_block_delta":
             d, b = e["delta"], blocks[-1]
             if d["type"] == "text_delta":
@@ -2753,7 +2767,7 @@ def anthropic_collect(events) -> dict:
             msg["stop_reason"] = e["delta"]["stop_reason"]
             msg["stop_sequence"] = e["delta"].get("stop_sequence")
             msg["usage"].update(e["usage"])
-    msg["content"] = blocks
+    msg["content"] = [b for b in blocks if b.pop("_index") not in unfinished]
     return msg
 
 
@@ -3556,12 +3570,14 @@ def make_handler(svc: Service):
             _debug_req("openai", req, messages, tools, max_new, thinking, len(ids))
             run = run_with_mcp(svc, svc.mcp, messages, tools, kw, ids, thinking, max_new, max_req, req, cancel,
                                {t["name"] for t in extra}) if use_mcp else None
-            chunks = openai_chunks(svc, req, ids, thinking, tools, max_new, cancel, run=run, force=force)
+            unfinished: set = set()
+            chunks = openai_chunks(svc, req, ids, thinking, tools, max_new, cancel, run=run, force=force,
+                                   unfinished=unfinished)
             if validator is not None:
                 chunks = structured_chunks(chunks, validator)
             chunks = self._capture(chunks, "openai")
             if not req.get("stream"):
-                return self._json(200, openai_collect(chunks))
+                return self._json(200, openai_collect(chunks, unfinished))
             self._sse()
             try:
                 last = None
@@ -3832,10 +3848,12 @@ def make_handler(svc: Service):
             cancel = threading.Event()
             self._watch_client(cancel)                       # #430 #431
             _debug_req("anthropic", req, messages, tools, max_new, thinking, len(ids))
-            events = anthropic_events(svc, req, ids, thinking, tools, max_new, cancel, force=force)
+            unfinished: set = set()
+            events = anthropic_events(svc, req, ids, thinking, tools, max_new, cancel, force=force,
+                                      unfinished=unfinished)
             events = self._capture(events, "anthropic")
             if not req.get("stream"):
-                return self._json(200, anthropic_collect(events))
+                return self._json(200, anthropic_collect(events, unfinished))
             self._sse()
             try:
                 for item in events:
