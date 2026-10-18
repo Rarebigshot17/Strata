@@ -1120,6 +1120,20 @@ class ClientShapes(unittest.TestCase):
         status, b = self.post("/v1/chat/completions", {"model": "x", "max_tokens": 8, "messages": msgs})
         self.assertEqual(status, 200, b)                            # the server goes on
 
+    def test_a_client_gone_before_the_answer_started(self):
+        # the connection fails after prepare(), before the answer started: that request ends, the next ones are served
+        import serve.server as server
+        body = {"model": "x", "max_tokens": 8, "messages": [{"role": "user", "content": "hi"}]}
+        paths = ("/v1/chat/completions", "/v1/messages")
+        with mock.patch.object(server, "_debug_req", side_effect=ConnectionResetError("the client is gone")), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            for path in paths:
+                with self.subTest(path=path), self.assertRaises(OSError):
+                    self.post(path, body)
+        for path in paths:
+            status, b = self.post(path, body)
+            self.assertEqual(status, 200, (path, b))
+
     def test_a_tool_schema_that_is_not_an_object_is_a_400(self):
         # #592 follow-up: a tool whose "parameters" (OpenAI) / "input_schema" (Anthropic) is a string, a number or a
         # list passed the check above and raised later instead - AttributeError in parse_tool_call / the stream
