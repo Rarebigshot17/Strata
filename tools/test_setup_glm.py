@@ -93,18 +93,24 @@ def quiet(fn, *args, **kw):
         return fn(*args, **kw), buf.getvalue()
 
 
-def install(argv, ram=OWNER_RAM, smi=OWNER_SMI, listing=LISTING, configs=(), env=None, free=10000.0):
+def install(argv, ram=OWNER_RAM, smi=OWNER_SMI, listing=LISTING, configs=(), env=None, free=10000.0,
+            cpu=("Test CPU", True), prepare=None, others=()):
     """setup.main() with `argv` in a temporary Strata folder, everything outside it mocked: nvidia-smi says `smi`, the
-    PC has `ram` GiB and `free` GB of disk, the Hub lists `listing`, a download writes an empty file, the engine build
-    writes build/strata-glm and the start is recorded.  Returns (exit code, output, {config name: config}, {script
-    name: text}, a record of the downloads, builds, starts and Hub requests)."""
+    PC has `ram` GiB, a `cpu` (name, AVX2) and `free` GB of disk, the Hub lists `listing`, a download writes an empty
+    file, the engine build writes build/strata-glm and the start is recorded.  `prepare(base)` makes files beside the
+    Strata folder first, "{base}" in `argv` is that folder, and `others` are the earlier GLM Strata folders there.
+    Returns (exit code, output, {config name: config}, {script name: text}, a record of the downloads, builds, starts
+    (and the GPUs and settings a start was given), engine updates and Hub requests)."""
     with tempfile.TemporaryDirectory() as d:
         base = Path(d)
         root = base / "Strata"
         (root / "serve").mkdir(parents=True)
         for name, cfg in configs:
             (root / name).write_text(json.dumps(cfg), encoding="utf-8")
-        rec = {"downloads": [], "builds": [], "starts": [], "urls": []}
+        if prepare is not None:
+            prepare(base)
+        argv = [x.replace("{base}", str(base)) for x in argv]
+        rec = {"downloads": [], "builds": [], "starts": [], "start_args": [], "updates": [], "urls": []}
 
         def download(url, dst, what=None):
             rec["downloads"].append((url, dst.relative_to(base).as_posix()))
@@ -120,15 +126,17 @@ def install(argv, ram=OWNER_RAM, smi=OWNER_SMI, listing=LISTING, configs=(), env
 
         def start(cfg_path, port, gpu=None, keep=None):
             rec["starts"].append((cfg_path.name, port))
+            rec["start_args"].append((gpu, {k: v for k, v in (keep or {}).items() if v is not None}))
             return 0
 
         patches = [mock.patch.object(setup, "ROOT", root), mock.patch.object(setup, "BUILD_DIR", root / "build"),
                    mock.patch.object(setup, "out", return_value=smi),
                    mock.patch.object(setup, "ram_gb", return_value=ram),
-                   mock.patch.object(setup, "cpu_info", return_value=("Test CPU", True)),
+                   mock.patch.object(setup, "cpu_info", return_value=cpu),
                    mock.patch.object(setup, "free_gb", return_value=free),
+                   mock.patch.object(setup.shutil, "disk_usage", return_value=mock.Mock(free=free * GB)),   # --check
                    mock.patch.object(setup, "settings_path", return_value=base / "settings.json"),
-                   mock.patch.object(setup, "other_installs", return_value=[]),
+                   mock.patch.object(setup, "other_installs", return_value=[base / o for o in others]),
                    mock.patch.object(setup.urllib.request, "urlopen", hub(listing, rec["urls"])),
                    mock.patch.object(setup, "download", download),
                    mock.patch.object(setup, "verify_file", lambda s, size, sha: None),
@@ -136,7 +144,7 @@ def install(argv, ram=OWNER_RAM, smi=OWNER_SMI, listing=LISTING, configs=(), env
                    mock.patch.object(setup, "python_packages", lambda: None),
                    mock.patch.object(setup, "get_llama_cpp", return_value=root / "third_party" / "llama.cpp"),
                    mock.patch.object(setup, "build_engine", build_engine),
-                   mock.patch.object(setup, "update_installed_engine", lambda force=False: None),
+                   mock.patch.object(setup, "update_installed_engine", lambda force=False: rec["updates"].append(force)),
                    mock.patch.object(setup, "start", start),
                    mock.patch.object(setup.time, "sleep", lambda s: None),
                    mock.patch.object(sys, "argv", ["setup.py", *argv]),
