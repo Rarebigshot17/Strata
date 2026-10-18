@@ -15,4 +15,4 @@ body:
       required: true
   - type: markdown
     value: |
-      All of this counts: model and architecture support, the server and API, the web app, multi-GPU and layer split, images and vision, MCP servers, setup and installation, and performance.
+      All of this counts: the GLM-5.3-Flash engine and its expert cache, the server and API, the web app, multi-GPU split, MCP servers, setup and installation, and performance.

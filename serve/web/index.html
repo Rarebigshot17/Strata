@@ -84,6 +84,7 @@
             <span class="st-badge st-badge--queued" data-s="queued">Queued</span>
             <span class="st-badge st-badge--error" data-s="error">Error</span>
           </span>
+          <span class="muted small state-engine" id="state-engine"></span>
         </div>
         <div class="state-card__row"><span id="state-label">Waiting for a request</span><span class="muted" id="state-detail"></span></div>
         <div class="st-progress" id="state-progress"><div class="st-progress__bar" id="state-bar" style="width:0%"></div></div>
@@ -107,6 +108,9 @@
           </div>
           <div class="bar-row"><span>Experts in VRAM</span><span class="muted" id="slots-text">&ndash;</span></div>
           <div class="st-progress"><div class="st-progress__bar" id="slots-bar" style="width:0%"></div></div>
+          <div class="bar-row" title="While writing the answer: the share of the experts looked up that were already in the VRAM expert cache">
+            <span>Expert-cache hits</span><span class="muted" id="hit-text">&ndash;</span></div>
+          <div class="st-progress" data-tone="info"><div class="st-progress__bar" id="hit-bar" style="width:0%"></div></div>
           <div class="bar-row"><span>System RAM</span><span class="muted" id="ram-text">&ndash;</span></div>
           <div class="st-progress" id="ram-progress"><div class="st-progress__bar" id="ram-bar" style="width:0%"></div></div>
           <div class="bar-row"><span>GPU temperature</span><span class="muted" id="temp-text">&ndash;</span></div>
@@ -118,7 +122,7 @@
           <div class="table-wrap" id="req-wrap">
             <table class="st-table">
               <thead><tr><th>Time</th><th>Status</th><th class="num">Prompt</th><th class="num">Reused</th><th class="num">Output</th>
-                <th class="num" title="New prompt tokens per second, excluding reused cache tokens (engine prompt time)">Prefill t/s</th><th class="num">Decode t/s</th><th class="num" title="While writing the answer: the share of the experts looked up that were already in VRAM. Experts the GPU read over PCIe (--pcie-frac) are not counted in it; their share of all routed experts is shown after it (+N% PCIe)">VRAM hit rate</th><th class="num">Duration</th></tr></thead>
+                <th class="num" title="New prompt tokens per second, excluding reused cache tokens (engine prompt time)">Prefill t/s</th><th class="num">Decode t/s</th><th class="num" title="While writing the answer: the share of the experts looked up that were already in the VRAM expert cache">VRAM hit rate</th><th class="num">Duration</th></tr></thead>
               <tbody id="req-body"><tr><td colspan="9" class="muted">No requests yet</td></tr></tbody>
             </table>
           </div>
@@ -130,7 +134,7 @@
         <div class="req-head"><span class="card-title">Conversation cache</span><span class="muted small" id="cc-sum"></span></div>
         <div class="cc-bars" id="cc-bars" hidden>
           <div><div class="bar-row"><span>Parked conversations</span><span class="muted" id="cc-slots-text">&ndash;</span></div>
-            <div class="st-progress"><div class="st-progress__bar" id="cc-slots-bar" style="width:0%"></div></div></div>
+            <div class="st-progress" id="cc-slots-progress"><div class="st-progress__bar" id="cc-slots-bar" style="width:0%"></div></div></div>
           <div><div class="bar-row"><span>Their memory (RAM)</span><span class="muted" id="cc-mem-text">&ndash;</span></div>
             <div class="st-progress"><div class="st-progress__bar" id="cc-mem-bar" style="width:0%"></div></div></div>
         </div>
@@ -172,12 +176,12 @@
         <div class="toggle-row"><span>Dark theme</span>
           <button class="st-toggle" id="dark-toggle" role="switch" aria-checked="false" aria-label="Dark theme"></button></div>
         <p class="muted small">Chats, settings and the key are kept in this browser only.
-          <a href="https://github.com/Niko1221/Strata" target="_blank" rel="noopener noreferrer">Strata on GitHub</a></p>
+          <a href="https://github.com/Rarebigshot17/Strata" target="_blank" rel="noopener noreferrer">Strata on GitHub</a></p>
       </div>
       <div class="st-card cfg-card" id="cfg-card" hidden>
         <div class="req-head"><span class="card-title">Model settings</span><span class="muted small" id="cfg-file"></span></div>
         <p class="muted small">Kept in the model's run config for every client. An empty field is the default. They
-          take effect the next time the model starts (close Strata's window and start it again).</p>
+          take effect the next time the server starts (stop Strata and start it again).</p>
         <form class="cfg-form" id="cfg-form"></form>
         <div class="cfg-actions"><button class="st-btn st-btn--primary" id="cfg-save" type="button">Save</button>
           <span class="muted small" id="cfg-msg" role="status"></span></div>
@@ -195,8 +199,7 @@
     <div class="st-field">
       <label class="st-label" for="s-thinking">Thinking <output id="o-thinking"></output></label>
       <div class="seg" id="s-thinking" role="radiogroup" aria-label="Thinking">
-        <button type="button" role="radio" data-v="none">Off</button><button type="button" role="radio" data-v="low">Low</button>
-        <button type="button" role="radio" data-v="medium">Medium</button><button type="button" role="radio" data-v="high">High</button>
+        <button type="button" role="radio" data-v="none">Off</button><button type="button" role="radio" data-v="on">On</button>
       </div>
     </div>
     <div class="st-field">
@@ -210,7 +213,8 @@
     </div>
     <div class="st-field">
       <label class="st-label" for="s-topk">Top-k <output id="o-topk"></output></label>
-      <input class="st-slider" type="range" id="s-topk" min="1" max="64" step="1">
+      <input class="st-slider" type="range" id="s-topk" min="0" max="200" step="1">
+      <span class="muted small">0 = off (all words that pass top-p)</span>
     </div>
     <div class="st-field">
       <label class="st-label" for="s-max">Max tokens <output>empty = until done</output></label>
@@ -225,9 +229,6 @@
     <div class="toggle-row" id="mcp-row" hidden><span>Use tools from MCP servers<br><span class="muted small"
       id="mcp-row-sub">the model may call them while it answers</span></span>
       <button class="st-toggle" id="s-mcp" role="switch" aria-checked="true" aria-label="Use tools from MCP servers"></button></div>
-    <div class="toggle-row" id="esp-row" hidden><span>Experimental speed projection<br><span class="muted small">the
-      engine's control vector; off = the stock model. Switching reads the chat again once</span></span>
-      <button class="st-toggle" id="s-esp" role="switch" aria-checked="true" aria-label="Experimental speed projection"></button></div>
     <div class="toggle-row"><span>Use for other apps too<br><span class="muted small">omp and other API clients get
       these settings for anything they don't set themselves</span></span>
       <button class="st-toggle" id="s-share" role="switch" aria-checked="false" aria-label="Use for other apps too"></button></div>

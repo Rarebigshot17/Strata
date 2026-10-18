@@ -10,7 +10,7 @@ const fmt = (n, d = 0) => (n == null || Number.isNaN(n) ? "–" : Number(n).toLo
 const kfmt = (n) => (n == null ? "–" : n >= 1000 ? `${fmt(n / 1000, n >= 10000 ? 0 : 1)}k` : fmt(n));
 // a context size: 32768 -> "32K" (powers of two), else like kfmt
 const ctxfmt = (n) => (n && n % 1024 === 0 ? `${fmt(n / 1024)}K` : kfmt(n));
-const gb = (b, d = 1) => (b == null ? "–" : fmt(b / 1073741824, d));   // memory: binary GB, as Windows shows it
+const gb = (b, d = 1) => (b == null ? "–" : fmt(b / 1073741824, d));   // memory: binary GB (GiB)
 
 const store = {
   get(k, d) { try { const v = localStorage.getItem("strata." + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
@@ -96,12 +96,10 @@ function headers(json = false) {
 $("api-key").value = store.get("apikey", "");
 $("api-key").onchange = () => { store.set("apikey", $("api-key").value.trim()); toast("success", "API key saved", "Kept in this browser only."); };
 
-let health = {model: "strata", images: false, max_context: 0};
+let health = {model: "strata", max_context: 0};
 async function loadHealth() {
   try {
     health = await (await fetch("health")).json();
-    $("attach-btn").title = health.images ? "Attach a text file or a picture (or drop it here)"
-                                          : "Attach a text file (or drop it here)";
     $("chat-empty-sub").textContent = `${health.model} runs on this PC. Nothing leaves it.`;
   } catch (e) {
     setTimeout(loadHealth, 2000);
@@ -191,41 +189,47 @@ function render(m) {
   }
   if (live.queued > 0) setPill("queued", `${live.queued} queued`);
   if (tab === "monitor") renderMonitor(live, hw, st, eng, h, last, m.requests || [], m.totals, m.requests_kept);
-  if (tab === "monitor") renderConvCache(m.conversation_cache);
+  if (tab === "monitor") renderConvCache(m.conversation_cache, eng);
   if (tab === "about") renderAbout(eng, hw, st);
 }
 
-// #596: the conversation cache - the prompt's state the engine keeps between requests (always), and the whole
-// conversations it parks in RAM when "--conversation-cache-mib N" is in the run config's args (opt-in)
+// #596: the conversation cache - the live conversation's state the engine keeps between requests (always), and the
+// conversations and checkpoints it parks in RAM, up to the run config's park_mib (--park-mib; the engine's INFO says it)
 function since(t) {
   if (!t) return "";
   const s = Math.max(0, Date.now() / 1000 - t);
   return s < 60 ? "just now" : s < 3600 ? `${fmt(s / 60)} min ago` : `${fmt(s / 3600, 1)} h ago`;
 }
-function renderConvCache(c) {
+function renderConvCache(c, eng) {
   $("cc-card").hidden = !c;
   if (!c) return;                                  // an older server
   const pct = (a, b) => (b ? `${Math.min(100, (100 * a) / b)}%` : "0%");
-  $("cc-bars").hidden = !c.enabled;
-  if (c.enabled) {
-    $("cc-slots-text").textContent = `${fmt(c.parked)} / ${fmt(c.slots)}`;
+  const budgetMib = c.budget_mib != null ? c.budget_mib : eng.park_mib;
+  const on = c.enabled != null ? !!c.enabled : budgetMib > 0;
+  $("cc-bars").hidden = !on;
+  if (on) {
+    // the GLM engine parks as many conversations as fit the memory: a count, and a bar only when there are slots
+    $("cc-slots-text").textContent = `${fmt(c.parked || 0)}${c.slots ? ` / ${fmt(c.slots)}` : ""}` +
+      (c.checkpoints != null ? ` · ${fmt(c.checkpoints)} checkpoint${c.checkpoints === 1 ? "" : "s"}` : "");
+    $("cc-slots-progress").hidden = !c.slots;
     $("cc-slots-bar").style.width = pct(c.parked, c.slots);
-    const budget = c.budget_mib * 1048576;
-    $("cc-mem-text").textContent = `${gb(c.bytes)} / ${gb(budget)} GB`;
-    $("cc-mem-bar").style.width = pct(c.bytes, budget);
+    const budget = (budgetMib || 0) * 1048576;
+    $("cc-mem-text").textContent = `${gb(c.bytes || 0)} / ${gb(budget)} GB`;
+    $("cc-mem-bar").style.width = pct(c.bytes || 0, budget);
   }
   $("cc-sum").textContent = c.requests ? `${fmt(c.requests_reused)} of ${fmt(c.requests)} requests reused part of their prompt` : "";
   const share = c.prompt_tokens ? ` (${fmt((100 * c.reused_tokens) / c.prompt_tokens)}% of all prompt tokens)` : "";
-  const event = c.last_event ? `${c.last_event === "parked" ? "Parked" : "Restored"} ${fmt(c.last_tokens)} tokens, ${since(c.last_at)}` : null;
+  const verb = {parked: "Parked", restored: "Resumed", resumed: "Resumed"}[c.last_event] || c.last_event;
+  const event = c.last_event ? `${verb} ${fmt(c.last_tokens)} tokens, ${since(c.last_at)}` : null;
   facts($("cc-facts"), [
     ["Last request", c.last_prompt != null ? `${fmt(c.last_reused || 0)} of ${fmt(c.last_prompt)} prompt tokens reused` : null],
     ["Reused since start", c.requests ? `${fmt(c.reused_tokens)} tokens${share}` : null],
-    ["Parked / restored", c.enabled ? `${fmt(c.parks)} / ${fmt(c.restores)}${c.evictions ? ` · ${fmt(c.evictions)} evicted` : ""}` : null],
-    ["Last switch", c.enabled ? event : null],
+    ["Parked / resumed", on && c.parks != null ? `${fmt(c.parks)} / ${fmt(c.restores)}${c.evictions ? ` · ${fmt(c.evictions)} dropped` : ""}` : null],
+    ["Last switch", on ? event : null],
   ]);
-  $("cc-note").textContent = c.enabled
-    ? "A request that continues a parked conversation gets its state back instead of reading it again; the oldest goes when the slots or the memory are full."
-    : "The engine keeps the last conversation's state, so a follow-up reads only what is new. To keep several conversations (agents taking turns), add \"--conversation-cache-mib\", \"8192\" to the run config's args (docs/DETAILS.md).";
+  $("cc-note").textContent = on
+    ? "A request that continues a parked conversation, or goes back to one of its checkpoints, gets its state back instead of reading it again; the oldest goes when the memory is full."
+    : "The engine keeps only the live conversation's state, so a follow-up reads only what is new. To keep several conversations (agents taking turns), set park_mib under About > Model settings.";
 }
 
 function renderTotals(t) {
@@ -261,6 +265,7 @@ function renderMonitor(live, hw, st, eng, h, last, requests, totals, kept) {
     delete prog.dataset.tone;
     detail = `last: ${fmt(last.output_tokens)} tokens${last.decode_tok_s ? ` at ${fmt(last.decode_tok_s, 1)} tok/s` : ""}`;
   }
+  $("state-engine").textContent = engineLine(eng);
   $("state-label").textContent = label;
   $("state-detail").textContent = detail;
   $("state-bar").style.width = `${pct}%`;
@@ -279,11 +284,11 @@ function renderMonitor(live, hw, st, eng, h, last, requests, totals, kept) {
   const per = (f) => (hw.gpus || []).map((g) => `GPU ${g.index} ${f(g)}`).join(" · ");
   const multi = (hw.gpus || []).length > 1;
   setMetric("gpu", hw.gpu_util == null ? null : fmt(hw.gpu_util), "%",
-            multi ? per((g) => (g.util == null ? "–" : `${fmt(g.util)}%`)) : st.gpu_name || (st.gpu_note ? "not available" : ""));
+            multi ? per((g) => (g.util == null ? "–" : `${fmt(g.util)}%`)) : st.gpu_name || "");
   spark("sp-gpu", h.gpu_util, 100);
   setMetric("vram", hw.gpu_mem_used == null ? null : gb(hw.gpu_mem_used), hw.gpu_mem_total ? `/ ${gb(hw.gpu_mem_total, 0)} GB` : "GB",
             multi ? per((g) => (g.mem_used == null ? "–" : `${gb(g.mem_used)} GB`))
-                  : eng.expert_slots ? `${fmt(eng.expert_slots)} experts cached` : (st.gpu_note ? "not available on Windows AMD yet" : ""));
+                  : eng.expert_slots ? `${fmt(eng.expert_slots)} experts cached` : "");
   spark("sp-vram", h.gpu_mem_used, hw.gpu_mem_total);
   setMetric("temp", hw.gpu_temp == null ? null : fmt(hw.gpu_temp), "°C",
             multi ? per((g) => (g.temp == null ? "–" : `${fmt(g.temp)}°`)) : "");
@@ -319,6 +324,13 @@ function renderMonitor(live, hw, st, eng, h, last, requests, totals, kept) {
   const cacheBytes = (eng.expert_cache_mib || 0) * 1048576;
   $("slots-text").textContent = eng.expert_slots ? `${fmt(eng.expert_slots)} · ${gb(cacheBytes)} GB` : "–";
   $("slots-bar").style.width = hw.gpu_mem_total ? `${Math.min(100, (100 * cacheBytes) / hw.gpu_mem_total)}%` : "0%";
+  // the expert cache's hits while writing: the last request's, and since the start when the server counts them
+  const hit = last && last.hit_rate != null ? last.hit_rate : null;
+  const hitAll = totals && totals.lookups ? totals.hits / totals.lookups : null;
+  $("hit-text").textContent = hit == null && hitAll == null ? "–" :
+    [hit == null ? null : `${fmt(hit * 100, 1)}% last request`, hitAll == null ? null : `${fmt(hitAll * 100, 1)}% since start`]
+      .filter((x) => x).join(" · ");
+  $("hit-bar").style.width = `${Math.min(100, 100 * (hit != null ? hit : hitAll || 0))}%`;
   $("ram-text").textContent = hw.ram_total ? `${gb(hw.ram_used)} / ${gb(hw.ram_total, 0)} GB` : "–";
   const ramPct = hw.ram_total ? (100 * hw.ram_used) / hw.ram_total : 0;
   $("ram-bar").style.width = `${ramPct}%`;
@@ -336,14 +348,11 @@ function renderMonitor(live, hw, st, eng, h, last, requests, totals, kept) {
     body.innerHTML = requests.slice(0, reqShowAll ? requests.length : 12).map((r) => {
       const [cls, text] = badge[r.finish] || ["", r.finish || "–"];
       const t = new Date(r.time * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
-      const proj = r.projection == null ? "" : ` <span class="st-badge${r.projection ? " st-badge--reading" : ""}" title="experimental speed projection ${r.projection ? "on" : "off"}">${r.projection ? "ESP" : "stock"}</span>`;
-      // #588: the VRAM share; the PCIe share (--pcie-frac) beside it when there is one
-      const hit = r.hit_rate == null ? "–" : `${(r.hit_rate * 100).toFixed(1)}%` +
-        (r.pcie_share ? ` <span class="muted" title="routed experts the GPU read over PCIe (--pcie-frac) or another GPU computed">+${(r.pcie_share * 100).toFixed(1)}% PCIe</span>` : "");
+      const hit = r.hit_rate == null ? "–" : `${(r.hit_rate * 100).toFixed(1)}%`;     // the VRAM expert cache's share
       // Reused tokens are not prefetched again. Match the Monitor's existing Prefill metric.
       const fresh = r.prompt_tokens == null ? null : Math.max(0, r.prompt_tokens - (r.reused || 0));
       const prefillRate = fresh > 0 && r.prompt_ms > 0 ? fresh / (r.prompt_ms / 1000) : null;
-      return `<tr><td>${esc(t)}</td><td><span class="st-badge ${cls}">${esc(text)}</span>${proj}</td><td class="num">${fmt(r.prompt_tokens)}</td>
+      return `<tr><td>${esc(t)}</td><td><span class="st-badge ${cls}">${esc(text)}</span></td><td class="num">${fmt(r.prompt_tokens)}</td>
         <td class="num">${fmt(r.reused)}</td><td class="num">${fmt(r.output_tokens)}</td><td class="num">${fmt(prefillRate)}</td><td class="num">${fmt(r.decode_tok_s, 1)}</td>
         <td class="num">${hit}</td><td class="num">${fmt(r.duration_s, 1)} s</td></tr>`;
     }).join("");
@@ -360,29 +369,26 @@ function facts(el, rows) {
   el.innerHTML = rows.filter((r) => r[1] != null && r[1] !== "").map(([k, v, copy]) =>
     `<dt>${esc(k)}</dt><dd>${copy ? `<code>${esc(v)}</code><button class="st-btn st-btn--icon" data-copy="${esc(v)}" aria-label="Copy">${icon("copy")}</button>` : esc(v)}</dd>`).join("");
 }
-// INFO cvec=project:4-44[:singleL] | add:A-B | 0
-function projectionText(c) {
-  if (!c || c === "0" || c === 0) return null;
-  const [mode, range, single] = String(c).split(":");
-  const [a, b] = (range || "").split("-");
-  return `${mode === "project" ? "Projection" : "Additive"} control vector on layers ${a}–${b}` +
-         `${single ? ` (layer ${single.replace("single", "")}'s direction)` : ""}. Per chat in Sampling. Its package ` +
-         "describes the vector as a refusal-direction projection; measure the speed yourself";
+// the GLM engine's INFO line: engine=<version> backend=cuda|cpu-reference park_mib=N [expert_slots=N expert_cache_mib=N]
+const engineVersion = (eng) => eng.version || eng.engine || null;
+const backendText = (b) => ({cuda: "CUDA", "cpu-reference": "CPU reference (for checks; slow)"}[b] || b || null);
+function engineLine(eng) {
+  const v = engineVersion(eng);
+  return [eng.model, v ? `engine v${v}` : null, backendText(eng.backend)].filter((x) => x).join(" · ");
 }
 function renderAbout(eng, hw, st) {
-  const kv = {int8: "8-bit", q4_0: "4-bit (Hadamard-rotated)", fp16: "16-bit"}[eng.kv] || eng.kv;
+  const park = eng.park_mib == null ? null : eng.park_mib > 0
+    ? `up to ${gb(eng.park_mib * 1048576)} GB of RAM for parked conversations and checkpoints` : "off (park_mib 0)";
   facts($("facts-engine"), [
     ["Model", eng.model],
-    ["Engine", eng.version ? `v${eng.version}` : "built from source"],
+    ["Engine", engineVersion(eng) ? `v${engineVersion(eng)}` : "built from source"],
+    ["Backend", backendText(eng.backend)],
     ["Context", eng.max_context ? `${fmt(eng.max_context)} tokens` : null],
-    ["KV cache", kv ? `${kv}${eng.kv_resident ? `, streamed: ${fmt(eng.kv_resident)} positions per layer in VRAM, the rest in RAM` : ", all in VRAM"}` : null],
     ["Experts in VRAM", eng.expert_slots ? `${fmt(eng.expert_slots)} (${gb((eng.expert_cache_mib || 0) * 1048576)} GB)` : null],
-    ["Speculation", eng.spec ? `MTP drafts up to ${Math.max(0, (eng.mtp_max || eng.spec) - 1)} tokens${eng.lookup ? ", prompt lookup on" : ""}` : null],
-    ["Images", eng.images ? "on" : "off"],
-    ["Experimental speed projection", projectionText(eng.cvec)],
+    ["Conversation parking", park],
   ]);
   facts($("facts-hw"), [
-    ["GPU", st.gpu_name ? `${st.gpu_name}${hw.gpu_mem_total ? `, ${gb(hw.gpu_mem_total, 0)} GB` : ""}` : (st.gpu_note || "not readable (NVML)")],
+    ["GPU", st.gpu_name ? `${st.gpu_name}${hw.gpu_mem_total ? `, ${gb(hw.gpu_mem_total, 0)} GB` : ""}` : "not readable (NVML)"],
     ["CPU", st.cpu_name ? `${st.cpu_name}${st.threads ? `, ${st.threads} threads` : ""}` : null],
     ["RAM", hw.ram_total ? `${gb(hw.ram_total, 0)} GB` : null],
   ]);
@@ -482,7 +488,7 @@ $("cfg-save").addEventListener("click", async () => {
     const b = await r.json();
     if (!r.ok) throw new Error((b.error || {}).message || `HTTP ${r.status}`);
     $("cfg-msg").textContent = b.changed.length
-      ? `Saved (${b.changed.join(", ")}); the earlier file is ${b.file}.bak. Start the model again to use it.` : "Nothing changed.";
+      ? `Saved (${b.changed.join(", ")}); the earlier file is ${b.file}.bak. Start Strata again to use it.` : "Nothing changed.";
     loadConfig();
   } catch (e) {
     $("cfg-msg").textContent = "";
@@ -557,15 +563,16 @@ function markdown(text) {
 }
 
 // ------------------------------------------------------------------ Chat
-const DEFAULTS = {thinking: "high", temperature: 0.6, top_p: 0.95, top_k: 20, max: "", seed: "", show: true, esp: true, mcp: true};
+// GLM's recommended sampling (temperature 1.0, top_p 0.95, no top-k); thinking is on or off ("none"), no levels
+const DEFAULTS = {thinking: "on", temperature: 1.0, top_p: 0.95, top_k: 0, max: "", seed: "", show: true, mcp: true};
 let settings = {...DEFAULTS, ...store.get("sampling", {})};
+if (settings.thinking !== "none") settings.thinking = "on";      // an earlier page's low / medium / high
 let messages = store.get("chat", []);
-let attachments = [];                 // {name, url}
+let attachments = [];                 // {kind: "file", name, text}
 let busy = null;                      // {controller, msg}
 
 function saveChat() {
-  store.set("chat", messages.map((m) => ({...m, images: (m.images || []).map((i) => ({name: i.name})),
-                                           files: (m.files || []).map((f) => ({name: f.name}))})));
+  store.set("chat", messages.map((m) => ({...m, files: (m.files || []).map((f) => ({name: f.name}))})));
 }
 function timeStr(t) { return new Date(t).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}); }
 
@@ -576,22 +583,13 @@ function msgEl(m, i) {
   if (m.role === "user") {
     if (m.files && m.files.length) {
       const wrap = document.createElement("div");
-      wrap.className = "msg-images";
+      wrap.className = "msg-files";
       for (const f of m.files) {
         const c = document.createElement("span");
         c.className = "chip";
         c.innerHTML = icon("attach", "st-icon st-icon--sm");
         c.append(f.name);
         wrap.appendChild(c);
-      }
-      el.appendChild(wrap);
-    }
-    if (m.images && m.images.length) {
-      const wrap = document.createElement("div");
-      wrap.className = "msg-images";
-      for (const im of m.images) {
-        if (im.url) { const img = document.createElement("img"); img.src = im.url; img.alt = im.name || "image"; wrap.appendChild(img); }
-        else { const c = document.createElement("span"); c.className = "chip"; c.innerHTML = icon("image", "st-icon st-icon--sm"); c.append(im.name || "image"); wrap.appendChild(c); }
       }
       el.appendChild(wrap);
     }
@@ -725,10 +723,7 @@ function apiMessages() {
   const out = [];
   for (const m of messages) {
     if (m.role === "user") {
-      const imgs = (m.images || []).filter((i) => i.url);
-      const text = userText(m);
-      out.push({role: "user", content: imgs.length ? [{type: "text", text},
-        ...imgs.map((i) => ({type: "image_url", image_url: {url: i.url}}))] : text});
+      out.push({role: "user", content: userText(m)});
     } else if (!(busy && busy.msg === m)) {            // the answer being asked for now is not history yet
       out.push(...assistantMessages(m));
     }
@@ -771,8 +766,7 @@ function setBusy(on) {
 async function send() {
   const text = $("input").value.trim();
   if ((!text && !attachments.length) || busy) return;
-  messages.push({role: "user", text, images: attachments.filter((a) => a.kind !== "file"),
-                 files: attachments.filter((a) => a.kind === "file"), time: Date.now()});
+  messages.push({role: "user", text, files: attachments, time: Date.now()});
   attachments = [];
   renderAttachments();
   $("input").value = "";
@@ -785,8 +779,8 @@ async function send() {
   busy = {controller, msg: m};
   setBusy(true);
 
-  const body = {model: health.model, messages: apiMessages(), stream: true,
-                reasoning_effort: settings.thinking};
+  const body = {model: health.model, messages: apiMessages(), stream: true};
+  if (settings.thinking === "none") body.reasoning_effort = "none";   // thinking off; on is the model's default
   if (settings.temperature > 0) {
     Object.assign(body, {temperature: +settings.temperature, top_p: +settings.top_p, top_k: +settings.top_k});
   } else {
@@ -794,7 +788,6 @@ async function send() {
   }
   if (settings.seed) body.seed = +settings.seed;
   if (settings.max) body.max_tokens = +settings.max;
-  if (projectionLoaded()) body.experimental_speed_projection = !!settings.esp;
   if (settings.mcp !== false && mcpInfo.tools > 0) body.strata_mcp = true;   // this server may run MCP tools for it
 
   let firstAt = null, thinkStart = null, usage = null, frame = 0;
@@ -851,8 +844,7 @@ async function send() {
   const n = usage ? usage.completion_tokens : null;
   if (n && firstAt) {
     const secs = (performance.now() - firstAt) / 1000;
-    m.meta = `${fmt(n)} tokens${secs > 0.25 ? ` · ${fmt(n / secs, 1)} tok/s` : ""}${m.stopped ? " · stopped" : ""}` +
-             (projectionLoaded() ? (settings.esp ? " · projection on" : " · projection off") : "");
+    m.meta = `${fmt(n)} tokens${secs > 0.25 ? ` · ${fmt(n / secs, 1)} tok/s` : ""}${m.stopped ? " · stopped" : ""}`;
   } else if (m.stopped) {
     m.meta = "Stopped";
   }
@@ -899,7 +891,7 @@ $("export-btn").onclick = () => {
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 };
 
-// pictures and text files: the attach button, dropping them on the chat, or pasting a picture (issue #30)
+// text files: the attach button or dropping them on the chat (issue #30); the model reads text only
 const TEXT_EXT = /\.(txt|md|markdown|rst|tex|py|pyi|ipynb|js|mjs|cjs|ts|tsx|jsx|vue|svelte|json|jsonl|csv|tsv|log|ya?ml|toml|ini|cfg|conf|env|xml|html?|css|scss|less|c|cc|cpp|cxx|h|hh|hpp|cu|cuh|rs|go|java|kt|kts|swift|rb|php|pl|lua|r|jl|scala|sql|sh|bash|zsh|fish|ps1|psm1|bat|cmd|diff|patch|gradle|cmake|mk|dockerfile|gitignore|proto|graphql)$/i;
 const MAX_TEXT_FILE = 512 * 1024;
 function isTextFile(f) {
@@ -908,15 +900,7 @@ function isTextFile(f) {
 }
 function addFiles(files) {
   for (const f of files) {
-    if (f.type.startsWith("image/")) {
-      if (!health.images) { toast("warn", "Pictures are off", "This model was set up for text only."); continue; }
-      if (f.size > 20e6) { toast("warn", "Picture too large", `${f.name} is over 20 MB.`); continue; }
-      const r = new FileReader();
-      r.onload = () => { attachments.push({kind: "image", name: f.name || "pasted image", url: r.result}); renderAttachments(); };
-      r.readAsDataURL(f);
-      continue;
-    }
-    if (!isTextFile(f)) { toast("warn", "Not a text file", `${f.name}: attach text files (code, notes, logs, data)${health.images ? " or pictures" : ""}.`); continue; }
+    if (!isTextFile(f)) { toast("warn", "Not a text file", `${f.name}: attach text files (code, notes, logs, data); the model reads text only.`); continue; }
     if (f.size > MAX_TEXT_FILE) { toast("warn", "File too large", `${f.name} is over 512 KB.`); continue; }
     const r = new FileReader();
     r.onload = () => {
@@ -945,7 +929,7 @@ function renderAttachments() {
   attachments.forEach((a, i) => {
     const c = document.createElement("span");
     c.className = "chip";
-    c.innerHTML = icon(a.kind === "file" ? "attach" : "image", "st-icon st-icon--sm");
+    c.innerHTML = icon("attach", "st-icon st-icon--sm");
     c.append(a.name);
     const x = document.createElement("button");
     x.type = "button"; x.className = "st-btn st-btn--icon"; x.setAttribute("aria-label", "Remove");
@@ -974,11 +958,6 @@ for (const id of ["chat", "composer"]) {
   });
 }
 $("file").onchange = () => { addFiles($("file").files); $("file").value = ""; };
-$("input").addEventListener("paste", (e) => {
-  if (!health.images) return;
-  const files = [...(e.clipboardData || {}).files || []].filter((f) => f.type.startsWith("image/"));
-  if (files.length) { e.preventDefault(); addFiles(files); }
-});
 
 // ------------------------------------------------------------------ the sampling drawer
 function openDrawer(open) {
@@ -992,8 +971,6 @@ function loadDrawer(s = settings) {
   $("s-temp").value = s.temperature; $("s-topp").value = s.top_p; $("s-topk").value = s.top_k;
   $("s-max").value = s.max; $("s-seed").value = s.seed;
   $("s-show").setAttribute("aria-checked", String(!!s.show));
-  $("s-esp").setAttribute("aria-checked", String(s.esp !== false));
-  $("esp-row").hidden = !projectionLoaded();
   $("s-mcp").setAttribute("aria-checked", String(s.mcp !== false));
   $("s-share").setAttribute("aria-checked", String(sharedOn));
   outputs();
@@ -1008,11 +985,11 @@ async function loadShared() {
   $("s-share").setAttribute("aria-checked", String(sharedOn));
 }
 function sharedDefaults(s) {
-  const d = {reasoning_effort: s.thinking, temperature: +s.temperature};
+  const d = {temperature: +s.temperature};
+  if (s.thinking === "none") d.reasoning_effort = "none";
   if (+s.temperature > 0) Object.assign(d, {top_p: +s.top_p, top_k: +s.top_k});
   if (s.seed) d.seed = +s.seed;
   if (s.max) d.max_tokens = +s.max;
-  if (projectionLoaded()) d.experimental_speed_projection = s.esp !== false;
   return d;
 }
 async function saveShared(on, s) {
@@ -1025,33 +1002,26 @@ async function saveShared(on, s) {
   }
   sharedOn = !!(await r.json()).shared;
 }
-// the engine was started with the experimental-speed-projection control vector (INFO cvec=...)
-function projectionLoaded() {
-  const c = lastMetrics && lastMetrics.engine ? lastMetrics.engine.cvec : 0;
-  return !!c && c !== "0";
-}
 function outputs() {
   const t = +$("s-temp").value;
   $("o-temp").textContent = t === 0 ? "0 · greedy" : t.toFixed(2);
   $("o-topp").textContent = (+$("s-topp").value).toFixed(2);
-  $("o-topk").textContent = $("s-topk").value;
+  $("o-topk").textContent = +$("s-topk").value === 0 ? "0 · off" : $("s-topk").value;
   const sel = [...$("s-thinking").children].find((b) => b.getAttribute("aria-checked") === "true");
-  $("o-thinking").textContent = sel ? {none: "answers right away", low: "short", medium: "medium", high: "thorough (default)"}[sel.dataset.v] : "";
+  $("o-thinking").textContent = sel ? {none: "answers right away", on: "thinks first (default)"}[sel.dataset.v] : "";
   for (const id of ["s-topp", "s-topk"]) $(id).disabled = t === 0;
 }
 for (const b of $("s-thinking").children) b.onclick = () => { for (const x of $("s-thinking").children) x.setAttribute("aria-checked", String(x === b)); outputs(); };
 for (const id of ["s-temp", "s-topp", "s-topk"]) $(id).oninput = outputs;
 $("s-show").onclick = () => $("s-show").setAttribute("aria-checked", String($("s-show").getAttribute("aria-checked") !== "true"));
-$("s-esp").onclick = () => $("s-esp").setAttribute("aria-checked", String($("s-esp").getAttribute("aria-checked") !== "true"));
 $("s-mcp").onclick = () => $("s-mcp").setAttribute("aria-checked", String($("s-mcp").getAttribute("aria-checked") !== "true"));
 $("s-share").onclick = () => $("s-share").setAttribute("aria-checked", String($("s-share").getAttribute("aria-checked") !== "true"));
 $("s-reset").onclick = () => loadDrawer(DEFAULTS);
 $("s-apply").onclick = async () => {
   const sel = [...$("s-thinking").children].find((b) => b.getAttribute("aria-checked") === "true");
-  settings = {thinking: sel ? sel.dataset.v : "high", temperature: +$("s-temp").value, top_p: +$("s-topp").value,
+  settings = {thinking: sel ? sel.dataset.v : "on", temperature: +$("s-temp").value, top_p: +$("s-topp").value,
               top_k: +$("s-topk").value, max: $("s-max").value.trim(), seed: $("s-seed").value.trim(),
               show: $("s-show").getAttribute("aria-checked") === "true",
-              esp: $("s-esp").getAttribute("aria-checked") === "true",
               mcp: $("s-mcp").getAttribute("aria-checked") === "true"};
   store.set("sampling", settings);
   const share = $("s-share").getAttribute("aria-checked") === "true";

@@ -20,8 +20,8 @@ from serve.frontend import ChatTemplate
 from serve.server import ByteTokenizer, MockEngine, Service, serve
 
 ROOT = Path(__file__).resolve().parents[1]
-CFG = {"exe": "engine/strata.exe", "args": ["--pack", "data/packs/q2_0", "--kv", "int8", "--spec-min-p", "0.5"],
-       "model_name": "qwen3.8-flash-next-q2_0", "port": 8080, "host": "0.0.0.0", "api_key": "",
+CFG = {"exe": "build/strata-glm", "args": ["-m", "models/model-00001-of-00004.gguf", "--ctx", "65536"],
+       "model_name": "glm-q3", "port": 8101, "host": "0.0.0.0", "api_key": "",
        "sampling": {"temperature": 0.7, "presence_penalty": 1.5},
        "mcp_servers": {"files": {"command": "npx", "args": ["-y", "server-filesystem", "."]}},
        "cors_origins": ["http://localhost:3000"]}
@@ -30,21 +30,22 @@ CFG = {"exe": "engine/strata.exe", "args": ["--pack", "data/packs/q2_0", "--kv",
 class Apply(unittest.TestCase):
     def test_only_the_named_keys_change(self):
         new, changed = runconfig.apply(CFG, {"sampling.top_p": 0.95, "reasoning_budget_tokens": 4096,
-                                             "vram_reserve_mib": 2048, "aliases": "qwen, local", "lazy_load": True})
-        self.assertEqual(changed, ["sampling.top_p", "reasoning_budget_tokens", "vram_reserve_mib", "aliases",
-                                   "lazy_load"])
+                                             "vram_reserve_gb": 1.5, "park_mib": 16384, "aliases": "glm, local",
+                                             "lazy_load": True})
+        self.assertEqual(changed, ["sampling.top_p", "reasoning_budget_tokens", "vram_reserve_gb", "park_mib",
+                                   "aliases", "lazy_load"])
         self.assertEqual(new["sampling"], {"temperature": 0.7, "presence_penalty": 1.5, "top_p": 0.95})
-        self.assertEqual(new["args"][-2:], ["--vram-reserve-mib", "2048"])
-        self.assertEqual(new["aliases"], ["qwen", "local"])
+        self.assertEqual(new["args"][len(CFG["args"]):], ["--vram-reserve", "1.5", "--park-mib", "16384"])
+        self.assertEqual(new["aliases"], ["glm", "local"])
         for k in ("exe", "model_name", "port", "host", "api_key", "mcp_servers", "cors_origins"):
             self.assertEqual(new[k], CFG[k], k)
         self.assertEqual(CFG["sampling"], {"temperature": 0.7, "presence_penalty": 1.5})   # the input is left alone
 
     def test_null_is_the_default_again(self):
-        cfg, _ = runconfig.apply(CFG, {"vram_reserve_mib": 2048, "fit_max_tokens": True})
-        new, changed = runconfig.apply(cfg, {"vram_reserve_mib": None, "fit_max_tokens": None,
+        cfg, _ = runconfig.apply(CFG, {"vram_reserve_gb": 2, "park_mib": 0, "fit_max_tokens": True})
+        new, changed = runconfig.apply(cfg, {"vram_reserve_gb": None, "park_mib": None, "fit_max_tokens": None,
                                              "sampling.temperature": None, "idle_unload_s": None})
-        self.assertEqual(changed, ["vram_reserve_mib", "fit_max_tokens", "sampling.temperature"])
+        self.assertEqual(changed, ["vram_reserve_gb", "park_mib", "fit_max_tokens", "sampling.temperature"])
         self.assertEqual(new["args"], CFG["args"])
         self.assertNotIn("fit_max_tokens", new)
         self.assertEqual(new["sampling"], {"presence_penalty": 1.5})
@@ -54,23 +55,31 @@ class Apply(unittest.TestCase):
     def test_refused(self):
         for changes in ({"api_key": "x"}, {"host": "0.0.0.0"}, {"mcp_servers": {}}, {"before_load": "calc.exe"},
                         {"args": []}, {"exe": "evil.exe"}, {"trusted_origins": ["*"]}, {"allowed_hosts": ["*"]},
-                        {"sampling.temperature": -1}, {"sampling.top_p": 0}, {"sampling.top_k": 65},
-                        {"sampling.min_p": 2}, {"reasoning_budget_tokens": 1.5}, {"fit_max_tokens": "yes"},
-                        {"effort_position": "middle"}, {"vram_reserve_mib": -5}, {"idle_unload_s": True},
-                        {"aliases": [1]}, {}, None, ["x"]):
+                        {"sampling.temperature": -1}, {"sampling.top_p": 0}, {"sampling.top_k": -1},
+                        {"sampling.top_k": 2.5}, {"sampling.min_p": 2}, {"reasoning_budget_tokens": 1.5},
+                        {"fit_max_tokens": "yes"}, {"effort_position": "end"}, {"vram_reserve_mib": 2048},
+                        {"vram_reserve_gb": -1}, {"vram_reserve_gb": "2"}, {"park_mib": 1.5}, {"park_mib": -1},
+                        {"idle_unload_s": True}, {"aliases": [1]}, {}, None, ["x"]):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 runconfig.apply(CFG, changes)
         with self.assertRaises(ValueError):                              # one bad value: nothing is applied
-            runconfig.apply(CFG, {"fit_max_tokens": True, "sampling.top_k": 0})
-        with self.assertRaises(ValueError):
-            runconfig.apply({**CFG, "vision": {"gpu": True}}, {"lazy_load": True})
+            runconfig.apply(CFG, {"fit_max_tokens": True, "sampling.top_k": -1})
+
+    def test_top_k_has_no_cap(self):                                     # the GLM sampler takes any top_k; 0 = off
+        for k in (0, 64, 65, 200, 1000):
+            new, _ = runconfig.apply(CFG, {"sampling.top_k": k})
+            self.assertEqual(new["sampling"]["top_k"], k)
 
     def test_view(self):
-        v = runconfig.view({**CFG, "args": CFG["args"] + ["--vram-reserve-mib", "1500"]}, "x/strata-q2_0.json")
+        v = runconfig.view({**CFG, "args": CFG["args"] + ["--vram-reserve", "1.5", "--park-mib", "4096"]},
+                           "x/strata-q2_0.json")
         self.assertEqual(v["file"], "strata-q2_0.json")
         got = {k["key"]: k for k in v["keys"]}
         self.assertEqual(got["sampling.temperature"]["value"], 0.7)
-        self.assertEqual(got["vram_reserve_mib"]["value"], 1500)
+        self.assertEqual(got["vram_reserve_gb"]["value"], 1.5)
+        self.assertEqual(got["park_mib"]["value"], 4096)
+        self.assertEqual(got["park_mib"]["kind"], "number")
+        self.assertNotIn("effort_position", got)
         self.assertIsNone(got["fit_max_tokens"]["value"])
         self.assertEqual(got["anthropic_thinking"]["choices"], ["model", "on_request"])
         self.assertNotIn("api_key", got)
@@ -133,7 +142,7 @@ class Http(unittest.TestCase):
         status, _ = self.call("POST", b'{"set": {"fit_max_tokens": true}}', {"Content-Type": "text/plain"})
         self.assertEqual(status, 415)
         for body in ({"set": {"api_key": ""}}, {"set": {"mcp_servers": {"x": {"command": "calc"}}}},
-                     {"set": {"sampling.top_k": 0}}, {"nothing": 1}, b"not json"):
+                     {"set": {"sampling.top_k": -1}}, {"nothing": 1}, b"not json"):
             status, b = self.call("POST", body, {"Origin": f"http://{self.host}"})
             self.assertEqual(status, 400, (body, b))
         self.assertEqual(self.path.read_bytes(), before)                 # nothing was written
