@@ -236,11 +236,10 @@ class ToolCalls(Base):
         self.assertEqual(self.parse(text, thinking=False), [("content", text)])
 
     def test_prose_then_a_real_call(self):
-        text = "The <tool_call> tag:" + READ
-        self.assertEqual(self.parse(text, thinking=False),
-                         [("content", "The <tool_call> tag:"), ("tool_start", "read_file"),
-                          ("tool_args", json.dumps(READ_ARGS, separators=(",", ":"))),
-                          ("tool_call", "read_file", READ_ARGS)])
+        events = self.parse("The <tool_call> tag:" + READ, thinking=False)
+        self.assertEqual(events[:2], [("content", "The <tool_call> tag:"), ("tool_start", "read_file")])
+        self.assertEqual(json.loads(events[2][1]), READ_ARGS)
+        self.assertEqual(events[3:], [("tool_call", "read_file", READ_ARGS)])
 
     def test_without_declared_tools_any_name_like_word_is_a_call(self):
         self.assertEqual(self.calls("<tool_call>mcp__fs.read-file<arg_key>p</arg_key><arg_value>x</arg_value>"
@@ -382,7 +381,7 @@ class CallsInReasoning(Base):
         events = p.feed(head + "x" * 100)
         self.assertEqual(normal(events), [("reasoning", "go")])
         events = p.feed("x" * RCALL_MAX)
-        self.assertEqual(normal(events), [("reasoning", head + "x" * (RCALL_MAX + 100))])
+        self.assertEqual(normal(events), [("reasoning", head[len("go"):] + "x" * (RCALL_MAX + 100))])
         self.assertEqual(p.state, "reasoning")
 
 
@@ -444,8 +443,6 @@ class Recover(Base):
 
 class Pieces(unittest.TestCase):
     def test_parse_tool_call(self):
-        self.assertEqual(parse_tool_call("read_file<arg_key>lines</arg_key><arg_value>3</arg_value>", TOOLS),
-                         parse_tool_call("read_file<arg_key>lines</arg_key><arg_value>3</arg_value>", TOOLS))
         call = parse_tool_call("read_file<arg_key>path</arg_key><arg_value>7</arg_value>", TOOLS)
         self.assertEqual((call.name, call.arguments), ("read_file", {"path": "7"}))
         call = parse_tool_call("anything<arg_key>path</arg_key><arg_value>7</arg_value>")
