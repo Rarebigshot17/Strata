@@ -11,7 +11,6 @@ import contextlib
 import io
 import json
 import os
-import shutil
 import socket
 import sys
 import tempfile
@@ -24,10 +23,11 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from serve.frontend import ChatTemplate, literal_tags, mark_think_literals, unmark_think_literals  # noqa: E402
+from serve.frontend import (CALL_START, ChatTemplate, literal_tags, mark_think_literals,  # noqa: E402
+                            unmark_think_literals)
 from serve.glm_fixtures import GlmTokenizer, call_text, glm_template, reply_text  # noqa: E402
-from serve.server import (CTX_SLACK, ByteTokenizer, EngineDied, EngineError, EngineNonFinite, MockEngine,  # noqa: E402
-                          Service,
+from serve.server import (CTX_SLACK, ByteTokenizer, EngineDied, EngineError, EngineNonFinite, Fifo,  # noqa: E402
+                          MockEngine, Service,
                           StrataEngine, api_key_of, engine_args, key_matches, prompt_progress,
                           prompt_tokens_seen,
                           request_timings, serve)
@@ -1436,9 +1436,6 @@ class EngineDeath(unittest.TestCase):
 
 
 # ======================================== region B of the GLM test port (plan B3); keep this line ========================================
-
-
-from serve.glm_fixtures import GlmTokenizer, glm_template, reply_text  # noqa: E402
 
 
 class DoneLineEngine(MockEngine):
@@ -3125,11 +3122,6 @@ class ThinkingBudget(unittest.TestCase):
 
 
 # ======================================== region C of the GLM test port (plan B3); keep this line ========================================
-
-
-from serve.frontend import CALL_START  # noqa: E402
-from serve.glm_fixtures import GlmTokenizer, call_text, glm_template, reply_text  # noqa: E402
-from serve.server import Fifo  # noqa: E402
 
 
 class CallingEngine(MockEngine):
