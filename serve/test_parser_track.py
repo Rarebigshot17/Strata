@@ -34,7 +34,6 @@ class TrackTests(unittest.TestCase):
     def assert_state(self, actual, expected):
         self.assertEqual((actual.line, actual.fence, actual.ticks),
                          (expected.line, expected.fence, expected.ticks))
-        self.assertEqual(actual._opener_ok(), expected._opener_ok())
         self.assertEqual(actual._in_code(), expected._in_code())
 
     def test_fragment_state_from_varied_initial_states(self):
@@ -51,7 +50,7 @@ class TrackTests(unittest.TestCase):
 
     def test_random_streaming_boundaries(self):
         text = ("Reasoning `inline` café 🙂\n\n  ```python\n<tool_call>quoted\n```\n"
-                "~~~xml\r\n<function=test>\n~~~\n\nAnswer\n" * 8)
+                "~~~xml\r\n<tool_call>test<arg_key>a</arg_key>\n~~~\n\nAnswer\n" * 8)
         rng = random.Random(1029)
         for _ in range(50):
             actual, expected = OutputParser(), ReferenceParser()
@@ -73,8 +72,7 @@ class TrackTests(unittest.TestCase):
         self.assert_state(actual, expected)
         for parser in (actual, expected):
             saved = (parser.fence, parser.line, parser.ticks)
-            parser.buf = "\n```python\nignored"
-            parser._ok_at(len(parser.buf))
+            parser._in_code_at("\n```python\nignored")
             self.assertEqual((parser.fence, parser.line, parser.ticks), saved)
             parser._track("more text")
             self.assertEqual(saved[1] + "more text", parser.line)
@@ -83,15 +81,17 @@ class TrackTests(unittest.TestCase):
 
     def test_feed_events_with_long_lines_and_quoted_tool_tags(self):
         text = ("prefix " * 1024 + "`<tool_call>`\n\n```xml\n" + "x" * 16384
-                + "<tool_call><function=quoted></function></tool_call>\n```\n"
-                + "<tool_call><function=write><parameter=text>ok</parameter></function></tool_call>\nDone")
-        for recover, stream in itertools.product((False, True), repeat=2):
-            kwargs = dict(thinking=False, tools=[{"name": "write"}], recover=recover, stream_tools=stream)
+                + "<tool_call>write<arg_key>text</arg_key><arg_value>quoted</arg_value></tool_call>\n```\n"
+                + "<tool_call>write<arg_key>text</arg_key><arg_value>ok</arg_value></tool_call>\nDone")
+        for thinking, recover, stream in itertools.product((False, True), repeat=3):
+            kwargs = dict(thinking=thinking, tools=[{"name": "write"}], recover=recover, stream_tools=stream)
+            # thinking: the same text in the reasoning, then an answer
+            reply = text.replace("\nDone", "\n</think>Done") if thinking else text
             actual, expected = OutputParser(**kwargs), ReferenceParser(**kwargs)
             def normalized(events):
                 return [(e.kind, e.text, (e.call.name, e.call.arguments) if e.call else None) for e in events]
-            for pos in range(0, len(text), 17):
-                delta = text[pos:pos + 17]
+            for pos in range(0, len(reply), 17):
+                delta = reply[pos:pos + 17]
                 self.assertEqual(normalized(actual.feed(delta)), normalized(expected.feed(delta)))
             self.assertEqual(normalized(actual.finish()), normalized(expected.finish()))
 
