@@ -22,7 +22,8 @@ from serve.server import MockEngine, Service, serve  # noqa: E402
 CTX = 8192
 CALL = call_text("read_file", limit=120, path="file.txt")
 OTHER = CALL.replace("read_file", "not_declared")
-TOOLS = [{"name": "read_file", "parameters": {"properties": {"limit": {"type": "integer"}, "path": {"type": "string"}}}}]
+TOOLS = [{"name": "read_file",
+          "parameters": {"properties": {"limit": {"type": "integer"}, "path": {"type": "string"}}}}]
 
 
 def run(text, width, tools=TOOLS, thinking=True, stream_tools=True):
