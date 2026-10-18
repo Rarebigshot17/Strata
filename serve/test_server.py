@@ -2284,9 +2284,9 @@ class LiveRate(unittest.TestCase):
     TOKENS = 30
 
     def setUp(self):
-        self.tok = ByteTokenizer()
+        self.tok = GlmTokenizer()
         self.engine = MockEngine(self.tok, "x" * self.TOKENS, max_context=CTX, delay_s=self.PACE_S)
-        self.svc = Service(self.engine, self.tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        self.svc = Service(self.engine, self.tok, glm_template())
         self.httpd = serve(self.svc, port=0)
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
 
@@ -2369,15 +2369,14 @@ class LiveRate(unittest.TestCase):
         class HalfDead(MockEngine):
             last = {"generated": 99, "prompt_tokens": 9, "prompt_ms": 10.0, "decode_ms": 100.0, "finish": "stop"}
 
-            def generate(self, ids, max_new, sampling, cancel, embeddings=None):
-                for i, t in enumerate(super().generate(ids, max_new, sampling, cancel, embeddings)):
+            def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
+                for i, t in enumerate(super().generate(ids, max_new, sampling, cancel, checkpoint)):
                     if i == 3:
                         raise EngineDied("the engine stopped unexpectedly (exit code -9)")
                     yield t
 
-        tok = ByteTokenizer()
-        svc = Service(HalfDead(tok, "x" * self.TOKENS, max_context=CTX), tok,
-                      ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        svc = Service(HalfDead(tok, "x" * self.TOKENS, max_context=CTX), tok, glm_template())
         httpd = serve(svc, port=0)
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
         try:
@@ -2411,18 +2410,18 @@ class PromptProgress(unittest.TestCase):
             super().__init__(*args, **kwargs)
             self.progress, self.progress_ms, self.reused, self.total = None, 0.0, 0, 0
 
-        def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+        def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
             for read, ms in ((8192, 2200.0), (16384, 4400.0), (24576, 6600.0)):
                 self.progress, self.progress_ms = (read, self.total), ms
                 yield None
-            yield from super().generate(ids, max_new, sampling, cancel, embeddings)
+            yield from super().generate(ids, max_new, sampling, cancel, checkpoint)
 
     def setUp(self):
-        tok = ByteTokenizer()
+        tok = GlmTokenizer()
         self.engine = self.Reading(tok, "y" * self.TOKENS, max_context=CTX)
         self.engine.total = self.TOTAL
         self.engine.reused = 4096                     # RESUME: the conversation checkpoint's reused prefix
-        self.svc = Service(self.engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        self.svc = Service(self.engine, tok, glm_template())
         self.httpd = serve(self.svc, port=0)
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
 
@@ -2454,13 +2453,34 @@ class PromptProgress(unittest.TestCase):
         self.assertIn(": keep-alive", text, "the PP line still keeps the connection alive as it used to")
 
     def test_the_line_that_says_the_prompt_is_read_is_dropped(self):
-        # the batched path leaves up to --short-read tokens to the verify windows, so its last PP stops short of the
-        # prompt.  A prompt under one --prefill chunk sends only that line, and it would show a bar already full.
-        for short in (PP_DONE_TAIL, PP_DONE_TAIL - 1, 1):
-            self.engine.progress, self.engine.progress_ms = (self.TOTAL - short, self.TOTAL), 6600.0
-            self.assertIsNone(prompt_progress(self.svc), f"a PP {short} token(s) short of the end says it is read")
-        self.engine.progress = (self.TOTAL - PP_DONE_TAIL - 1, self.TOTAL)
-        self.assertEqual(prompt_progress(self.svc)["processed"], self.TOTAL - PP_DONE_TAIL - 1)
+        # the engine always sends a PP at done == total; a prompt under one chunk sends only that line, and it would
+        # show a bar already full
+        self.engine.progress, self.engine.progress_ms = (self.TOTAL, self.TOTAL), 6600.0
+        self.assertIsNone(prompt_progress(self.svc), "the PP at the end says the prompt is read")
+        self.engine.progress = (self.TOTAL - 1, self.TOTAL)
+        self.assertEqual(prompt_progress(self.svc)["processed"], self.TOTAL - 1)
+
+    def test_the_engines_pp_and_resume_lines(self):
+        """StrataEngine.generate reads GLM's `RESUME <n>` and `PP <done> <total> <ms> <tok/s>` lines into what
+        prompt_progress reports; each PP reaches the HTTP layer as a ping (None)."""
+        import queue as queue_
+        eng = object.__new__(StrataEngine)
+        eng.lines = queue_.Queue()
+        for line in ("RESUME 4096", "PP 12288 25000 2200 3723.6", "HB", "PP 25000 25000 6600 4654.5", "T 65",
+                     "DONE 1 25000 6600.0 10.0 stop 0 0 4096 0 0 0 0 0.0 20904 0"):
+            eng.lines.put(line)
+        eng.proc = SimpleNamespace(stdin=io.StringIO(), poll=lambda: None)
+        eng.alive = lambda: True
+        eng.silence_s, eng.can_stop, eng.last = 0, True, {}
+        self.svc.engine = eng
+        gen = eng.generate([1] * 25000, 10, {}, threading.Event())
+        self.assertIsNone(next(gen))
+        self.assertEqual(prompt_progress(self.svc), {"total": 25000, "cache": 4096, "processed": 12288, "time_ms": 2200})
+        self.assertIsNone(next(gen))                  # the HB is no progress and, this soon, no ping either
+        self.assertEqual(eng.progress, (25000, 25000))
+        self.assertIsNone(prompt_progress(self.svc))
+        self.assertEqual(list(gen), [65])
+        self.assertEqual((eng.last["reused"], eng.last["prompt_read"]), (4096, 20904))
 
     def test_nothing_before_the_first_chunk(self):
         self.engine.progress = None
@@ -2476,8 +2496,8 @@ class ConfigReasoningEffort(unittest.TestCase):
     its "args" (not an engine option) is lifted into that key."""
 
     def svc(self, effort=None, shared=None):
-        tok = ByteTokenizer()
-        svc = Service(MockEngine(tok, "ok", max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        svc = Service(MockEngine(tok, "ok", max_context=CTX), tok, glm_template())
         svc.config_effort = effort
         svc.shared = shared or {}
         return svc
@@ -2522,13 +2542,13 @@ class SharedSettings(unittest.TestCase):
         import tempfile
 
         class Sampled(RecordingEngine):
-            def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+            def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
                 self.last_sampling = dict(sampling or {})
-                yield from super().generate(ids, max_new, sampling, cancel, embeddings)
+                yield from super().generate(ids, max_new, sampling, cancel, checkpoint)
 
-        tok = ByteTokenizer()
-        cls.engine = Sampled(tok, "</think>\n\nhello", max_context=CTX)
-        cls.svc = Service(cls.engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        cls.engine = Sampled(tok, reply_text("", "hello"), max_context=CTX)
+        cls.svc = Service(cls.engine, tok, glm_template())
         cls.tmp = tempfile.TemporaryDirectory()
         cls.svc.shared_path = os.path.join(cls.tmp.name, "strata-x.shared-settings.json")
         cls.httpd = serve(cls.svc, port=0)
@@ -2558,7 +2578,7 @@ class SharedSettings(unittest.TestCase):
 
     def test_other_apps_get_the_chat_settings(self):
         d = {"temperature": 0.3, "top_p": 0.9, "top_k": 10, "seed": 7, "max_tokens": 77,
-             "reasoning_effort": "low", "experimental_speed_projection": False}
+             "reasoning_effort": "low"}
         code, b = self.req("/settings", {"defaults": d})
         self.assertEqual(code, 200, b)
         self.assertTrue(b["shared"])
@@ -2566,7 +2586,7 @@ class SharedSettings(unittest.TestCase):
         code, _ = self.chat()                                        # a client that sets nothing
         self.assertEqual(code, 200)
         got = self.engine.last_sampling
-        for k in ("temperature", "top_p", "top_k", "seed", "experimental_speed_projection"):
+        for k in ("temperature", "top_p", "top_k", "seed"):
             self.assertEqual(got[k], d[k], k)
         self.assertEqual(self.engine.last_max_new, 77)
         code, _ = self.chat(temperature=0.9, max_tokens=5)          # its own values win
@@ -2583,7 +2603,7 @@ class SharedSettings(unittest.TestCase):
         self.assertEqual((code, b["shared"]), (200, False))
         self.assertFalse(os.path.exists(self.svc.shared_path))
         self.chat()
-        self.assertNotIn("temperature", self.engine.last_sampling)
+        self.assertEqual(self.engine.last_sampling["temperature"], 1.0)    # GLM's default again, not the Chat's 0.3
 
     def test_a_body_without_the_defaults_wrapper_is_rejected(self):
         """A body with no "defaults" key is a mistake, not the documented "clear them" ({"defaults": null})."""
