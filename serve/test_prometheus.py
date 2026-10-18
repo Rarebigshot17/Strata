@@ -14,11 +14,9 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from serve.frontend import ChatTemplate  # noqa: E402
+from serve.glm_fixtures import GlmTokenizer, glm_template, reply_text  # noqa: E402
 from serve.prometheus import BUCKETS, Latencies, render, wants_prometheus  # noqa: E402
-from serve.server import ByteTokenizer, MockEngine, Service, serve  # noqa: E402
-
-ROOT = Path(__file__).resolve().parents[1]
+from serve.server import MockEngine, Service, serve  # noqa: E402
 
 
 def parse(text):
@@ -65,16 +63,15 @@ class Units(unittest.TestCase):
     def test_render_reads_the_server_record(self):
         m = {"engine": {"model": 'a "b"', "max_context": 1000},
              "live": {"state": "generating", "queued": 2, "prompt_tokens": 400, "generated": 100},
-             "totals": {"requests": 3, "prompt_tokens": 900, "reused": 600, "output_tokens": 50,
-                        "drafts_offered": 40, "drafts_accepted": 30}}
+             "totals": {"requests": 3, "prompt_tokens": 900, "reused": 600, "output_tokens": 50}}
         got = parse(render(m, Latencies().snapshot()))
         lab = 'model_name="a \\"b\\""'
         self.assertEqual(got[("vllm:num_requests_running", lab)], 1)
         self.assertEqual(got[("vllm:num_requests_waiting", lab)], 2)
         self.assertEqual(got[("vllm:kv_cache_usage_perc", lab)], 0.5)
         self.assertEqual(got[("vllm:prefix_cache_hits_total", lab)], 600)
-        self.assertEqual(got[("vllm:spec_decode_num_accepted_tokens_total", lab)], 30)
         self.assertEqual(got[("vllm:time_to_first_token_seconds_count", lab)], 0)
+        self.assertFalse([k for k in got if "spec_decode" in k[0]])         # the engine writes no drafts
 
     def test_strata_names_follow_the_json(self):
         m = {"engine": {"model": "m", "max_context": 1000},
@@ -100,9 +97,8 @@ class Units(unittest.TestCase):
 class Endpoint(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        tok = ByteTokenizer()
-        cls.svc = Service(MockEngine(tok, "</think>\n\nhello there", max_context=4096), tok,
-                          ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        cls.svc = Service(MockEngine(tok, reply_text("", "hello there"), max_context=4096), tok, glm_template())
         cls.httpd = serve(cls.svc, port=0)
         cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
 
@@ -135,16 +131,10 @@ class Endpoint(unittest.TestCase):
         self.assertTrue(ctype.startswith("text/plain"))
 
 
-class BatchEngine(MockEngine):
-    """--batch as the server sees it: several requests generate at once, none waits for the control lines."""
-    batch, waiting = 4, 0
-
-
-class Batched(unittest.TestCase):
-    def test_every_concurrent_request_is_counted(self):
-        tok = ByteTokenizer()
-        svc = Service(BatchEngine(tok, "</think>\n\n" + "y" * 40, max_context=4096, delay_s=0.02), tok,
-                      ChatTemplate(ROOT / "serve/chat_template.jinja"))
+class Queued(unittest.TestCase):
+    def test_every_queued_request_is_counted(self):
+        tok = GlmTokenizer()
+        svc = Service(MockEngine(tok, reply_text("", "y" * 40), max_context=4096, delay_s=0.02), tok, glm_template())
         httpd = serve(svc, port=0)
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
         try:
@@ -159,7 +149,7 @@ class Batched(unittest.TestCase):
 
             threads = [threading.Thread(target=ask) for _ in range(3)]
             [t.start() for t in threads]
-            time.sleep(0.4)                              # the three are generating
+            time.sleep(0.4)                              # one is generating, two wait for their turn
             req = urllib.request.Request(base + "/metrics", headers={"Accept": "text/plain"})
             with urllib.request.urlopen(req, timeout=30) as r:
                 during = {k[0]: v for k, v in parse(r.read().decode()).items()}
@@ -169,8 +159,10 @@ class Batched(unittest.TestCase):
         finally:
             httpd.shutdown()
             httpd.server_close()
-        self.assertEqual(during["vllm:num_requests_running"], 3)
+        self.assertEqual(during["vllm:num_requests_running"], 1)
+        self.assertEqual(during["vllm:num_requests_waiting"], 2)
         self.assertEqual(after["vllm:num_requests_running"], 0)
+        self.assertEqual(after["vllm:num_requests_waiting"], 0)
         self.assertEqual(after["vllm:request_success_total"], 3)      # each one, not only the last to finish
         self.assertEqual(after["vllm:e2e_request_latency_seconds_count"], 3)
         self.assertEqual(after["vllm:time_to_first_token_seconds_count"], 3)
