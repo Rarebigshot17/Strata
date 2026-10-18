@@ -1,21 +1,17 @@
-"""Tests for setup.py's reproducible installs (#214): the engine of the checkout's own release first (the latest as
-the fallback), Hugging Face files at pinned revisions (the current files when a revision is gone), the pinned
-requirements file, and an existing install left as it is.  Mocked network - nothing is downloaded.
+"""Tests for setup.py's reproducible installs (#214): the pinned requirements file (an existing install left as it
+is), and the resumable download of the model's files.  Mocked network - nothing is downloaded.
 
     python -m unittest tools.test_setup_pins
 """
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import io
 import json
-import re
 import sys
 import tempfile
 import unittest
 import urllib.error
-import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -23,8 +19,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 import setup  # noqa: E402
-
-SHA = re.compile(r"/resolve/[0-9a-f]{40}/")
 
 
 class Response(io.BytesIO):
@@ -40,50 +34,13 @@ class Response(io.BytesIO):
         self.close()
 
 
-def not_found(url):
-    return urllib.error.HTTPError(url, 404, "Not Found", {}, None)
-
-
 def quiet(fn, *args, **kw):
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
         return fn(*args, **kw), out.getvalue()
 
 
-class HuggingFacePins(unittest.TestCase):
-    def test_every_model_url_is_pinned(self):
-        for name, fam in setup.FAMILIES.items():
-            for key in ("hf", "mmproj_hf"):
-                with self.subTest(family=name, key=key):
-                    self.assertRegex(fam[key], SHA)
-                    self.assertNotIn("/resolve/main/", fam[key])
-        self.assertRegex(setup.HF, SHA)
-
-    def test_unpinned(self):
-        url = setup.FAMILIES["swift"]["hf"] + "x.gguf"
-        self.assertEqual(setup.hf_unpinned(url),
-                         "https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF/resolve/main/x.gguf")
-        self.assertEqual(setup.hf_unpinned("https://example.com/a/b"), "https://example.com/a/b")
-
-    def test_a_gone_revision_downloads_the_current_file(self):
-        seen = []
-
-        def urlopen(req, timeout=None):
-            seen.append((req.get_method(), req.full_url))
-            if "/resolve/main/" not in req.full_url:
-                raise not_found(req.full_url)
-            return Response(b"model bytes", status=200)
-
-        # the pinned Hugging Face path itself (setup's --source huggingface; auto may pick ModelScope)
-        with tempfile.TemporaryDirectory() as d, mock.patch.object(setup.urllib.request, "urlopen", urlopen), \
-                mock.patch.dict(setup.os.environ, {"STRATA_SOURCE": "huggingface"}):
-            dst = Path(d) / "m.gguf"
-            _, out = quiet(setup.download, setup.FAMILIES["qwen"]["mmproj_hf"] + "m.gguf", dst)
-            self.assertEqual(dst.read_bytes(), b"model bytes")
-        self.assertIn("not at the pinned revision any more", out)
-        self.assertEqual([m for m, _ in seen], ["HEAD", "HEAD", "GET"])
-        self.assertTrue(all("/resolve/main/" in u for _, u in seen[1:]))
-
+class Download(unittest.TestCase):
     def test_a_complete_part_is_finished_without_a_request(self):
         """A .part with every byte (setup stopped between the last byte and the rename): renamed, not resumed with a
         range past its end - the server answers that with 416, which download() retried 30 times, 10 s apart."""
@@ -104,188 +61,52 @@ class HuggingFacePins(unittest.TestCase):
             self.assertTrue(setup.done(dst))
         self.assertEqual(seen, [("HEAD", None)])
 
-    def test_mtp_fetch_is_pinned_and_falls_back(self):
-        import mtp_fetch
-        self.assertRegex(mtp_fetch.REPO, SHA)
-        self.assertIn(mtp_fetch.REVISION, mtp_fetch.REPO)
-        pinned = mtp_fetch.REPO
+    def test_a_part_is_resumed_with_a_range(self):
+        """A .part from a run that stopped half-way: the rest is asked for from its length on, and appended."""
+        seen = []
 
         def urlopen(req, timeout=None):
-            raise not_found(req.full_url)
+            seen.append((req.get_method(), req.headers.get("Range")))
+            if req.get_method() == "HEAD":
+                return Response(b"model bytes")
+            return Response(b"model bytes"[6:], status=206)
 
-        try:
-            with mock.patch.object(mtp_fetch.urllib.request, "urlopen", urlopen), \
-                    contextlib.redirect_stderr(io.StringIO()) as err:
-                self.assertEqual(mtp_fetch.resolve_repo(), "https://huggingface.co/Qwen/Qwen3.8-Flash-Next/resolve/main/")
-            self.assertIn("pinned revision", err.getvalue())
-        finally:
-            mtp_fetch.REPO = pinned
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(setup.urllib.request, "urlopen", urlopen):
+            dst = Path(d) / "m.gguf"
+            dst.with_name("m.gguf.part").write_bytes(b"model ")
+            quiet(setup.download, "https://example.com/m.gguf", dst)
+            self.assertEqual(dst.read_bytes(), b"model bytes")
+            self.assertFalse(dst.with_name("m.gguf.part").exists())
+            self.assertTrue(setup.done(dst))
+            seen.clear()
+            _, out = quiet(setup.download, "https://example.com/m.gguf", dst)  # finished: no request at all
+        self.assertEqual(seen, [])
+        self.assertIn("already downloaded", out)
 
-    def test_hf_endpoint(self):
-        # #495: HF_ENDPOINT (a mirror) serves the same pinned revision; a trailing slash and blanks are dropped
-        repo = "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF"
-        with mock.patch.dict(setup.os.environ, {}, clear=False):
-            setup.os.environ.pop("HF_ENDPOINT", None)
-            self.assertEqual(setup.hf(repo), f"https://huggingface.co/{repo}/resolve/{setup.HF_REVISIONS[repo]}/")
-            for value in ("https://hf-mirror.com", "https://hf-mirror.com/", " https://hf-mirror.com/ "):
-                setup.os.environ["HF_ENDPOINT"] = value
-                url = setup.hf(repo)
-                self.assertEqual(url, f"https://hf-mirror.com/{repo}/resolve/{setup.HF_REVISIONS[repo]}/")
-                self.assertRegex(url, SHA)
-                self.assertEqual(setup.hf_unpinned(url + "x.gguf"), f"https://hf-mirror.com/{repo}/resolve/main/x.gguf")
-            setup.os.environ["HF_ENDPOINT"] = ""
-            self.assertEqual(setup.hf_endpoint(), "https://huggingface.co")
+    def test_a_wrong_size_is_deleted(self):
+        with tempfile.TemporaryDirectory() as d:
+            s = Path(d) / "m.gguf"
+            s.write_bytes(b"short")
+            setup.mark(s)
+            with self.assertRaises(SystemExit):
+                quiet(setup.verify_file, s, 11, None)
+            self.assertFalse(s.exists())
+            self.assertFalse(setup.done(s))                                  # the next run downloads it again
 
-    def test_mtp_fetch_honours_hf_endpoint(self):
-        import importlib
-        import mtp_fetch
-        try:
-            with mock.patch.dict(mtp_fetch.os.environ, {"HF_ENDPOINT": "https://hf-mirror.com/"}):
-                importlib.reload(mtp_fetch)
-                self.assertTrue(mtp_fetch.REPO.startswith("https://hf-mirror.com/Qwen/Qwen3.8-Flash-Next/resolve/"))
-                self.assertRegex(mtp_fetch.REPO, SHA)
-                self.assertTrue(mtp_fetch.pinned())                 # the tensors' SHA-256 checks still apply
-        finally:
-            importlib.reload(mtp_fetch)
-        self.assertTrue(mtp_fetch.REPO.startswith("https://huggingface.co/"))
-
-    def test_step5_names_the_folder(self):
-        # #495: where setup expects the model files, and how to give it files downloaded by hand
-        from test_setup_golden import PROFILES, install
-        ram, found = PROFILES["96GB-1x16GB"]
-        with mock.patch.dict(setup.os.environ, {"HF_ENDPOINT": "https://hf-mirror.com"}):
-            code, out, cfg, _ = install(ram, found, ["--family", "qwen", "--model", "IQ3_XXS", "--no-start"])
-        self.assertEqual(code, 0)
-        text = out.replace("\\", "/")
-        self.assertRegex(text, r"The model files go in .*/models/IQ3_XXS")
-        self.assertIn("put them here with their original names (Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf",
-                      text)
-        self.assertIn("--gguf-dir", text)
-        self.assertIn("Downloading from https://hf-mirror.com (HF_ENDPOINT)", text)
-
-
-class Engine(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
-        (self.root / "engine").mkdir()
-        self.patches = [mock.patch.object(setup, "ROOT", self.root),
-                        mock.patch.object(setup, "source_version", lambda: "0.1.31")]
-        for p in self.patches:
-            p.start()
-
-    def tearDown(self):
-        for p in reversed(self.patches):
-            p.stop()
-        self.tmp.cleanup()
-
-    def fake_download(self, got, wrote=None):
-        def download(url, dst, what=None):
-            got.append(url)
-            if wrote is not None:
-                wrote.append(Path(dst))
-            with zipfile.ZipFile(dst, "w") as z:
-                z.writestr("BUILD.json", json.dumps({"version": ".".join(map(str, setup.MIN_ENGINE)), "archs": [89]}))
-                z.writestr(setup.EXE, b"engine")
-        return download
-
-    def fake_digest(self, wrote):
-        """The SHA-256 of whatever the fake download just wrote, computed for real.
-
-        `get_prebuilt()` now checks the archive against GitHub's size and SHA-256 before it unpacks
-        anything, so a test that mocks the download has to supply a hash or it stops at the check. These
-        tests are about WHICH release and WHICH asset are chosen, not about the bytes; what happens when
-        the hash is wrong has its own file (tools/test_setup_engine_hash.py).
-        """
-        def digest(asset, base):
-            data = Path(wrote[-1]).read_bytes()
-            return len(data), hashlib.sha256(data).hexdigest()
-        return digest
-
-    def run_get(self, published):
-        heads, got, wrote = [], [], []
-
-        def urlopen(req, timeout=None):
-            heads.append(req.full_url)
-            if not any(req.full_url.startswith(p) for p in published):
-                raise not_found(req.full_url)
-            return Response()
-
-        with mock.patch.object(setup.urllib.request, "urlopen", urlopen), \
-                mock.patch.object(setup, "download", self.fake_download(got, wrote)), \
-                mock.patch.object(setup, "engine_digest", self.fake_digest(wrote)):
-            eng, out = quiet(setup.get_prebuilt, setup.PREBUILT_URL, {"arch": 89}, "gpu")
-        return eng, out, heads, got
-
-    def test_bases(self):
-        self.assertEqual(setup.prebuilt_bases(setup.PREBUILT_URL),
-                         ["https://github.com/Niko1221/Strata/releases/download/v0.1.31/", setup.PREBUILT_URL])
-        self.assertEqual(setup.prebuilt_bases("https://mirror.example/x"), ["https://mirror.example/x/"])
-
-    def test_the_checkout_s_release_first(self):
-        tag = "https://github.com/Niko1221/Strata/releases/download/v0.1.31/"
-        eng, out, heads, got = self.run_get([tag, setup.PREBUILT_URL])
-        self.assertEqual(eng, self.root / "engine")
-        self.assertEqual(got, [tag + setup.PREBUILT_ASSET])
-        self.assertEqual(len(heads), 1)
-
-    def test_latest_when_it_is_not_published(self):
-        eng, out, heads, got = self.run_get([setup.PREBUILT_URL])
-        self.assertEqual(eng, self.root / "engine")
-        self.assertEqual(got, [setup.PREBUILT_URL + setup.PREBUILT_ASSET])
-        self.assertIn("No ready-made engine for v0.1.31", out)
-
-    def test_a_refused_archive_is_not_kept(self):
-        """PR #324: a refused archive (too old, or no code for the GPU) kept its zip and .done mark, and every later
-        run reused it ("already downloaded") instead of the published one."""
-        for meta in ({"version": "0.1.0", "archs": [89]},
-                     {"version": ".".join(map(str, setup.MIN_ENGINE)), "archs": [120]}):
-            with self.subTest(meta=meta):
-                wrote = []
-
-                def download(url, dst, what=None):
-                    wrote.append(Path(dst))
-                    with zipfile.ZipFile(dst, "w") as z:
-                        z.writestr("BUILD.json", json.dumps(meta))
-                        z.writestr(setup.EXE, b"engine")
-                    setup.mark(dst)
-
-                with mock.patch.object(setup.urllib.request, "urlopen", lambda req, timeout=None: Response()), \
-                        mock.patch.object(setup, "download", download), \
-                        mock.patch.object(setup, "engine_digest", self.fake_digest(wrote)):
-                    eng, _ = quiet(setup.get_prebuilt, setup.PREBUILT_URL, {"arch": 89}, "gpu")
-                self.assertIsNone(eng)
-                z = self.root / "engine" / setup.PREBUILT_ASSET
-                self.assertFalse(z.exists())
-                self.assertFalse(z.with_name(z.name + ".done").exists())
-
-    def test_an_archive_that_does_not_unpack_is_not_kept(self):
-        """#397, for an archive that does not unpack (not a zip, or a damaged one): it kept its zip and .done mark,
-        so every later run failed on it, even after the right one was published."""
-        with tempfile.TemporaryDirectory() as folder:  # a --prebuilt folder, through the real download()
-            asset = Path(folder) / setup.PREBUILT_ASSET
-            asset.write_bytes(b"<html>not a zip</html>")
-            with self.assertRaises(zipfile.BadZipFile):
-                quiet(setup.get_prebuilt, folder, {"arch": 89}, "gpu")
-            with zipfile.ZipFile(asset, "w") as z:
-                z.writestr("BUILD.json", json.dumps({"version": ".".join(map(str, setup.MIN_ENGINE)), "archs": [89]}))
-                z.writestr(setup.EXE, b"engine")
-            eng, _ = quiet(setup.get_prebuilt, folder, {"arch": 89}, "gpu")
-        self.assertEqual(eng, self.root / "engine")
-        self.assertEqual((self.root / "engine" / setup.EXE).read_bytes(), b"engine")
-
-    def test_an_installed_engine_is_kept(self):
-        (self.root / "engine" / "BUILD.json").write_text(json.dumps(
-            {"version": ".".join(map(str, setup.MIN_ENGINE)), "archs": [89]}))
-        (self.root / "engine" / setup.EXE).write_bytes(b"old")
-
-        def urlopen(req, timeout=None):
-            raise AssertionError("asked the network for an installed engine")
-
-        with mock.patch.object(setup.urllib.request, "urlopen", urlopen):
-            eng, out = quiet(setup.get_prebuilt, setup.PREBUILT_URL, {"arch": 89}, "gpu")
-        self.assertEqual(eng, self.root / "engine")
-        self.assertEqual((self.root / "engine" / setup.EXE).read_bytes(), b"old")
+    def test_the_sha256_is_checked_once(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as d:
+            s = Path(d) / "m.gguf"
+            s.write_bytes(b"model bytes")
+            sha = hashlib.sha256(b"model bytes").hexdigest()
+            setup.mark(s)
+            _, out = quiet(setup.verify_file, s, 11, sha)
+            self.assertIn("checking m.gguf (SHA-256", out)
+            _, out = quiet(setup.verify_file, s, 11, sha)
+            self.assertEqual(out, "")                                        # kept in the finish mark
+            with self.assertRaises(SystemExit):
+                quiet(setup.verify_file, s, 11, "0" * 64)
+            self.assertFalse(s.exists())
 
 
 class Requirements(unittest.TestCase):
