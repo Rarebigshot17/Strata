@@ -1,5 +1,5 @@
 """serve/test_mcp.py - tools from MCP servers (serve/mcp.py) and the web app's tool loop, against the mock engine and
-the fake MCP server in serve/mcp_fake_server.py (no GPU, no pack, no MCP SDK).
+the fake MCP server in serve/mcp_fake_server.py (no GPU, no model, no MCP SDK).
 
     python -m unittest serve.test_mcp -v
 """
@@ -18,9 +18,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve import mcp_fake_server as fake  # noqa: E402
-from serve.frontend import ChatTemplate  # noqa: E402
+from serve.glm_fixtures import GlmTokenizer, call_text, glm_template, reply_text  # noqa: E402
 from serve.mcp import McpCancelled, McpHub, hub_from_config  # noqa: E402
-from serve.server import ByteTokenizer, MockEngine, Service, serve  # noqa: E402
+from serve.server import MockEngine, Service, serve  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 FAKE = str(ROOT / "serve" / "mcp_fake_server.py")
@@ -32,9 +32,13 @@ def stdio(*args, **extra):
 
 
 def call_script(name, **params):
-    """The model's text for one tool call, as Qwen's template asks for it."""
-    body = "".join(f"<parameter={k}>\n{v}\n</parameter>\n" for k, v in params.items())
-    return f"</think>\n\nLet me check.\n\n<tool_call>\n<function={name}>\n{body}</function>\n</tool_call>"
+    """The model's text for one tool call, as GLM writes it: an empty thinking, a sentence, the call."""
+    return reply_text("", "Let me check.", call_text(name, **params))
+
+
+def answer(text):
+    """The model's answer after an empty thinking."""
+    return reply_text("", text)
 
 
 class ScriptedEngine(MockEngine):
@@ -42,14 +46,15 @@ class ScriptedEngine(MockEngine):
 
     def __init__(self, tok, scripts, max_context=CTX, delay_s=0.0):
         super().__init__(tok, list(scripts), max_context=max_context, delay_s=delay_s)
-        self.prompts = []
+        self.prompts, self.checkpoints = [], []
 
-    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+    def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
         self.prompts.append(list(ids))
-        yield from super().generate(ids, max_new, sampling, cancel, embeddings)
+        self.checkpoints.append(checkpoint)
+        yield from super().generate(ids, max_new, sampling, cancel, checkpoint)
 
     def prompt_text(self, i):
-        return bytes(t for t in self.prompts[i] if t < 256).decode("utf-8", "replace")
+        return self.tok.decode(self.prompts[i])
 
 
 # ------------------------------------------------------------------------------------------------ the client
@@ -252,9 +257,9 @@ class ToolLoop(unittest.TestCase):
         os.unlink(self.log.name)
 
     def start(self, *scripts, delay_s=0.0):
-        tok = ByteTokenizer()
+        tok = GlmTokenizer()
         self.engine = ScriptedEngine(tok, list(scripts), delay_s=delay_s)
-        self.svc = Service(self.engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        self.svc = Service(self.engine, tok, glm_template())
         self.svc.mcp = self.hub
         self.httpd = serve(self.svc, port=0)
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
@@ -276,7 +281,7 @@ class ToolLoop(unittest.TestCase):
         return [json.loads(line[6:]) for line in text.splitlines() if line.startswith("data: {")]
 
     def test_tool_call_then_answer(self):
-        self.start(call_script("fake__echo", text="hello from the tool"), "</think>\n\nThe tool said hello.")
+        self.start(call_script("fake__echo", text="hello from the tool"), answer("The tool said hello."))
         code, text = self.post({"strata_mcp": True})
         self.assertEqual(code, 200, text)
         cs = self.chunks(text)
@@ -294,14 +299,17 @@ class ToolLoop(unittest.TestCase):
         first, second = self.engine.prompt_text(0), self.engine.prompt_text(1)
         self.assertIn('"name": "fake__echo"', first)                 # the MCP tools are in the prompt
         self.assertNotIn("broken__", first)                          # the server that failed is left out
-        self.assertIn("<function=fake__echo>\n<parameter=text>\nhello from the tool\n</parameter>", second)
-        self.assertIn("<tool_response>\nhello from the tool\n</tool_response>", second)
+        self.assertIn(call_text("fake__echo", text="hello from the tool"), second)     # the call, then its result
+        self.assertIn("<|observation|><tool_response>hello from the tool</tool_response>", second)
+        self.assertTrue(second.endswith("<|assistant|><think>"))
+        # each round's prompt is checkpointed before its generation prompt, the next round's too
+        self.assertEqual(self.engine.checkpoints, [len(p) - 2 for p in self.engine.prompts])
         self.assertEqual(cs[-1]["usage"]["prompt_tokens"], len(self.engine.prompts[1]))
 
     def test_a_call_the_output_ends_inside_is_not_run(self):
         """#211: the model's turn ends inside an MCP call: nothing runs (it used to run with no arguments)."""
         script = call_script("fake__echo", text="hello from the tool")
-        self.start(script[:script.index("from the tool")], "</think>\n\nnever")
+        self.start(script[:script.index("from the tool")], answer("never"))
         code, text = self.post({"strata_mcp": True})
         self.assertEqual(code, 200, text)
         cs = self.chunks(text)
@@ -312,7 +320,7 @@ class ToolLoop(unittest.TestCase):
         self.assertEqual(cs[-1]["choices"][0]["finish_reason"], "stop")
 
     def test_non_stream(self):
-        self.start(call_script("fake__add", a=2, b=3), "</think>\n\n5.")
+        self.start(call_script("fake__add", a=2, b=3), answer("5."))
         code, text = self.post({"strata_mcp": True}, stream=False)
         self.assertEqual(code, 200, text)
         msg = json.loads(text)["choices"][0]["message"]
@@ -320,7 +328,7 @@ class ToolLoop(unittest.TestCase):
         self.assertEqual(msg["strata_mcp"][-1]["text"], "5")
 
     def test_plain_requests_get_no_mcp_tools(self):
-        self.start(call_script("fake__echo", text="x"), "</think>\n\nnever")
+        self.start(call_script("fake__echo", text="x"), answer("never"))
         code, text = self.post({})
         self.assertEqual(code, 200, text)
         self.assertNotIn("fake__echo", self.engine.prompt_text(0))
@@ -336,7 +344,7 @@ class ToolLoop(unittest.TestCase):
     def test_own_tools_still_go_to_the_client(self):
         own = [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object", "properties": {
             "q": {"type": "string"}}}}}]
-        self.start(call_script("lookup", q="x"), "</think>\n\nnever")
+        self.start(call_script("lookup", q="x"), answer("never"))
         code, text = self.post({"strata_mcp": True, "tools": own})
         cs = self.chunks(text)
         calls = [tc for c in cs for tc in c["choices"][0]["delta"].get("tool_calls") or []]
@@ -347,15 +355,15 @@ class ToolLoop(unittest.TestCase):
         self.assertEqual(len(self.engine.prompts), 1)
 
     def test_tool_error_is_a_result(self):
-        self.start(call_script("fake__fail"), "</think>\n\nIt failed.")
+        self.start(call_script("fake__fail"), answer("It failed."))
         code, text = self.post({"strata_mcp": True})
         mcp = [c["strata_mcp"] for c in self.chunks(text) if "strata_mcp" in c]
         self.assertEqual((mcp[-1]["ok"], mcp[-1]["text"]), (False, "error: it failed on purpose"))
-        self.assertIn("<tool_response>\nerror: it failed on purpose\n</tool_response>", self.engine.prompt_text(1))
+        self.assertIn("<tool_response>error: it failed on purpose</tool_response>", self.engine.prompt_text(1))
         self.assertEqual(self.chunks(text)[-1]["choices"][0]["finish_reason"], "stop")
 
     def test_truncated_for_the_model(self):
-        self.start(call_script("fake__big", n=3000), "</think>\n\nLong.")
+        self.start(call_script("fake__big", n=3000), answer("Long."))
         self.post({"strata_mcp": True})
         second = self.engine.prompt_text(1)
         self.assertIn("y" * 500 + "\n\n[... truncated: the tool returned 3,000 characters", second)
@@ -373,7 +381,7 @@ class ToolLoop(unittest.TestCase):
 
     def test_stop_during_a_tool(self):
         """Closing the connection while a slow tool runs stops the tool (notifications/cancelled) and the loop."""
-        self.start(call_script("fake__sleep", seconds=8), "</think>\n\nnever")
+        self.start(call_script("fake__sleep", seconds=8), answer("never"))
         body = {"model": "m", "messages": [{"role": "user", "content": "x"}], "stream": True, "strata_mcp": True}
         req = urllib.request.Request(self.base + "/v1/chat/completions", data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json"})
@@ -392,7 +400,7 @@ class ToolLoop(unittest.TestCase):
         self.assertFalse(self.svc.status["busy"])
 
     def test_only_from_the_app_s_own_page(self):
-        self.start("</think>\n\nhi")
+        self.start(answer("hi"))
         req = urllib.request.Request(self.base + "/v1/chat/completions", data=json.dumps(
             {"model": "m", "messages": [{"role": "user", "content": "x"}], "strata_mcp": True}).encode(),
             headers={"Content-Type": "text/plain"})                  # a cross-site "simple" request
@@ -407,7 +415,7 @@ class ToolLoop(unittest.TestCase):
         self.assertEqual(code, 200)
 
     def test_get_mcp(self):
-        self.start("</think>\n\nhi")
+        self.start(answer("hi"))
         with urllib.request.urlopen(self.base + "/mcp", timeout=10) as r:
             st = json.loads(r.read())
         servers = {s["name"]: s for s in st["servers"]}
@@ -426,8 +434,8 @@ class ToolLoop(unittest.TestCase):
 
 class NoServers(unittest.TestCase):
     def test_opt_in_without_servers_is_a_plain_chat(self):
-        tok = ByteTokenizer()
-        svc = Service(ScriptedEngine(tok, ["</think>\n\nhi"]), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        svc = Service(ScriptedEngine(tok, [answer("hi")]), tok, glm_template())
         httpd = serve(svc, port=0)
         try:
             base = f"http://127.0.0.1:{httpd.server_address[1]}"
