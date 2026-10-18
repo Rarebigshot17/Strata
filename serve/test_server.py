@@ -283,7 +283,8 @@ class TextOnly(unittest.TestCase):
                     if text == "r":                                  # a text-only result is its text
                         self.assertEqual(result, "r")
                     else:
-                        self.assertRegex(result, "^" + text + r"\[image omitted: [^\]]*text only\]$")
+                        self.assertEqual(result[:len(text)], text)
+                        self.assertRegex(result[len(text):], r"^\[image omitted: [^\]]*text only\]$")
 
 
 class ListenProblem(unittest.TestCase):
@@ -370,6 +371,7 @@ class LiteralThinkTags(unittest.TestCase):
                 for part in parts + ([] if lit in self.CALL_TAGS else [f"It wrote {lit} here."]):
                     self.assertIn(part, text)
         ids = self.ids(*messages("X"), clear_thinking=False)
+        # the reasoning markers: the history turn's <think>...</think> and the generation prompt's <think>
         self.assertEqual((ids.count(self.open), ids.count(self.close)), (2, 1))
 
     def test_an_assistant_reply_with_its_call_written_inline(self):
@@ -554,7 +556,7 @@ class CheckpointAtTheAnswer(unittest.TestCase):
                 first, _, cp1 = self.prepared(self.CHAT, **kw)
                 second, _, cp2 = self.prepared(self.CHAT + [self.REPLY, self.NEXT], **kw)
                 self.assertEqual(second[:cp1], first[:cp1])       # the whole first conversation is reused
-                self.assertGreater(cp2, cp1 + 20 * 5)
+                self.assertEqual(cp2, len(second) - 2)            # before the two tokens of the generation prompt
                 # the reply's reasoning is gone once a user turn follows: the engine's state after the reply could not
                 # be continued, the checkpoint before it can
                 self.assertNotIn(self.REPLY["reasoning_content"], self.tok.decode(second))
