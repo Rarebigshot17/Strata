@@ -125,6 +125,21 @@ class ThinkEnd(unittest.TestCase):
     """GLM writes the answer right after `</think>`, so every `</think>` ends the thinking, quoted or not (Qwen's #537
     rule, which kept a quoted tag as reasoning text, is gone)."""
 
+    def test_a_quoted_tag_ends_the_thinking(self):
+        # the quotes Qwen's #537 rule kept as reasoning: under GLM the first </think> ends the thinking, and the rest
+        # (a second </think> too) is the answer's text
+        for quote in ("in rcall, `</think>` could arrive inside the held body",
+                      'the mock engine returns "</think>\\n\\n2", no tool call',
+                      '```python\ntext = ("</think>\\n\\nI will use the tag now.")\n```',
+                      "split it on '</think>' first"):
+            text = "plan\n" + quote + "\ndone\n</think>\n\nanswer"
+            head, tail = text.split("</think>", 1)
+            for width in (1, 7, 100_000):
+                with self.subTest(quote=quote[:24], width=width):
+                    evs = run(text, width)
+                    self.assertEqual(joined(evs, "reasoning"), head)
+                    self.assertEqual(joined(evs, "content"), tail)
+
     def test_the_end_after_a_quote_ends_the_thinking(self):
         for thought in ('she said "yes"', "it is `x`", "it is 'x'", "split it on '"):
             for width in (1, 100_000):
@@ -211,7 +226,7 @@ class OverHttp(unittest.TestCase):
         self.assertEqual(order, ["thinking", "tool_use", "text"])
         self.assertEqual(json.loads(a["anthropic", True][1]), {"path": "file.txt"})
 
-    def test_a_quoted_call_is_the_answer_text(self):
+    def test_a_call_quoted_in_the_thinking_is_no_call(self):
         script = "Let me look.\n" + call_text("write", path="file.txt") + " is the shape.</think>done"
         a = answers(script)
         self.assertEqual(a["openai", False], ("stop", []))
