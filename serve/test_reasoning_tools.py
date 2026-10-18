@@ -107,10 +107,14 @@ class Parser(unittest.TestCase):
         from serve import frontend
         text = ("a\n<tool_call>read_file<arg_key>path</arg_key><arg_value>" + "thinking on and on " * 3000 +
                 "</think>answer")
+        p, fed = OutputParser(thinking=True, tools=TOOLS, stream_tools=True), []    # (the feed it came from, event)
         with unittest.mock.patch.object(frontend, "RCALL_MAX", 1000):
-            evs = run(text, 50)
-        first_reasoning_at = next(i for i, e in enumerate(evs) if e.kind == "reasoning" and len(e.text) > 100)
-        self.assertLess(first_reasoning_at, 100)                     # streamed, not kept until </think>
+            for k, i in enumerate(range(0, len(text), 50)):
+                fed += [(k, e) for e in p.feed(text[i:i + 50])]
+            fed += [(len(text) // 50 + 1, e) for e in p.finish()]
+        evs = [e for k, e in fed]
+        first_reasoning_at = next(k for k, e in fed if e.kind == "reasoning" and len(e.text) > 100)
+        self.assertLess(first_reasoning_at, 100)    # streamed after RCALL_MAX characters, not kept until </think>
         self.assertEqual(joined(evs, "reasoning"), text.split("</think>")[0])
         self.assertEqual(joined(evs, "content"), "answer")
 
