@@ -1641,7 +1641,8 @@ class NonFiniteLogits(unittest.TestCase):
             for path, stream in (("/v1/chat/completions", False), ("/v1/chat/completions", True),
                                  ("/v1/responses", False)):
                 svc.engine.plan = [0, 0]
-                body = {"model": "m", "max_tokens": 20, "stream": stream, "messages": [{"role": "user", "content": "hi"}]}
+                body = {"model": "m", "max_tokens": 20, "stream": stream,
+                        "messages": [{"role": "user", "content": "hi"}]}
                 if path == "/v1/responses":
                     body = {"model": "m", "max_output_tokens": 20, "input": "hi"}
                 req = urllib.request.Request(base + path, data=json.dumps(body).encode(),
@@ -2046,7 +2047,8 @@ class PromptProgress(unittest.TestCase):
         self.svc.engine = eng
         gen = eng.generate([1] * 25000, 10, {}, threading.Event())
         self.assertIsNone(next(gen))
-        self.assertEqual(prompt_progress(self.svc), {"total": 25000, "cache": 4096, "processed": 12288, "time_ms": 2200})
+        self.assertEqual(prompt_progress(self.svc),
+                         {"total": 25000, "cache": 4096, "processed": 12288, "time_ms": 2200})
         self.assertIsNone(next(gen))                  # the HB is no progress and, this soon, no ping either
         self.assertEqual(eng.progress, (25000, 25000))
         self.assertIsNone(prompt_progress(self.svc))
@@ -2133,7 +2135,8 @@ class SharedSettings(unittest.TestCase):
 
     def req(self, path, body, headers=None, raw=None):
         h = {"Content-Type": "application/json", **(headers or {})}
-        r = urllib.request.Request(self.base + path, data=raw if raw is not None else json.dumps(body).encode(), headers=h)
+        r = urllib.request.Request(self.base + path, data=raw if raw is not None else json.dumps(body).encode(),
+                                   headers=h)
         try:
             with urllib.request.urlopen(r, timeout=30) as resp:
                 return resp.status, json.loads(resp.read())
@@ -2142,7 +2145,8 @@ class SharedSettings(unittest.TestCase):
                 return e.code, json.loads(e.read())
 
     def chat(self, **extra):
-        return self.req("/v1/chat/completions", {"model": "m", "messages": [{"role": "user", "content": "hi"}], **extra})
+        return self.req("/v1/chat/completions",
+                        {"model": "m", "messages": [{"role": "user", "content": "hi"}], **extra})
 
     def tearDown(self):
         self.svc.set_shared(None)
@@ -2679,7 +2683,8 @@ class SharingTheGpu(unittest.TestCase):
 
     def req(self, path, body=None):
         r = urllib.request.Request(self.base + path, data=None if body is None else json.dumps(body).encode(),
-                                   headers={"Content-Type": "application/json"}, method="GET" if body is None else "POST")
+                                   headers={"Content-Type": "application/json"},
+                                   method="GET" if body is None else "POST")
         try:
             with urllib.request.urlopen(r, timeout=30) as resp:
                 return resp.status, json.loads(resp.read())
@@ -2754,7 +2759,8 @@ class SharingTheGpu(unittest.TestCase):
 
     def _raw_chat(self):
         r = urllib.request.Request(self.base + "/v1/chat/completions",
-                                   data=json.dumps({"model": "m", "messages": [{"role": "user", "content": "hi"}]}).encode(),
+                                   data=json.dumps({"model": "m",
+                                                    "messages": [{"role": "user", "content": "hi"}]}).encode(),
                                    headers={"Content-Type": "application/json"}, method="POST")
         try:
             with urllib.request.urlopen(r, timeout=30) as resp:
@@ -3034,7 +3040,8 @@ class ThinkingBudget(unittest.TestCase):
         self.assertTrue(b["choices"][0]["message"]["reasoning_content"].startswith(ThinkingEngine.THOUGHT[:20] + "\n"))
 
     def test_the_thinking_progress_line_shows_the_budget_not_max_tokens(self):
-        """#984: 'thinking: x of max 6400' read as if the budget was ignored; while a budget applies the line shows it."""
+        """#984: 'thinking: x of max 6400' read as if the budget was ignored; while a budget applies the line shows
+        it."""
         st = {"phase": "thinking", "generated": 10, "first_token": time.time() - 1, "started": time.time() - 2,
               "max_tokens": 6400, "thinking_budget": 2048}
         out = io.StringIO()
@@ -3059,7 +3066,8 @@ class ThinkingBudget(unittest.TestCase):
         self.assertTrue(msg["reasoning_content"].startswith(ThinkingEngine.THOUGHT[:150] + "\n"), msg)
         self.assertEqual((msg["content"], b["choices"][0]["finish_reason"]), (ThinkingEngine.ANSWER, "stop"))
         self.assertEqual(len(self.engine.prompts), 2)
-        self.assertIn("thinking capped at 150 of max_tokens 300 to leave room for the answer (budget 5000)", out.getvalue())
+        self.assertIn("thinking capped at 150 of max_tokens 300 to leave room for the answer (budget 5000)",
+                      out.getvalue())
 
     def test_a_budget_well_below_max_tokens_is_not_capped(self):
         out = io.StringIO()
