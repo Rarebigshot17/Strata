@@ -2910,10 +2910,10 @@ class ClockedEngine(MockEngine):
     holding the first REUSED tokens of every prompt."""
     REUSED = 5
 
-    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+    def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
         n = 0
         try:
-            for t in super().generate(ids, max_new, sampling, cancel, embeddings):
+            for t in super().generate(ids, max_new, sampling, cancel, checkpoint):
                 n += 1
                 yield t
         finally:          # as StrataEngine reads its DONE line: also when the server closes the request at a stop token
@@ -2927,9 +2927,9 @@ class UsageAndStatus(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        tok = ByteTokenizer()
-        cls.engine = ClockedEngine(tok, "</think>\n\nok", max_context=CTX)
-        cls.svc = Service(cls.engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        cls.engine = ClockedEngine(tok, reply_text("", "ok"), max_context=CTX)
+        cls.svc = Service(cls.engine, tok, glm_template())
         cls.httpd = serve(cls.svc, port=0)
         cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
 
@@ -3042,9 +3042,8 @@ class UsageAndStatus(unittest.TestCase):
 
     def test_no_clock(self):
         """An engine without a clock (MockEngine): no timings, nothing cached."""
-        tok = ByteTokenizer()
-        svc = Service(MockEngine(tok, "</think>\n\nok", max_context=CTX), tok,
-                      ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        svc = Service(MockEngine(tok, reply_text("", "ok"), max_context=CTX), tok, glm_template())
         httpd = serve(svc, port=0)
         try:
             data = json.dumps({"model": "x", "max_tokens": 5, "messages": [{"role": "user", "content": "hi"}]}).encode()
@@ -3060,15 +3059,18 @@ class UsageAndStatus(unittest.TestCase):
             httpd.server_close()
 
 
-class TimingsDrafts(unittest.TestCase):
-    """`timings` carries the speculative draft counts (PR #83's fields) only when the engine reported them."""
+class Timings(unittest.TestCase):
+    """request_timings: a request's `timings` in llama.cpp's names from the engine's DONE figures (the GLM engine
+    drafts nothing, so there are no draft counts); None without an engine clock."""
 
-    def test_draft_fields(self):
-        base = {"prompt_ms": 100.0, "decode_ms": 200.0, "generated": 20, "reused": 4}
-        t = request_timings(24, 20, dict(base, drafts_offered=15, drafts_accepted=11))
-        self.assertEqual((t["draft_n"], t["draft_n_accepted"]), (15, 11))
+    def test_fields(self):
+        base = {"prompt_ms": 100.0, "decode_ms": 200.0, "generated": 20, "reused": 4, "finish": "stop"}
+        t = request_timings(24, 20, base)
         self.assertEqual((t["prompt_n"], t["cache_n"]), (20, 4))
-        self.assertNotIn("draft_n", request_timings(24, 20, base))
+        self.assertEqual((t["prompt_per_second"], t["predicted_per_second"]), (200.0, 100.0))
+        self.assertNotIn("draft_n", t)
+        t = request_timings(24, 20, dict(base, prompt_read=10))      # #1870: the engine read 10, the rest was kept
+        self.assertEqual((t["prompt_n"], t["cache_n"]), (10, 14))
         self.assertIsNone(request_timings(24, 20, {}))
 
 
@@ -3094,9 +3096,9 @@ class SharingTheGpu(unittest.TestCase):
     """Idle unload, POST /unload and /load, the free-VRAM guard and the before_load hook (all off by default)."""
 
     def setUp(self):
-        tok = ByteTokenizer()
-        self.engine = UnloadableEngine(tok, "</think>\n\nok", max_context=CTX)
-        self.svc = Service(self.engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        self.engine = UnloadableEngine(tok, reply_text("", "ok"), max_context=CTX)
+        self.svc = Service(self.engine, tok, glm_template())
         self.httpd = serve(self.svc, port=0)
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
 
@@ -3269,31 +3271,6 @@ class SharingTheGpu(unittest.TestCase):
                              (409, {"status": "busy"}))
             self.assertLess(time.time() - t0, 5)
         self.assertTrue(self.engine.alive())
-
-    def test_vision_encoder_unloads_and_starts_first(self):
-        order = []
-
-        class FakeVision:
-            running = True
-
-            def alive(self):
-                return self.running
-
-            def unload(self):
-                self.running = False
-
-            def restart(self):
-                order.append("vision")
-                self.running = True
-
-        engine_restart = self.engine.restart
-        self.engine.restart = lambda: (order.append("engine"), engine_restart())
-        self.svc.vision = FakeVision()
-        self.assertEqual(self.svc.unload(), "unloaded")
-        self.assertFalse(self.svc.vision.alive())
-        self.assertEqual(self.chat()[0], 200)
-        self.assertEqual(order, ["vision", "engine"])             # the encoder first, as at a start
-        self.assertTrue(self.svc.vision.alive())
 
     def test_off_by_default(self):
         self.assertEqual((self.svc.idle_unload_s, self.svc.min_free_vram_mib, self.svc.before_load), (0, 0, None))
