@@ -139,6 +139,7 @@ def install(argv, ram=OWNER_RAM, smi=OWNER_SMI, listing=LISTING, configs=(), env
                    mock.patch.object(setup, "start", start),
                    mock.patch.object(setup.time, "sleep", lambda s: None),
                    mock.patch.object(sys, "argv", ["setup.py", *argv]),
+                   mock.patch.object(sys, "stdin", io.StringIO("")),        # a question ends at EOF
                    mock.patch.dict(os.environ, env or {})]
         with contextlib.ExitStack() as stack:
             for p in patches:

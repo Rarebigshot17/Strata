@@ -799,6 +799,15 @@ def sm120_nvcc(nvcc, cuda_v, archs):
     return nvcc, cuda_v
 
 
+def os_release() -> dict:
+    """/etc/os-release as a dict (ID, VERSION_ID, ...: quotes removed); {} when it cannot be read."""
+    try:
+        lines = Path("/etc/os-release").read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return {}
+    return {k.strip(): v.strip().strip('"') for k, v in (line.split("=", 1) for line in lines if "=" in line)}
+
+
 def install_build_tools(archs, yes):
     """The C++ compiler and the CUDA toolkit, installed for the user when they are missing (asks once): build-essential
     and CUDA 13.0 through apt on Ubuntu 22.04 / 24.04.  An installed toolkit of 12.0 or newer is used as it is (13.0
@@ -826,8 +835,8 @@ def install_build_tools(archs, yes):
     if not have_cc:
         run(["sudo", "apt-get", "install", "-y", "build-essential"])
     if nvcc is None or cuda_v < need:
-        osr = dict(line.split("=", 1) for line in open("/etc/os-release").read().splitlines() if "=" in line)
-        ver = osr.get("VERSION_ID", "").strip('"').replace(".", "")
+        osr = os_release()
+        ver = osr.get("VERSION_ID", "").replace(".", "")
         if osr.get("ID") != "ubuntu" or ver not in ("2204", "2404"):
             fail("the CUDA Toolkit can be installed automatically on Ubuntu 22.04 / 24.04 only",
                  "install it from https://developer.nvidia.com/cuda-downloads and run it again")
