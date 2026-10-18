@@ -1,43 +1,39 @@
 # syntax=docker/dockerfile:1
 #
-# Strata: Qwen3.8-Flash-Next on NVIDIA GPUs (RTX 30/40/50, 12+ GB VRAM; two or
-# three cards can share one model, 8 GB each - docs/MULTI_GPU.md).
+# Strata: GLM-5.3-Flash on NVIDIA GPUs (compute capability 7.5 or newer: RTX 20 /
+# 30 / 40 / 50) and system RAM. Every expert stays in RAM (~117 GB for the 3-bit
+# UD-IQ3_XXS, ~162 GB for the 4-bit IQ4_XS); the GPUs hold the rest of the model
+# and cache the most used experts. Several cards share one model.
 #
-# The engine is compiled during docker build, so the first container start only
-# downloads the model (~70 GB) and starts the server. docker build has no GPU,
-# so the CUDA architectures are fixed here instead of read from nvidia-smi: the
-# engine is a fat binary with a cubin per listed arch, and the runtime picks the
-# one matching your card. Narrow CUDA_ARCHITECTURES to your card for a faster
-# build; a card outside the set needs a rebuild with its own arch.
+# The engine (strata-glm, and the CPU reference strata-glm-ref) is compiled during
+# docker build, so the first container start only downloads the model (~120 GB or
+# ~170 GB) and starts the server. docker build has no GPU, so the CUDA
+# architectures are fixed here instead of read from nvidia-smi: the engine is a fat
+# binary with a cubin per listed arch, and the runtime picks the one matching your
+# card. Narrow CUDA_ARCHITECTURES to your cards for a faster build (86 for RTX 30);
+# a card outside the set is compiled for at its first start.
 #
 # Build:
 #   docker build -t strata .
-#   docker build -t strata --build-arg CUDA_ARCHITECTURES=89 .        # RTX 40 only
+#   docker build -t strata --build-arg CUDA_ARCHITECTURES=86 .        # RTX 30 only
 #
 # Run (host needs an NVIDIA driver >= 580 and nvidia-container-toolkit):
 #   docker run --rm --gpus all \
-#     -p 8080:8080 \
+#     -p 8101:8101 \
 #     --ulimit memlock=-1 \
 #     -v strata-data:/data \
-#     -e MODEL=IQ2_XS \
+#     -e MODEL=UD-IQ3_XXS \
 #     strata
 #
-# Setup choices are env vars, read by docker-entrypoint.sh: FAMILY, MODEL, CONTEXT,
-# VISION (no | yes | cpu), KV (int8 | q4_0 | k8v4), GPU (one card) or GPUS ("0,2"
-# or "all", with LAYER_SPLIT), LOW_RAM (auto | on | off), HOST, PORT, API_KEY,
-# GGUF_DIR (GGUF files you already have), RESIDENT_BUDGET_GIB, KV_STREAMING.
+# Setup choices are env vars, read by docker-entrypoint.sh: MODEL (UD-IQ3_XXS or
+# IQ4_XS), CONTEXT (tokens; empty: setup's pick for the GPUs' VRAM), PARK_MIB,
+# GPU (one card) or GPUS ("0,2" or "all"), HOST, PORT (8101), API_KEY, GGUF_DIR
+# (GGUF files you already have), CONFIG (a config file to start with).
 #
-# Only the model files, the prepared pack, the MTP layer and the install config
-# live in the /data volume; the engine is part of the image. Strata loads 32-62 GB
-# into RAM, so a capped container needs -e LOW_RAM=on: setup.py reads the RAM from
-# /proc/meminfo, which here is the host's total, not the container's limit. Add an
-# API key before exposing the port to a network: -e API_KEY=<secret>. Pass
-# -e REINSTALL=1 to change the model settings later.
-#
-# --gpus all on a host with two usable cards: setup takes both (the layer split is
-# its recommended default). Pin one card with -e GPU=0, or name them with
-# -e GPUS=0,2. A volume set up for one card switches to the pair on its first start
-# on a two-card host unless GPU or GPUS pins it. LOW_RAM=on runs on one card.
+# Only the model files and the install config live in the /data volume (it needs
+# room for 120-170 GB); the engine is part of the image. Add an API key before
+# exposing the port to a network: -e API_KEY=<secret>. Pass -e REINSTALL=1 to
+# change the model settings later.
 
 FROM nvidia/cuda:13.0.0-devel-ubuntu24.04
 
@@ -55,63 +51,47 @@ WORKDIR /opt/strata
 COPY . .
 
 # RTX 20 (75), RTX 30 (86), RTX 40 (89), RTX 50 (120), plus 80 for A-series. CMakeLists
-# refuses anything below 75. BUILD_VISION=0 skips the image encoder build.
+# refuses anything below 75.
 ARG CUDA_ARCHITECTURES=75;80;86;89;120
-ARG BUILD_VISION=1
 
 RUN python3 -m venv .venv \
     && .venv/bin/pip install --no-cache-dir --upgrade pip \
     && .venv/bin/pip install --no-cache-dir -r requirements.txt \
     && chmod +x setup.sh docker-entrypoint.sh
 
-# llama.cpp at the pinned commit, then the engine and the image encoder, built
-# exactly the way setup.py builds them: native code for the CPU that builds the
-# image, so build it on the PC it runs on. BUILD.json is what setup.py reads to
-# decide whether an engine is current: source=local with a matching src hash
-# means the first start reuses it instead of recompiling.
+# llama.cpp at the pinned commit, then the engine, built the way setup.py builds it
+# into build/, except that the CPU code is for any AVX2 CPU (STRATA_PORTABLE) rather
+# than for the one that builds the image. build/BUILD.json is what setup.py reads to
+# decide whether the engine is current: a matching src hash and every GPU's arch in
+# its list mean the first start uses it instead of compiling it again.
 RUN .venv/bin/python - <<'PYEOF'
-import json, os, pathlib, shutil
+import os
 import setup
 
 llama = setup.get_llama_cpp()
 nvcc, _ = setup.find_nvcc()
-arch = os.environ.get("CUDA_ARCHITECTURES", "75;80;86;89;120").strip().strip('"').replace(",", ";")
-vision = "gpu" if os.environ.get("BUILD_VISION", "1") == "1" else "none"
+text = os.environ.get("CUDA_ARCHITECTURES", "75;80;86;89;120").strip().strip('"').replace(",", ";")
+archs = [int(a.split("-")[0]) for a in text.split(";") if a.split("-")[0].isdigit()]
 
-setup.cmake_build(setup.ROOT, setup.ROOT / "build", "strata",
-    ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF",
-     f"-DCMAKE_CUDA_ARCHITECTURES={arch}", f"-DCMAKE_CUDA_COMPILER={nvcc}",
-     f"-DSTRATA_GGML_DIR={llama}"], None, "build-strata.bat")
-if vision != "none":
-    setup.cmake_build(setup.ROOT / "tools" / "vision", setup.ROOT / "build-vision", "strata-vision",
-        [f"-DLLAMA_DIR={llama}", "-DSTRATA_VISION_CUDA=ON", "-DSTRATA_PORTABLE=OFF",
-         f"-DCMAKE_CUDA_ARCHITECTURES={arch}", f"-DCMAKE_CUDA_COMPILER={nvcc}"], None, "build-vision.bat")
-
-eng = setup.ROOT / "engine"
-eng.mkdir(exist_ok=True)
-shutil.copy2(setup.ROOT / "build" / setup.EXE, eng / setup.EXE)
-if vision != "none":
-    shutil.copy2(setup.ROOT / "build-vision" / "bin" / setup.VEXE, eng / setup.VEXE)
-bindir = pathlib.Path(nvcc).parent
-meta = {"source": "local", "version": setup.source_version(),
-        "archs": [int(a.split("-")[0]) for a in arch.split(";") if a.split("-")[0].isdigit()], "vision": vision,
-        "cuda_dirs": [str(d) for d in (bindir, bindir / "x64", bindir.parent / "lib64") if d.is_dir()],
-        "src": setup.source_hash(setup.ENGINE_SOURCES),
-        "vision_src": setup.source_hash(setup.VISION_SOURCES) if vision != "none" else None}
-(eng / "BUILD.json").write_text(json.dumps(meta, indent=1))
+setup.cmake_build(setup.ROOT, setup.BUILD_DIR, setup.TARGETS,
+                  setup.build_defs(archs, nvcc, llama) + ["-DSTRATA_PORTABLE=ON"])
+setup.write_build_stamp(archs, nvcc)
 PYEOF
 
-# the cmake trees are build-time only; the engine itself is what the container needs
-RUN rm -rf build build-vision
+# the cmake tree is build-time only: the two executables and BUILD.json are what the container needs
+RUN find build -mindepth 1 -maxdepth 1 ! -name strata-glm ! -name strata-glm-ref ! -name BUILD.json \
+        -exec rm -rf {} + \
+    && test -x build/strata-glm
 
 VOLUME ["/data"]
-EXPOSE 8080
+EXPOSE 8101
 
 # /health is answered before the API key gate, so it works with or without one.
-# The port only opens after the model loads (1-3 minutes, longer on a first run),
-# so the start period is generous: a too short one marks a still-loading container
-# unhealthy and a restart policy would kill it mid-download.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=600s --retries=3 \
-  CMD curl -fs "http://127.0.0.1:${PORT:-8080}/health" || exit 1
+# The port only opens after the model loads (minutes: 120-170 GB are read into RAM,
+# longer on a first run, which downloads them), so the start period is generous: a
+# too short one marks a still-loading container unhealthy and a restart policy would
+# kill it mid-download.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=1800s --retries=3 \
+  CMD curl -fs "http://127.0.0.1:${PORT:-8101}/health" || exit 1
 
 ENTRYPOINT ["./docker-entrypoint.sh"]

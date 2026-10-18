@@ -29,77 +29,106 @@ class Entrypoint(unittest.TestCase):
         (self.data / "config").mkdir(parents=True)
         # the stub "python": setup.py --setup writes the config the way setup does; a plain start prints what it would load
         stub = self.opt / ".venv" / "bin" / "python"
-        stub.write_text('#!/bin/sh\nif [ "$2" = "--setup" ]; then echo \'{"args": ["from-setup"]}\' > strata-iq3_s.json\n'
-                        'else echo "STARTED WITH: $(cat strata-iq3_s.json)"; fi\n', encoding="utf-8")
+        stub.write_text('#!/bin/sh\nif [ "$2" = "--setup" ]; then echo \'{"args": ["from-setup"]}\' > strata-glm-ud-iq3_xxs.json\n'
+                        '  echo "SETUP: $*"\n'
+                        'else echo "STARTED WITH: $(cat strata-glm-ud-iq3_xxs.json) ARGS: $*"; fi\n', encoding="utf-8")
         stub.chmod(0o755)
         script = (ROOT / "docker-entrypoint.sh").read_text(encoding="utf-8").replace("/opt/strata", str(self.opt))
         self.script = self.tmp / "entry.sh"
         self.script.write_text(script, encoding="utf-8")
 
     def run_entry(self, reinstall, **extra):
-        env = dict(os.environ, STRATA_DATA=str(self.data), MODEL="IQ3_S", REINSTALL=reinstall, **extra)
+        env = dict(os.environ, STRATA_DATA=str(self.data), MODEL="UD-IQ3_XXS", REINSTALL=reinstall)
+        env.update(extra)
         r = subprocess.run([SH, str(self.script)], env=env, capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
         return r.stdout
 
     def test_edited_volume_config_wins_over_a_regular_file_in_opt(self):
-        (self.data / "config" / "strata-iq3_s.json").write_text('{"args": ["edited", "--kv-resident", "32768"]}\n')
-        (self.opt / "strata-iq3_s.json").write_text('{"args": ["stale"]}\n')      # left by an earlier setup
+        (self.data / "config" / "strata-glm-ud-iq3_xxs.json").write_text('{"args": ["edited", "--kv-resident", "32768"]}\n')
+        (self.opt / "strata-glm-ud-iq3_xxs.json").write_text('{"args": ["stale"]}\n')      # left by an earlier setup
         out = self.run_entry("0")
         self.assertIn("edited", out)
         self.assertNotIn("stale", out)
-        self.assertTrue((self.opt / "strata-iq3_s.json").is_symlink())
+        self.assertTrue((self.opt / "strata-glm-ud-iq3_xxs.json").is_symlink())
 
     def test_link_is_made_when_there_is_no_file(self):
-        (self.data / "config" / "strata-iq3_s.json").write_text('{"args": ["on-volume"]}\n')
+        (self.data / "config" / "strata-glm-ud-iq3_xxs.json").write_text('{"args": ["on-volume"]}\n')
         self.assertIn("on-volume", self.run_entry("0"))
 
     def test_first_setup_copies_the_config_to_the_volume_and_the_next_start_links_it(self):
         out = self.run_entry("0")                                    # no config on the volume: setup runs
         self.assertIn("from-setup", out)
-        cfg = self.data / "config" / "strata-iq3_s.json"
+        cfg = self.data / "config" / "strata-glm-ud-iq3_xxs.json"
         self.assertIn("from-setup", cfg.read_text())
         cfg.write_text('{"args": ["edited-later"]}\n')
         self.assertIn("edited-later", self.run_entry("0"))           # the regular file setup left is replaced by the link
 
     def test_existing_link_into_the_data_config_dir_is_kept(self):      # a pod command that picked a config by linking
-        (self.data / "config" / "strata-iq3_s.json").write_text('{"args": ["plain"]}\n')
-        other = self.data / "config" / "strata-iq3_s.1x4.json"
-        other.write_text('{"args": ["batch8"]}\n')
-        os.symlink(other, self.opt / "strata-iq3_s.json")
+        (self.data / "config" / "strata-glm-ud-iq3_xxs.json").write_text('{"args": ["plain"]}\n')
+        other = self.data / "config" / "strata-glm-ud-iq3_xxs.2.json"
+        other.write_text('{"args": ["long-context"]}\n')
+        os.symlink(other, self.opt / "strata-glm-ud-iq3_xxs.json")
         out = self.run_entry("0")
-        self.assertIn("batch8", out)
+        self.assertIn("long-context", out)
         self.assertNotIn("plain", out)
         self.assertIn(f"Config: {other}", out)
 
     def test_link_to_somewhere_else_is_replaced(self):
-        (self.data / "config" / "strata-iq3_s.json").write_text('{"args": ["on-volume"]}\n')
+        (self.data / "config" / "strata-glm-ud-iq3_xxs.json").write_text('{"args": ["on-volume"]}\n')
         elsewhere = self.tmp / "elsewhere.json"
         elsewhere.write_text('{"args": ["elsewhere"]}\n')
-        os.symlink(elsewhere, self.opt / "strata-iq3_s.json")
+        os.symlink(elsewhere, self.opt / "strata-glm-ud-iq3_xxs.json")
         self.assertIn("on-volume", self.run_entry("0"))
 
     def test_config_env_wins(self):
-        (self.data / "config" / "strata-iq3_s.json").write_text('{"args": ["plain"]}\n')
+        (self.data / "config" / "strata-glm-ud-iq3_xxs.json").write_text('{"args": ["plain"]}\n')
         other = self.tmp / "mine.json"
         other.write_text('{"args": ["mine"]}\n')
-        os.symlink(self.data / "config" / "strata-iq3_s.json", self.opt / "strata-iq3_s.json")
+        os.symlink(self.data / "config" / "strata-glm-ud-iq3_xxs.json", self.opt / "strata-glm-ud-iq3_xxs.json")
         out = self.run_entry("0", CONFIG=str(other))
         self.assertIn("mine", out)
         self.assertNotIn("plain", out)
         self.assertIn(f"Config: {other}", out)
 
     def test_model_names_the_config_and_it_is_printed(self):
-        (self.data / "config" / "strata-iq3_s.json").write_text('{"args": ["by-model"]}\n')
+        (self.data / "config" / "strata-glm-ud-iq3_xxs.json").write_text('{"args": ["by-model"]}\n')
         out = self.run_entry("0")
         self.assertIn("by-model", out)
-        self.assertIn(f"Config: {self.data}/config/strata-iq3_s.json", out)
+        self.assertIn(f"Config: {self.data}/config/strata-glm-ud-iq3_xxs.json", out)
+
+    def test_setup_and_start_command_lines(self):
+        out = self.run_entry("0", CONTEXT="131072", GPUS="0,1,2")
+        setup = next(line for line in out.splitlines() if line.startswith("SETUP:"))
+        self.assertIn("--setup --yes --model UD-IQ3_XXS", setup)
+        self.assertIn(f"--data-dir {self.data}", setup)
+        self.assertIn("--host 0.0.0.0", setup)
+        self.assertIn("--port 8101", setup)
+        self.assertIn("--no-browser --no-start", setup)
+        self.assertIn("--context 131072", setup)
+        self.assertIn("--gpus 0,1,2", setup)
+        self.assertNotIn("--park-mib", setup)                          # unset: setup's own pick
+        self.assertNotIn("--gguf-dir", setup)
+        start = next(line for line in out.splitlines() if line.startswith("STARTED WITH:"))
+        self.assertIn("ARGS: --port 8101 --gpus 0,1,2", start)
+        self.assertTrue((self.opt / "strata-glm-ud-iq3_xxs.json").is_symlink())   # linked right after the setup
+
+    def test_port_and_model_from_the_environment(self):
+        (self.data / "config" / "strata-glm-iq4_xs.json").write_text('{"args": ["four-bit"]}\n')
+        out = self.run_entry("0", MODEL="IQ4_XS", PORT="9000")
+        self.assertIn(f"Config: {self.data}/config/strata-glm-iq4_xs.json", out)
+
+    def test_an_unknown_model_stops(self):
+        env = dict(os.environ, STRATA_DATA=str(self.data), MODEL="IQ2_XS", REINSTALL="0")
+        r = subprocess.run([SH, str(self.script)], env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("UD-IQ3_XXS", r.stderr)
 
     def warning_for(self, flags):
         info = self.tmp / "cpuinfo"
         info.write_text(f"processor\t: 0\nflags\t\t: {flags}\n")
-        (self.data / "config" / "strata-iq3_s.json").write_text('{"args": ["x"]}\n')
-        env = dict(os.environ, STRATA_DATA=str(self.data), MODEL="IQ3_S", REINSTALL="0", STRATA_CPUINFO=str(info))
+        (self.data / "config" / "strata-glm-ud-iq3_xxs.json").write_text('{"args": ["x"]}\n')
+        env = dict(os.environ, STRATA_DATA=str(self.data), MODEL="UD-IQ3_XXS", REINSTALL="0", STRATA_CPUINFO=str(info))
         r = subprocess.run([SH, str(self.script)], env=env, capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)     # a warning, never a stop (#1584)
         return r.stderr

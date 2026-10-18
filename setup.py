@@ -1166,7 +1166,9 @@ def data_folder(requested: str | None) -> tuple:
 # ------------------------------------------------------------------------------------------------ the run config
 def write_config(path: Path, cfg: dict):
     """A run config, written whole or not at all (#459): to a temporary file first, then moved over the old one, so
-    a setup stopped half-way (a closed window, a full disk) never leaves an empty strata-*.json behind."""
+    a setup stopped half-way (a closed window, a full disk) never leaves an empty strata-*.json behind.  A config that
+    is a link (the Docker image links it to the /data volume, #1244) is written where it points."""
+    path = Path(os.path.realpath(path))
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
     os.replace(tmp, path)
