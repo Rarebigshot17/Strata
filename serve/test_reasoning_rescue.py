@@ -1,13 +1,14 @@
 """serve/test_reasoning_rescue.py - #804 / #1058: when a `<tool_call>` written inside the reasoning is a real call.
 
 A call inside the reasoning counts only when ALL hold: tools are declared and the name is one of them; the opener is
-at the start of a line; it is outside a Markdown code fence and outside inline code; the call closes with
-</tool_call> and nothing but whitespace (or more calls) follows it before the end of the turn or `</think>`; and the
-turn did not end by max tokens (or a cancel or an error).  Anything else stays reasoning text.
+outside a Markdown code fence and outside inline code; the call closes with </tool_call> and nothing but whitespace
+(or more calls) follows it before the end of the turn or `</think>`; and the turn did not end by max tokens (or a
+cancel or an error).  Anything else stays reasoning text.  Where the opener sits in its line does not matter: GLM
+writes its call right after the text, with no line break.
 
-The corpus in serve/fixtures/rcall_specimens.json holds 25 entries from PR #525's corpus and the 12 live strandings
-recovered by 47Hunter47 (gist 4abcd3a8...): 16 act, 21 must not (the reporter's 20 negative controls
-plus the live one cut by max tokens).
+The corpus in serve/fixtures/rcall_specimens.json holds the situations of PR #525's corpus (25 entries) and of the 12
+live strandings recovered by 47Hunter47 (gist 4abcd3a8...), rewritten in GLM's call format, plus one of GLM's own (a
+value that quotes the closing tags, #210): 19 act, 19 must not.
 
     python -m unittest serve.test_reasoning_rescue -v
 """
@@ -21,14 +22,15 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from serve.frontend import ChatTemplate, OutputParser  # noqa: E402
-from serve.server import ByteTokenizer, MockEngine, Service, serve  # noqa: E402
-from serve.test_server import CTX  # noqa: E402
+from serve.frontend import OutputParser  # noqa: E402
+from serve.glm_fixtures import GlmTokenizer, call_text, glm_template  # noqa: E402
+from serve.server import MockEngine, Service, serve  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 SPECIMENS = json.loads((ROOT / "serve/fixtures/rcall_specimens.json").read_text(encoding="utf-8"))["specimens"]
-CALL = "<tool_call>\n<function=write>\n<parameter=path>\nfile.txt\n</parameter>\n</function>\n</tool_call>"
-RM = CALL.replace("file.txt", "rm -rf build")
+CTX = 8192
+CALL = call_text("write", path="file.txt")
+RM = call_text("write", path="rm -rf build")
 PROPS = {"path": {"type": "string"}}
 SCHEMA = [{"name": "write", "parameters": {"properties": PROPS}}]
 
@@ -68,8 +70,20 @@ class Corpus(unittest.TestCase):
                         seen.add((reasoning(evs), tuple(e.call.name for e in evs if e.kind == "tool_call")))
             self.assertEqual(len(seen), 1, sp["name"])        # streamed and whole agree
 
-    def test_the_corpus_has_the_reported_split(self):
-        self.assertEqual((len(SPECIMENS), sum(bool(s["calls"]) for s in SPECIMENS)), (37, 16))
+    def test_nothing_is_lost(self):
+        """The text that is not a delivered call comes out as reasoning and answer, byte for byte."""
+        for sp in SPECIMENS:
+            if sp["calls"]:
+                continue
+            tools = [{"name": n, "parameters": {"properties": {}}} for n in sp["tools"]]
+            with self.subTest(name=sp["name"]):
+                evs = parse(sp["input"], 3, tools, sp["finish"])
+                content = "".join(e.text for e in evs if e.kind == "content")
+                self.assertEqual(reasoning(evs) + "</think>" * ("</think>" in sp["input"]) + content, sp["input"])
+
+    def test_the_corpus_has_the_documented_split(self):
+        self.assertEqual((len(SPECIMENS), sum(bool(s["calls"]) for s in SPECIMENS)), (38, 19))
+        self.assertFalse([s["name"] for s in SPECIMENS if "<function=" in s["input"] or "<parameter=" in s["input"]])
 
 
 class Gates(unittest.TestCase):
@@ -86,7 +100,14 @@ class Gates(unittest.TestCase):
         self.check(CALL, 1)
         self.check("Hmm.\n  " + CALL + "\n", 1)                    # indented opener and trailing blank lines
         self.check("Two steps.\n" + CALL + "\n\n" + CALL, 2)
-        self.check("Two steps.\n" + CALL + "\n</think>\n\ndone", 1)
+        self.check("Two steps.\n" + CALL + "\n</think>done", 1)
+        self.check("Two steps." + CALL + CALL + "</think>done", 2)
+
+    def test_an_opener_right_after_the_text_counts(self):
+        # GLM writes its call right after the text, with no line break: the opener's place in its line says nothing
+        self.check("I will write it now." + CALL, 1)
+        self.check("Plan: " + RM, 1)
+        self.check("> " + RM, 1)
 
     def test_recovered_call_keeps_the_text_before_it(self):
         evs = parse("Let me think.\n\n" + CALL, 3)
@@ -100,8 +121,8 @@ class Gates(unittest.TestCase):
         self.check("The format is " + RM + " ok.", 0)
         self.check("I must emit `<tool_call>` then more", 0)
         self.check("Use `\n" + RM, 0)                                       # inside inline code spanning a line
-        self.check("> " + RM, 0)
-        self.check("Plan: " + RM, 0)
+        self.check("> " + RM + "\nis what the doc says.", 0)
+        self.check("Plan: " + RM + " then check.", 0)
 
     def test_a_length_cut_keeps_even_a_clean_stranded_call_as_text(self):
         for finish in ("length", "cancel", "error", "disconnect"):
@@ -112,6 +133,7 @@ class Gates(unittest.TestCase):
         self.check("```\nx\n```\n" + CALL, 1)
         self.check("~~~\nx\n~~~\n" + CALL, 1)
         self.check("a `b` c\n" + CALL, 1)
+        self.check("a `b` c " + CALL, 1)
 
     def test_a_fence_needs_the_same_marker_to_close(self):
         self.check("~~~\n```\n" + CALL, 0)
@@ -126,18 +148,19 @@ class Gates(unittest.TestCase):
                 self.assertEqual(reasoning(evs), text)
 
     def test_opener_split_across_chunks(self):
-        text = "Go.\n" + CALL
-        for cut in range(1, len(text)):
-            with self.subTest(cut=cut):
-                p = OutputParser(thinking=True, tools=SCHEMA, stream_tools=True)
-                evs = p.feed(text[:cut]) + p.feed(text[cut:]) + p.finish("stop")
-                self.assertEqual(calls(evs), ["write"])
-        quoted = "Go " + CALL
+        for text in ("Go.\n" + CALL, "Go " + CALL):
+            for cut in range(1, len(text)):
+                with self.subTest(cut=cut, text=text[:4]):
+                    p = OutputParser(thinking=True, tools=SCHEMA, stream_tools=True)
+                    evs = p.feed(text[:cut]) + p.feed(text[cut:]) + p.finish("stop")
+                    self.assertEqual(calls(evs), ["write"])
+        quoted = "Use `" + CALL + "` here"
         for cut in range(1, len(quoted)):
             with self.subTest(cut=cut, quoted=True):
                 p = OutputParser(thinking=True, tools=SCHEMA, stream_tools=True)
                 evs = p.feed(quoted[:cut]) + p.feed(quoted[cut:]) + p.finish("stop")
                 self.assertEqual(calls(evs), [])
+                self.assertEqual(reasoning(evs), quoted)
 
     def test_the_end_of_the_turn_splits_a_held_tail(self):
         p = OutputParser(thinking=True, tools=SCHEMA)
@@ -153,7 +176,7 @@ class Gates(unittest.TestCase):
         self.assertEqual(calls(p.finish("stop")), ["write"])
 
     def test_no_tools_declared_is_unchanged(self):
-        text = "before\n" + CALL + "\n</think>\n\nanswer"
+        text = "before\n" + CALL + "\n</think>answer"
         for tools in (None, []):
             evs = parse(text, 5, tools)
             self.assertEqual(calls(evs), [])
@@ -175,7 +198,7 @@ class Gates(unittest.TestCase):
 
 class VisibleAnswer(unittest.TestCase):
     """#1058: the same fence / inline-code rule for a call in the visible answer (after </think>)."""
-    HEAD = "ok</think>\n\n"
+    HEAD = "ok</think>"
 
     def run_all(self, text, finish=None):
         res = set()
@@ -195,8 +218,8 @@ class VisibleAnswer(unittest.TestCase):
                 self.assertEqual(text, body)             # nothing lost
 
     def test_real_calls_still_fire(self):
-        for body in (CALL, "Let me do it.\n\n" + CALL, "Let me do it. " + CALL, "```\ncode\n```\n" + CALL,
-                     "`a` and `b` " + CALL, "~~~\nx\n~~~\n\n" + CALL):
+        for body in (CALL, "Let me do it.\n\n" + CALL, "Let me do it. " + CALL, "Let me do it." + CALL,
+                     "```\ncode\n```\n" + CALL, "`a` and `b` " + CALL, "~~~\nx\n~~~\n\n" + CALL):
             with self.subTest(body=body[:30]):
                 self.assertEqual(self.run_all(self.HEAD + body)[0], ("write",))
         self.assertEqual(self.run_all(self.HEAD + CALL + "\n" + CALL)[0], ("write", "write"))
@@ -214,8 +237,8 @@ class OverHttp(unittest.TestCase):
     """The same rules through the real server: OpenAI chat (whole and streamed), Anthropic and Responses."""
 
     def ask(self, script, max_tokens=800):
-        tok = ByteTokenizer()
-        svc = Service(MockEngine(tok, script, max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        svc = Service(MockEngine(tok, script, max_context=CTX), tok, glm_template())
         httpd = serve(svc, port=0)
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
         msgs = [{"role": "user", "content": "save my notes"}]
@@ -259,17 +282,24 @@ class OverHttp(unittest.TestCase):
             return sum(e["type"] == "content_block_start" and e["content_block"]["type"] == "tool_use" for e in evs)
         return sum(e["type"] == "response.output_item.added" and e["item"]["type"] == "function_call" for e in evs)
 
+    @staticmethod
+    def tokens(text):
+        """`text`'s length in tokens (each GLM tag is one)."""
+        return len(GlmTokenizer().encode(text))
+
     def test_a_stranded_call_is_a_call_in_every_api(self):
-        a = self.ask("Writing the file now.\n\n" + CALL)
-        self.assertEqual(set(a.values()), {1}, a)
+        for script in ("Writing the file now.\n\n" + CALL, "Writing the file now." + CALL):
+            with self.subTest(script=script[:24]):
+                a = self.ask(script)
+                self.assertEqual(set(a.values()), {1}, a)
 
     def test_quotes_and_cuts_are_not(self):
         for name, script, tokens in (
                 ("fence", "Format:\n```xml\n" + RM + "\n```\nand that is all.", 800),
                 ("midsentence", "I could run " + RM + " but no.", 800),
                 ("prose after", "I could run\n" + RM + "\nbut first let me check what build holds.", 800),
-                ("cut", "I could run\n" + RM + "\nthen more thinking " * 40, len("I could run\n" + RM)),
-                ("cut exactly at the call", "Now.\n" + CALL + "\nmore thought " * 40, len("Now.\n" + CALL))):
+                ("cut", "I could run\n" + RM + "\nthen more thinking " * 40, self.tokens("I could run\n" + RM)),
+                ("cut exactly at the call", "Now.\n" + CALL + "\nmore thought " * 40, self.tokens("Now.\n" + CALL))):
             with self.subTest(name):
                 a = self.ask(script, max_tokens=tokens)
                 self.assertEqual(set(a.values()), {0}, a)
@@ -279,7 +309,7 @@ class OverHttp(unittest.TestCase):
                                  ("inline", "Use `" + RM + "` here.", 0),
                                  ("real", "Doing it.\n\n" + CALL, 1)):
             with self.subTest(name):
-                a = self.ask( "ok</think>\n\n" + body)
+                a = self.ask("ok</think>" + body)
                 self.assertEqual(set(a.values()), {want}, a)
 
 
