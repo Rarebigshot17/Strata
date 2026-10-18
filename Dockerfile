@@ -63,11 +63,13 @@ RUN python3 -m venv .venv \
 # into build/, except that the CPU code is for any AVX2 CPU (STRATA_PORTABLE) rather
 # than for the one that builds the image. build/BUILD.json is what setup.py reads to
 # decide whether the engine is current: a matching src hash and every GPU's arch in
-# its list mean the first start uses it instead of compiling it again.
-RUN .venv/bin/python - <<'PYEOF'
+# its list mean the first start uses it instead of compiling it again. The packages
+# are recorded the way setup.py records them, so its first run installs none.
+RUN PIP_NO_CACHE_DIR=1 .venv/bin/python - <<'PYEOF'
 import os
 import setup
 
+setup.python_packages()
 llama = setup.get_llama_cpp()
 nvcc, _ = setup.find_nvcc()
 text = os.environ.get("CUDA_ARCHITECTURES", "75;80;86;89;120").strip().strip('"').replace(",", ";")
