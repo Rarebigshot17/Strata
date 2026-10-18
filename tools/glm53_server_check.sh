@@ -48,7 +48,7 @@ fail=0
 check() {   # name, command, python condition on the JSON (or the text when 'raw')
     local name="$1" out
     out=$(eval "$2")
-    if python3 -c "import json,sys; d=sys.stdin.read(); d=d if '$4'=='raw' else json.loads(d); sys.exit(0 if ($3) else 1)" <<< "$out"; then
+    if python3 -c "import json,sys; d=sys.stdin.read(); d=d if '$4'=='raw' else json.loads(d); sys.exit(0 if ($3) else 1)" <<< "$out" 2> /dev/null; then
         echo "PASS $name"
     else
         echo "FAIL $name: ${out:0:300}"; fail=1
