@@ -4374,8 +4374,9 @@ def main() -> int:
         except ValueError as e:
             raise SystemExit(f"[strata] config {e}")
         if svc.config_effort:
-            print(f"[strata] thinking level: {svc.config_effort} (reasoning_effort in the config; a request, or the "
-                  "Chat settings shared with other apps, can set its own)", flush=True)
+            print(f"[strata] thinking {'off' if svc.config_effort == 'none' else 'on'} for requests that do not say "
+                  f"(reasoning_effort {svc.config_effort!r} in the config; GLM thinks or does not, it has no levels; a "
+                  "request, or the Chat settings shared with other apps, can set its own)", flush=True)
     svc.codex_thread_titles = cfg.get("codex_thread_titles") is True    # #923: opt-in, off by default
     svc.codex_compaction_cache = cfg.get("codex_compaction_cache") is True   # #924: opt-in, off by default
     try:
