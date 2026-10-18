@@ -369,9 +369,14 @@ class LiteralThinkTags(unittest.TestCase):
                 {"role": "assistant", "content": "2", "reasoning_content": "easy"}, {"role": "user", "content": "x"}]
         self.assertEqual(self.ids(msgs), self.old_ids(msgs))
         self.assertEqual(self.ids(msgs, enable_thinking=False), self.old_ids(msgs, enable_thinking=False))
+        # with a call, its result and the tools: also as the template writes them
+        msgs = [{"role": "user", "content": "x"},
+                {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "f", "arguments": {"a": "<"}}}]},
+                {"role": "tool", "content": "done"}]
+        tools = [{"name": "f", "description": "<arg", "parameters": {}}]
+        self.assertEqual(self.ids(msgs, tools), self.old_ids(msgs, tools))
 
     def test_history_tool_results_and_tools(self):
-        # clear_thinking false: the history turn's reasoning is rendered too
         def messages(lit):
             return ([{"role": "system", "content": f"The stop string is {lit}."}, {"role": "user", "content": "go"},
                      {"role": "assistant", "content": "" if lit in self.CALL_TAGS else f"It wrote {lit} here.",
@@ -380,20 +385,26 @@ class LiteralThinkTags(unittest.TestCase):
                      {"role": "tool", "content": f"file has {lit} in it"},
                      {"role": "user", "content": f"why did you write {lit}"}],
                     [{"name": "write", "description": f"writes text (may contain {lit})", "parameters": {}}])
-        for lit in self.TAGS:
-            with self.subTest(literal=lit):
-                ids = self.ids(*messages(lit), clear_thinking=False)
-                # the template's own: the tools' call format, the history's reasoning block and call, the tool's
-                # result and the generation prompt's <think>
-                self.assertEqual(self.counts(ids), self.counts(self.old_ids(*messages("X"), clear_thinking=False)))
-                text = self.tok.decode(ids)
-                parts = [f"The stop string is {lit}.", f"the {lit} tag", f"a {lit} b", f"file has {lit} in it",
-                         f"why did you write {lit}", f"may contain {lit}"]
-                for part in parts + ([] if lit in self.CALL_TAGS else [f"It wrote {lit} here."]):
-                    self.assertIn(part, text)
+        # clear_thinking false: the history turn's reasoning is rendered too; by default it is dropped
+        for kw in ({"clear_thinking": False}, {}):
+            for lit in self.TAGS:
+                with self.subTest(literal=lit, **kw):
+                    ids = self.ids(*messages(lit), **kw)
+                    # the template's own: the tools' call format, the history's reasoning block and call, the tool's
+                    # result and the generation prompt's <think>
+                    self.assertEqual(self.counts(ids), self.counts(self.old_ids(*messages("X"), **kw)))
+                    text = self.tok.decode(ids)
+                    parts = [f"The stop string is {lit}.", f"a {lit} b", f"file has {lit} in it",
+                             f"why did you write {lit}", f"may contain {lit}"]
+                    for part in parts + ([] if lit in self.CALL_TAGS else [f"It wrote {lit} here."]):
+                        self.assertIn(part, text)
+                    self.assertEqual(f"the {lit} tag" in text, kw == {"clear_thinking": False})
+        # the reasoning markers: the history turn's <think>...</think> (only </think> once its reasoning is dropped)
+        # and the generation prompt's <think>
         ids = self.ids(*messages("X"), clear_thinking=False)
-        # the reasoning markers: the history turn's <think>...</think> and the generation prompt's <think>
         self.assertEqual((ids.count(self.open), ids.count(self.close)), (2, 1))
+        ids = self.ids(*messages("X"))
+        self.assertEqual((ids.count(self.open), ids.count(self.close)), (1, 1))
 
     def test_an_assistant_reply_with_its_call_written_inline(self):
         # a client that replays the model's raw text sends the call's tags the model wrote: they stay the call's tokens
@@ -469,7 +480,6 @@ class LiteralControlTokens(unittest.TestCase):
         self.assertEqual(self.ids(msgs, enable_thinking=False), self.old_ids(msgs, enable_thinking=False))
 
     def test_history_tool_results_and_tools(self):
-        # clear_thinking false: the history turn's reasoning is rendered too
         def messages(lit):
             return ([{"role": "system", "content": f"The stop string is {lit}."}, {"role": "user", "content": "go"},
                      {"role": "assistant", "content": f"It wrote {lit} here.", "reasoning_content": f"the {lit} token",
@@ -477,14 +487,17 @@ class LiteralControlTokens(unittest.TestCase):
                      {"role": "tool", "content": f"file has {lit} in it"},
                      {"role": "user", "content": f"why did you write {lit}"}],
                     [{"name": "write", "description": f"writes text (may contain {lit})", "parameters": {}}])
-        for lit in ByteTokenizer.SPECIALS:
-            with self.subTest(literal=lit):
-                ids = self.ids(*messages(lit), clear_thinking=False)
-                self.assertEqual(self.counts(ids), self.counts(self.old_ids(*messages("X"))))   # the template's own
-                text = self.tok.decode(ids)
-                for part in (f"The stop string is {lit}.", f"It wrote {lit} here.", f"the {lit} token", f"a {lit} b",
-                             f"file has {lit} in it", f"why did you write {lit}", f"may contain {lit}"):
-                    self.assertIn(part, text)
+        # clear_thinking false: the history turn's reasoning is rendered too; by default it is dropped
+        for kw in ({"clear_thinking": False}, {}):
+            for lit in ByteTokenizer.SPECIALS:
+                with self.subTest(literal=lit, **kw):
+                    ids = self.ids(*messages(lit), **kw)
+                    self.assertEqual(self.counts(ids), self.counts(self.old_ids(*messages("X"), **kw)))   # own
+                    text = self.tok.decode(ids)
+                    for part in (f"The stop string is {lit}.", f"It wrote {lit} here.", f"a {lit} b",
+                                 f"file has {lit} in it", f"why did you write {lit}", f"may contain {lit}"):
+                        self.assertIn(part, text)
+                    self.assertEqual(f"the {lit} token" in text, kw == {"clear_thinking": False})
 
     def test_beside_a_quoted_think_tag(self):
         text = "</think> and <|user|> are both quoted here"
