@@ -1,77 +1,88 @@
 # How does Strata work?
 
-Models like Qwen3.8-Flash-Next normally run on servers with hundreds of gigabytes of graphics memory. Your graphics
-card has 12-24 GB. Strata makes it fit by **sharing the work across your whole PC** - the same idea as a kitchen, where
-the things you use all the time stay on the counter and the rest waits in the pantry. Back to the
-[README](../README.md#how-does-it-work).
+GLM-5.3-Flash has 320 billion parameters. Models this size normally run on servers with hundreds of gigabytes of
+graphics memory. A PC with a few gaming cards has 24-50 GB. Strata makes the model fit by **sharing the work across
+the whole PC**. Think of a kitchen: the things you use all the time stay on the counter, and the rest waits in the
+pantry. Back to the [README](../README.md#how-does-it-work).
 
 ## Who does what
 
-<p align="center"><img src="media/how-it-works.svg" width="860" alt="The model's 24,576 experts: the busiest on the graphics card, all of them in RAM, a lookup table on the SSD"></p>
-
-- **The model is a team of 24,576 small specialists ("experts"),** and each word it writes needs only 10 of them.
-  So it doesn't have to have all of them on the graphics card at once.
-- **Your graphics card** does the part of the work needed for every word, and keeps the few thousand experts that
-  are asked most often. It keeps learning which ones those are while you use it.
-- **Your RAM** holds every expert. When a word needs one the card doesn't have, **your processor** works on it -
-  at the same time as the graphics card, so neither waits for the other.
-- **Your SSD** holds a big lookup table; the model only reads a few small rows of it per word.
+- **The model is a team of small specialists ("experts").** Each of its 42 expert layers has 288 of them, 12,096
+  in all, and each word it writes needs only 8 per layer. So the graphics cards don't need all of them at once.
+- **The graphics cards** do the part of the work that every word needs, and keep the experts that are asked for
+  most often. They keep learning which ones those are while you use the model.
+- **The RAM** holds every expert. When a word needs one the cards don't have, **the processor** works on it while
+  the cards do their part.
 
 The same in technical terms:
 
-- **GPU (VRAM):** attention and DeltaNet mixers, the gated-residual weights, routers, shared experts, output head, the
-  MTP draft layer, the KV cache (from 64K: only its most-read part, the rest streams from RAM), and an **expert
-  cache** that fills the rest of VRAM with the most-used experts (it adapts to the conversation while you chat).
-  More VRAM matters more than a faster GPU: every extra GB holds ~700 more experts, and every expert on the GPU is one
-  the CPU does not have to compute.
-- **RAM:** all 24,576 experts, pinned. The CPU computes the experts that are not on the GPU **in place**, at the same
-  time as the GPU works on the cached ones (AVX-512 / AVX2 kernels, ggml's for the i-quants). On a PC with little RAM
-  and a big card, the [low-RAM mode](MODELS.md#a-big-graphics-card-and-little-ram) keeps in RAM only what the GPU does
-  not hold.
-- **SSD:** the 28.8 GB n-gram table, read a few rows per token through the OS cache.
+- **GPU (VRAM):** everything except the routed experts. That is the 34 KDA (linear attention) layers and the 11
+  MLA (sparse attention) layers with their indexer, the mHC residual mixing, the routers, the shared experts and
+  the output head. VRAM also holds the MLA cache and the KDA state. The layers are split over the cards in order,
+  by free memory or by `--split`. What VRAM is left holds an **expert cache** of the experts each card's layers
+  use most.
+- **The expert cache:** every expert has a use score that halves over about 700 tokens. A missed expert takes a
+  free slot, or replaces a cached one whose score is clearly lower. At most 8 experts are copied in per token
+  (`--max-swaps`), so a change of topic moves the cache over a few dozen tokens instead of stalling one.
+  `--expert-profile FILE` saves the scores at exit and loads them at the next start, so the cache starts full.
+- **RAM:** every routed expert stays in the GGUF file, mapped into memory. At 3-bit that is about 117 GB, at 4-bit
+  about 162 GB (calculated from the model's shapes). The CPU computes the experts the cache doesn't hold, in place,
+  while the GPU computes the shared expert. Before the server says it is ready, the engine reads the experts once
+  so they are in RAM rather than on disk (`--no-warm` skips this).
+- **Reading a prompt:** the prompt is read in chunks of 256 tokens. Each expert that a chunk uses runs once on the
+  GPU for all of the chunk's tokens. It comes from the expert cache when it is there. Otherwise it streams in from
+  RAM through two buffers, so one expert copies in while the previous one computes.
 
-This works the same on NVIDIA (CUDA) and AMD (HIP) cards: the same engine, compiled for each.
+## Long conversations
 
-## Guess, then check
+- **The KDA layers** keep a fixed-size state (64 heads of 128 x 128 per layer), however long the text is.
+- **The MLA layers** keep a 512-wide latent per token: 11 KB per token over the 11 layers, in VRAM (1.5 GB at 131,072
+  tokens, 11.8 GB at 1M; calculated). Their indexer pools the keys over 16 tokens and, for each new token, picks
+  the 128 pools (2,048 tokens) that matter most. So past
+  about 2,000 tokens of context each new token attends to a fixed amount of the text, not all of it. Below that
+  the indexer picks every pool and attention is plain causal.
 
-<p align="center"><img src="media/guess-and-check.svg" width="860" alt="A small helper guesses the next words; the big model checks them all at once and keeps the right ones"></p>
+The context (`--ctx`, up to 1,048,576 tokens) is the longest conversation the engine accepts. Its MLA cache comes
+out of the VRAM that the expert cache would otherwise use.
 
-- **Guess, then check.** A small, fast helper built into the model guesses the next few words, and the big model
-  checks all the guesses in one go. It keeps the ones it agrees with and writes the next word itself - so one step
-  often produces several words. The helper only guesses - the big model decides every word - so you get the same
-  quality answer, 1.6-1.8x sooner.
-- In technical terms: the model's own MTP layer drafts up to 3 tokens; one pass over all 48 layers checks them, 2.4-3.2
-  tokens per pass on average. When the reply repeats the context (code edits, quoted text), **prompt lookup** drafts
-  up to 5 tokens from the earlier copy, but only where its measured acceptance and cost say it pays: code edits 6-11%
-  faster, other text unchanged. The drafts are checked like the MTP's, so the output is the same.
+## Several clients
 
-## Reading long texts
+Agents, a chat and a bot can share one engine. Requests wait in the server and run one at a time, in the order
+they arrived. The KDA state is a running sum that cannot be rewound, so the engine keeps each conversation's state
+instead:
 
-**Long texts are read in big pieces** (up to 8,192 tokens - pieces of words - at a time), which is why a long
-document or code base is read at over 1,000 tokens per second. The experts of the next layer stream to the GPU over
-PCIe while the current layer's attention runs. After the first message, Strata keeps the conversation and reads only
-what is new, so follow-ups start in seconds.
+- **Parking.** When a request starts a different conversation, the current one's whole state is copied to RAM. A
+  later request that continues it copies it back and reads only the new tokens.
+- **Checkpoints.** The server marks where each reply begins. The next turn renders the earlier reply without its
+  thinking, so it differs from the engine's state from that point on. The engine restarts from the checkpoint and
+  reads the reply and the new message, not the whole conversation. A regenerated reply restarts there too.
+- **Memory.** `--park-mib` (default 8192) caps what parked conversations and checkpoints use. The conversation used
+  least recently goes first.
 
-## More
+None of this changes the answers. `tools/glm53_park_check.py` checks each resumed reply against a fresh engine's,
+token for token.
 
-The [details](DETAILS.md#how-it-works) explain every part and its numbers, and the
-[paper](paper/Strata-Paper.pdf) tells the whole story, with the measurements behind it.
+## How it is checked
+
+- **The CPU reference** (`strata-glm-ref`) runs the whole model on the CPU, one token at a time, with ggml's own
+  dot products. On small random GLM-5.3-Flash models it matches llama.cpp to float rounding
+  (`tools/glm53_selftest.sh`, which needs no GPU and no download).
+- **The GPU engine** (`strata-glm`) is checked against the CPU reference layer by layer (`--check-cpu`,
+  `tools/glm53_gpu_check.sh`). On the real model, its logits are compared with llama.cpp's (`tools/glm53_compare.py`).
+- The steps, and what each one has shown so far: [GLM53_PORT.md](GLM53_PORT.md).
 
 ## Credits
 
-- Model: [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) by the Qwen team; compressed versions by
-  [ISTA-DASLab](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF);
-  [Swift 1.5](https://huggingface.co/ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF) by UkisAI; the experimental
-  [UD-Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) by Unsloth (its support follows
-  [eddoursul/Strata](https://github.com/eddoursul/Strata)). Their licenses apply to the model files.
-- Built with parts of [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp) (MIT). Ideas from
-  [Splash](https://github.com/incoai/splash), [ninfer](https://github.com/Neroued/ninfer) and
-  [HyperQwen](https://github.com/syv-ai/HyperQwen). More in the [details](DETAILS.md#credits-and-licenses).
-- The AMD (HIP) backend: [AMD_HIP.md](AMD_HIP.md) names the contributors and the machines it was validated on.
+- Model: GLM-5.3-Flash by Z.ai. The GGUF files Strata downloads are
+  [Unsloth's](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF). Their license applies to the model files.
+- Strata itself: [Niko1221/Strata](https://github.com/Niko1221/Strata), which ran Qwen3.8-Flash-Next. This fork
+  keeps its design (experts in RAM, the most used cached in VRAM, the rest on the CPU), its server and its web app,
+  and replaces the engine.
+- Built with parts of [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp) (MIT): the quantized dot products
+  on the CPU and GPU, and the reference that every part of the engine is checked against.
 
 ## License
 
-Strata is open source under the [MIT License](../LICENSE). A few parts carry their own licenses: `third_party/ggml`
-(MIT, llama.cpp / ggml), the web app's font (SIL Open Font License 1.1) and the experimental speed projection's
-vector in `data/experimental-speed-projection` (Qwen Community License 1.0, from the model's activations). The
-models are not part of this repository; each model's own license applies to its files.
+Strata is open source under the [MIT License](../LICENSE). A few parts have their own licenses: `third_party/ggml`
+(MIT, llama.cpp / ggml) and the web app's font (SIL Open Font License 1.1, `serve/web/fonts/OFL.txt`). The model
+is not part of this repository. Its own license applies to its files.
