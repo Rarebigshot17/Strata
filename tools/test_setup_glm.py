@@ -14,7 +14,9 @@ import os
 import struct
 import sys
 import tempfile
+import time
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -94,23 +96,24 @@ def quiet(fn, *args, **kw):
 
 
 def install(argv, ram=OWNER_RAM, smi=OWNER_SMI, listing=LISTING, configs=(), env=None, free=10000.0,
-            cpu=("Test CPU", True), prepare=None, others=()):
+            cpu=("Test CPU", True), prepare=None, others=(), real_start=False):
     """setup.main() with `argv` in a temporary Strata folder, everything outside it mocked: nvidia-smi says `smi`, the
     PC has `ram` GiB, a `cpu` (name, AVX2) and `free` GB of disk, the Hub lists `listing`, a download writes an empty
-    file, the engine build writes build/strata-glm and the start is recorded.  `prepare(base)` makes files beside the
-    Strata folder first, "{base}" in `argv` is that folder, and `others` are the earlier GLM Strata folders there.
+    file, the engine build writes build/strata-glm and the start is recorded (`real_start`: setup's own start() runs,
+    and the server command it would run is recorded).  `prepare(base)` makes files beside the Strata folder first,
+    "{base}" in `argv` and in `configs` is that folder, and `others` are the earlier GLM Strata folders there.
     Returns (exit code, output, {config name: config}, {script name: text}, a record of the downloads, builds, starts
-    (and the GPUs and settings a start was given), engine updates and Hub requests)."""
+    (and the GPUs and settings a start was given), server commands, engine updates and Hub requests)."""
     with tempfile.TemporaryDirectory() as d:
         base = Path(d)
         root = base / "Strata"
         (root / "serve").mkdir(parents=True)
         for name, cfg in configs:
-            (root / name).write_text(json.dumps(cfg), encoding="utf-8")
+            (root / name).write_text(json.dumps(cfg).replace("{base}", str(base)), encoding="utf-8")
         if prepare is not None:
             prepare(base)
         argv = [x.replace("{base}", str(base)) for x in argv]
-        rec = {"downloads": [], "builds": [], "starts": [], "start_args": [], "updates": [], "urls": []}
+        rec = {"downloads": [], "builds": [], "starts": [], "start_args": [], "commands": [], "updates": [], "urls": []}
 
         def download(url, dst, what=None):
             rec["downloads"].append((url, dst.relative_to(base).as_posix()))
@@ -129,6 +132,10 @@ def install(argv, ram=OWNER_RAM, smi=OWNER_SMI, listing=LISTING, configs=(), env
             rec["start_args"].append((gpu, {k: v for k, v in (keep or {}).items() if v is not None}))
             return 0
 
+        def call(cmd):
+            rec["commands"].append(cmd)
+            return 0
+
         patches = [mock.patch.object(setup, "ROOT", root), mock.patch.object(setup, "BUILD_DIR", root / "build"),
                    mock.patch.object(setup, "out", return_value=smi),
                    mock.patch.object(setup, "ram_gb", return_value=ram),
@@ -145,14 +152,17 @@ def install(argv, ram=OWNER_RAM, smi=OWNER_SMI, listing=LISTING, configs=(), env
                    mock.patch.object(setup, "get_llama_cpp", return_value=root / "third_party" / "llama.cpp"),
                    mock.patch.object(setup, "build_engine", build_engine),
                    mock.patch.object(setup, "update_installed_engine", lambda force=False: rec["updates"].append(force)),
-                   mock.patch.object(setup, "start", start),
+                   mock.patch.object(setup.subprocess, "call", call),
                    mock.patch.object(setup.time, "sleep", lambda s: None),
                    mock.patch.object(sys, "argv", ["setup.py", *argv]),
                    mock.patch.object(sys, "stdin", io.StringIO("")),        # a question ends at EOF
                    mock.patch.dict(os.environ, env or {})]
+        if not real_start:
+            patches.append(mock.patch.object(setup, "start", start))
         with contextlib.ExitStack() as stack:
             for p in patches:
                 stack.enter_context(p)
+            os.environ.pop("STRATA_EXECV", None)
             if not (env or {}).get("HF_ENDPOINT"):
                 os.environ.pop("HF_ENDPOINT", None)
             buf = io.StringIO()
@@ -299,6 +309,30 @@ class Listing(unittest.TestCase):
         self.assertTrue(all("/glm-ud-q4_k_xl/" in dst for _url, dst in rec["downloads"]))
         self.assertIn("strata-glm-iq4_xs.json", cfgs)                         # the config is named by the size
 
+    def test_a_hub_that_refuses_the_listing_stops_at_once(self):
+        def refuse(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, None)
+        out = io.StringIO()
+        with mock.patch.object(setup.urllib.request, "urlopen", refuse), contextlib.redirect_stdout(out), \
+                mock.patch.object(setup.time, "sleep", side_effect=AssertionError("retried")):
+            with self.assertRaises(SystemExit):
+                setup.repo_files()
+        self.assertIn("cannot list the model's files (unsloth/GLM-5.3-Flash-GGUF", out.getvalue())
+
+    def test_an_unreachable_hub_is_tried_three_times(self):
+        seen = []
+
+        def down(req, timeout=None):
+            seen.append(req.full_url)
+            raise urllib.error.URLError("no route to host")
+        out = io.StringIO()
+        with mock.patch.object(setup.urllib.request, "urlopen", down), contextlib.redirect_stdout(out), \
+                mock.patch.object(setup.time, "sleep", lambda s: None):
+            with self.assertRaises(SystemExit):
+                setup.repo_files()
+        self.assertEqual(len(seen), 3)
+        self.assertIn("HF_ENDPOINT=<mirror>", out.getvalue())
+
     def test_a_repository_without_the_size_stops(self):
         code, out, cfgs, _, rec = install(["--yes", "--no-start"], listing=[entry("README.md", 10, None)])
         self.assertEqual(code, 1)
@@ -405,6 +439,54 @@ class Gpus(unittest.TestCase):
         code, out, _, _, _ = install(["--yes", "--no-start"], smi="")
         self.assertEqual(code, 1)
         self.assertIn("no NVIDIA GPU found", out)
+
+    def test_a_chosen_gpu_that_is_not_there_stops_and_says_which_can(self):
+        code, out, cfgs, _, rec = install(["--yes", "--no-start", "--gpus", "0,5"])
+        self.assertEqual(code, 1)
+        self.assertIn("GPU 5 cannot be used: not found on this PC", out)
+        self.assertIn("use --gpus 0,1,2", out)
+        self.assertEqual(out.count("Your NVIDIA GPUs:"), 1)
+        self.assertEqual((cfgs, rec["builds"]), ({}, []))
+
+    def test_gpu_takes_one_card_and_a_list_means_gpus(self):
+        code, out, cfgs, _, _ = install(["--yes", "--no-start", "--gpu", "1"])
+        self.assertEqual(cfgs["strata-glm-ud-iq3_xxs.json"]["gpu"], 1)
+        code, out, cfgs, _, _ = install(["--yes", "--no-start", "--gpu", "0,2"])
+        self.assertEqual(cfgs["strata-glm-ud-iq3_xxs.json"]["gpu"], [0, 2])
+        smi = OWNER_SMI.splitlines()[0] + "\n1, Tesla P40, 24576, 6.1, 580.95.05\n"
+        code, out, cfgs, _, _ = install(["--yes", "--no-start", "--gpus", "all"], smi=smi)
+        self.assertEqual(cfgs["strata-glm-ud-iq3_xxs.json"]["gpu"], 0)        # every card that can run it
+        with contextlib.redirect_stderr(io.StringIO()):
+            code, _, cfgs, _, _ = install(["--yes", "--no-start", "--gpu", "first"])
+        self.assertEqual((code, cfgs), (2, {}))
+
+    def test_a_cpu_without_avx2_is_warned_not_stopped(self):
+        code, out, cfgs, _, _ = install(["--yes", "--no-start"], cpu=("Old Xeon", False))
+        self.assertEqual(code, 0, out)
+        self.assertIn("CPU: Old Xeon has no AVX2", out)
+        self.assertIn("strata-glm-ud-iq3_xxs.json", cfgs)
+
+
+class Toolkit(unittest.TestCase):
+    def fake_nvcc(self, d, name, release):
+        p = Path(d) / name / "bin" / "nvcc"
+        p.parent.mkdir(parents=True)
+        p.write_text(f"#!/bin/sh\necho 'Cuda compilation tools, release {release}, V{release}.1'\n", encoding="utf-8")
+        p.chmod(0o755)
+        return str(p)
+
+    def test_the_newest_toolkit_or_strata_nvcc(self):
+        # versions no real toolkit has, so one installed on this PC (/usr/local/cuda*) does not change the answers
+        with tempfile.TemporaryDirectory() as d:
+            old, new = self.fake_nvcc(d, "a", "98.0"), self.fake_nvcc(d, "b", "99.1")
+            env = {"CUDA_PATH": str(Path(old).parents[1]), "CUDA_HOME": str(Path(new).parents[1])}
+            with mock.patch.dict(os.environ, env), mock.patch.object(setup.shutil, "which", return_value=None):
+                os.environ.pop("STRATA_NVCC", None)
+                self.assertEqual(setup.find_nvcc(), (new, (99, 1)))
+                self.assertEqual(setup.find_nvcc(below=(99, 0)), (old, (98, 0)))
+                os.environ["STRATA_NVCC"] = old                                 # the only one considered
+                self.assertEqual(setup.find_nvcc(), (old, (98, 0)))
+                self.assertEqual(quiet(setup.find_nvcc, (98, 0))[0], (None, None))
 
 
 class Build(unittest.TestCase):
@@ -667,11 +749,140 @@ class Ports(unittest.TestCase):
         self.assertIn("${PORT:-8101}", docker)
         self.assertIn('PORT="${PORT:-8101}"', (ROOT / "docker-entrypoint.sh").read_text(encoding="utf-8"))
 
-    def test_an_installed_model_starts_on_its_port_and_a_new_one_on_8101(self):
+    def test_a_new_install_starts_on_8101(self):
         code, out, cfgs, scripts, rec = install(["--yes"])
         self.assertEqual(code, 0, out)
         self.assertEqual(rec["starts"], [("strata-glm-ud-iq3_xxs.json", 8101)])
         self.assertIn("--port 8101", scripts["run-glm-ud-iq3_xxs.sh"])
+
+
+CONFIG = "strata-glm-ud-iq3_xxs.json"
+# an installed 3-bit model, its config as setup writes it ("{base}": the folder the Strata folder is in)
+INSTALLED = {"exe": "{base}/Strata/build/strata-glm",
+             "args": ["-m", "{base}/models/GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00001.gguf", "--ctx", "131072",
+                      "--park-mib", "8192"],
+             "cwd": "{base}/Strata", "model_name": "glm-5.3-flash", "port": 8102}
+
+
+def installed_files(base: Path) -> None:
+    """The engine and the model file INSTALLED names."""
+    for p in (base / "Strata" / "build" / "strata-glm", base / "models" / "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00001.gguf"):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"")
+
+
+class InstalledStart(unittest.TestCase):
+    """./setup.sh with a model installed: no question, no PC check and no download; the engine is compiled again when
+    it has to be, and the server starts with the model's config."""
+
+    def start(self, *argv):
+        code, out, cfgs, _, rec = install(list(argv), configs=[(CONFIG, INSTALLED)], prepare=installed_files,
+                                          real_start=True)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(rec["commands"]), 1, out)
+        return rec["commands"][0], out, cfgs[CONFIG], rec
+
+    def test_it_starts_on_its_own_port(self):
+        cmd, out, _, rec = self.start()
+        root = Path(rec["root"])
+        self.assertEqual(cmd, [sys.executable, str(root / "serve" / "server.py"), "--engine", "strata", "--config",
+                               str(root / CONFIG), "--port", "8102", "--open"])
+        self.assertEqual(rec["updates"], [False])                         # compiled again only when it has to be
+        self.assertEqual((rec["downloads"], rec["builds"], rec["urls"]), ([], [], []))
+        self.assertNotIn("Step 1", out)
+
+    def test_port_is_for_this_start_only(self):
+        cmd, _, cfg, _ = self.start("--port", "9000")
+        self.assertEqual(cmd[cmd.index("--port") + 1], "9000")
+        self.assertEqual(cfg["port"], 8102)
+
+    def test_gpus_are_saved_and_gpu_is_for_this_start(self):
+        cmd, out, cfg, _ = self.start("--gpus", "0,2")
+        self.assertNotIn("--gpu", cmd)
+        self.assertEqual(cfg["gpu"], [0, 2])
+        self.assertIn("saved for this model: GPUs 0,2", out)
+        cmd, _, cfg, _ = self.start("--gpu", "1")
+        self.assertEqual(cmd[cmd.index("--gpu") + 1], "1")
+        self.assertNotIn("gpu", cfg)
+
+    def test_build_compiles_the_engine_first(self):
+        _, _, _, rec = self.start("--build")
+        self.assertEqual(rec["updates"], [True])
+
+    def test_with_two_sizes_yes_starts_the_last_used(self):
+        def prepare(base):
+            installed_files(base)
+            later = time.time() + 60
+            os.utime(base / "Strata" / "strata-glm-iq4_xs.json", (later, later))
+        configs = [(CONFIG, INSTALLED), ("strata-glm-iq4_xs.json", {**INSTALLED, "port": 8103})]
+        code, out, _, _, rec = install(["--yes"], configs=configs, prepare=prepare, real_start=True)
+        self.assertEqual(code, 0, out)
+        for line in ("1) glm-iq4_xs", "2) glm-ud-iq3_xxs", "3) set up the other size"):
+            self.assertIn(line, out)
+        cmd = rec["commands"][0]
+        self.assertEqual(cmd[cmd.index("--config") + 1], str(Path(rec["root"]) / "strata-glm-iq4_xs.json"))
+        self.assertEqual(cmd[cmd.index("--port") + 1], "8103")
+        code, out, _, _, rec = install([], configs=configs, prepare=prepare, real_start=True)
+        self.assertEqual((code, rec["commands"]), (1, []))                   # no answer: nothing starts
+
+
+class ModelFilesFound(unittest.TestCase):
+    """Model files already on this PC are used where they are: nothing is listed or downloaded."""
+
+    def test_gguf_dir_with_the_shards_in_a_sub_folder(self):
+        def prepare(base):
+            sub = base / "mine" / "UD-IQ3_XXS"
+            sub.mkdir(parents=True)
+            for i in (1, 2):
+                (sub / f"GLM-5.3-Flash-UD-IQ3_XXS-0000{i}-of-00002.gguf").write_bytes(b"")
+        code, out, cfgs, _, rec = install(["--yes", "--no-start", "--gguf-dir", "{base}/mine"], prepare=prepare)
+        self.assertEqual(code, 0, out)
+        self.assertEqual((rec["downloads"], rec["urls"]), ([], []))
+        first = Path(rec["base"]) / "mine" / "UD-IQ3_XXS" / "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00002.gguf"
+        self.assertEqual(cfgs[CONFIG]["args"][:2], ["-m", str(first)])
+
+    def test_a_finished_download(self):
+        def prepare(base):
+            folder = base / "Strata-GLM-data" / "models" / "glm-ud-iq3_xxs"
+            folder.mkdir(parents=True)
+            for i in (1, 2):
+                s = folder / f"GLM-5.3-Flash-UD-IQ3_XXS-0000{i}-of-00002.gguf"
+                s.write_bytes(b"")
+                setup.mark(s)
+        code, out, cfgs, _, rec = install(["--yes", "--no-start"], prepare=prepare)
+        self.assertEqual(code, 0, out)
+        self.assertEqual((rec["downloads"], rec["urls"]), ([], []))
+        self.assertIn("(already downloaded)", out)
+
+    def test_a_new_copy_is_set_up_like_the_last_one(self):
+        """A Strata folder unzipped next to an earlier one: the earlier one's model files move into the data folder,
+        and this copy is set up with its choices and the keys and options added to its config by hand."""
+        old_cfg = {"exe": "{base}/Strata-old/build/strata-glm",
+                   "args": ["-m", "{base}/Strata-old/models/glm-ud-iq3_xxs/GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00002.gguf",
+                            "--ctx", "262144", "--park-mib", "6144", "--no-warm"],
+                   "port": 8102, "gpu": [0, 1], "host": "0.0.0.0", "api_key": "k1", "sampling": {"temperature": 0.8}}
+
+        def prepare(base):
+            folder = base / "Strata-old" / "models" / "glm-ud-iq3_xxs"
+            folder.mkdir(parents=True)
+            for i in (1, 2):
+                s = folder / f"GLM-5.3-Flash-UD-IQ3_XXS-0000{i}-of-00002.gguf"
+                s.write_bytes(b"")
+                setup.mark(s)
+            (base / "Strata-old" / CONFIG).write_text(json.dumps(old_cfg).replace("{base}", str(base)), encoding="utf-8")
+        code, out, cfgs, _, rec = install([], prepare=prepare, others=["Strata-old"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("moved to", out)
+        self.assertIn("Found your earlier install", out)
+        self.assertEqual((rec["downloads"], rec["urls"]), ([], []))
+        first = (Path(rec["base"]) / "Strata-GLM-data" / "models" / "glm-ud-iq3_xxs"
+                 / "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00002.gguf")
+        cfg = cfgs[CONFIG]
+        self.assertEqual(cfg["args"][:6], ["-m", str(first), "--ctx", "262144", "--park-mib", "6144"])
+        self.assertIn("--no-warm", cfg["args"])
+        self.assertEqual((cfg["port"], cfg["gpu"], cfg["host"], cfg["api_key"], cfg["sampling"]),
+                         (8102, [0, 1], "0.0.0.0", "k1", {"temperature": 0.8}))
+        self.assertEqual(rec["starts"], [(CONFIG, 8102)])
 
 
 class Check(unittest.TestCase):
