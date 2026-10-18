@@ -1778,7 +1778,7 @@ class StartNarrator(unittest.TestCase):
 
 class CancelledRead(unittest.TestCase):
     """#471: a request cancelled while its prompt was read is recorded with the tokens the engine read (the DONE
-    line's 15th field), not the whole prompt; an older engine's line (no such field) keeps the whole prompt."""
+    line's 15th field), not the whole prompt; a line without that field keeps the whole prompt."""
 
     def test_parse_done_read_field(self):
         e = SimpleNamespace()
@@ -2069,14 +2069,20 @@ class PromptProgress(unittest.TestCase):
         self.assertIsNone(prompt_progress(self.svc))
         self.assertEqual(list(gen), [65])
         self.assertEqual((eng.last["reused"], eng.last["prompt_read"]), (4096, 20904))
+        # the engine prints RESUME only when it reused something: the next request's progress counts no cache
+        for line in ("PP 2048 25000 500 4096.0", "T 66", "DONE 1 25000 6000.0 10.0 stop 0 0 0 0 0 0 0 0.0 25000 0"):
+            eng.lines.put(line)
+        gen = eng.generate([1] * 25000, 10, {}, threading.Event())
+        self.assertIsNone(next(gen))
+        self.assertEqual(prompt_progress(self.svc), {"total": 25000, "cache": 0, "processed": 2048, "time_ms": 500})
+        self.assertEqual(list(gen), [66])
 
     def test_nothing_before_the_first_chunk(self):
         self.engine.progress = None
         self.assertIsNone(prompt_progress(self.svc), "no PP line yet: there is no rate to show")
         self.engine.progress = (8192, self.TOTAL)
-        self.engine.reused = 0                        # an engine too old to print RESUME never sets it
-        self.assertEqual(prompt_progress(self.svc)["cache"], 0,
-                         "an engine too old to print RESUME counts the reused prefix as work")
+        self.engine.reused = 0                        # no RESUME line: the engine reused nothing
+        self.assertEqual(prompt_progress(self.svc)["cache"], 0, "a request that reused nothing has no cached prefix")
 
 
 class ConfigReasoningEffort(unittest.TestCase):
