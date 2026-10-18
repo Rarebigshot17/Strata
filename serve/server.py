@@ -709,16 +709,14 @@ class StrataEngine:
         self.info = {**info, **self.info}
 
     def _parse_done(self, line):
-        """`DONE <generated> <prompt> <prompt_ms> <decode_ms> <finish> <drafts accepted> <drafts offered> <reused>
-        <hits> <lookups> 0 0 0.0 <prompt tokens read> 0` (hits / lookups: the expert cache during decode; the engine
-        drafts nothing, so the draft figures are left out while they are 0)."""
+        """`DONE <generated> <prompt> <prompt_ms> <decode_ms> <finish> 0 0 <reused> <hits> <lookups> 0 0 0.0
+        <prompt tokens read> 0` (hits / lookups: the expert cache during decode; the zeros are fields the engine
+        keeps for the line's shape)."""
         f = line.split()
         self.last = {"generated": int(f[1]), "prompt_tokens": int(f[2]), "prompt_ms": float(f[3]),
                      "decode_ms": float(f[4]), "finish": f[5]}
         if len(f) >= 9:
             self.last["reused"] = int(f[8])
-            if int(f[7]) > 0:
-                self.last.update(drafts_accepted=int(f[6]), drafts_offered=int(f[7]))
         if len(f) >= 11:
             self.last.update(hits=int(f[9]), lookups=int(f[10]))
         if len(f) >= 15:
@@ -2269,10 +2267,7 @@ class Service:
             "prompt_ms": last.get("prompt_ms"), "decode_ms": last.get("decode_ms"),
             "decode_tok_s": round(last["generated"] / (last["decode_ms"] / 1000), 1)
             if n and last.get("generated") and last.get("decode_ms") else None,
-            "hit_rate": hit_rate,
-            # #457: speculative drafts, when the engine drafted
-            **({"drafts_offered": last["drafts_offered"], "drafts_accepted": last.get("drafts_accepted")}
-               if last.get("drafts_offered") else {})})
+            "hit_rate": hit_rate, "hits": last.get("hits"), "lookups": last.get("lookups")})
         t = self.totals
         t["requests"] += 1
         t["prompt_tokens"] += seen
@@ -2336,10 +2331,7 @@ def request_timings(prompt_tokens: int, generated: int, last: dict) -> dict | No
             "prompt_per_second": round(prompt_n / (prompt_ms / 1000), 1) if prompt_n and prompt_ms > 0 else None,
             "predicted_n": generated, "predicted_ms": round(decode_ms, 1),
             "predicted_per_token_ms": round(decode_ms / decoded, 3) if decoded else None,
-            "predicted_per_second": round(decoded / (decode_ms / 1000), 1) if decoded and decode_ms > 0 else None,
-            # the speculative drafts, as llama.cpp names them (from PR #83, @mikicvi): only when the engine drafted
-            **({"draft_n": int(last["drafts_offered"]), "draft_n_accepted": int(last.get("drafts_accepted") or 0)}
-               if last.get("drafts_offered") else {})}
+            "predicted_per_second": round(decoded / (decode_ms / 1000), 1) if decoded and decode_ms > 0 else None}
 
 
 def request_stats(segments: list[dict]) -> dict:
@@ -2352,7 +2344,7 @@ def request_stats(segments: list[dict]) -> dict:
             result[key] = segments[0][key]
         else:
             result.pop(key, None)
-    for key in ("prompt_ms", "decode_ms", "generated", "drafts_offered", "drafts_accepted", "hits", "lookups"):
+    for key in ("prompt_ms", "decode_ms", "generated", "hits", "lookups"):
         if any(segment.get(key) is not None for segment in segments):
             result[key] = sum(segment.get(key) or 0 for segment in segments)
     return result
