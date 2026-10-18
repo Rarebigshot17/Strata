@@ -23,7 +23,6 @@ API path testable without a GPU.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import collections
 import hmac
 import codecs
