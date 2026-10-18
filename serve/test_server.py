@@ -1887,6 +1887,9 @@ class EngineDeath(unittest.TestCase):
 # ======================================== region B of the GLM test port (plan B3); keep this line ========================================
 
 
+from serve.glm_fixtures import GlmTokenizer, call_text, glm_template, reply_text  # noqa: E402
+
+
 class DoneLineEngine(MockEngine):
     """The mock engine whose `last` comes from a DONE line, parsed as StrataEngine parses it."""
 
@@ -1894,53 +1897,22 @@ class DoneLineEngine(MockEngine):
         super().__init__(*a, **kw)
         self.done_lines = list(done_lines)
 
-    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+    def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
         try:
-            yield from super().generate(ids, max_new, sampling, cancel, embeddings)
+            yield from super().generate(ids, max_new, sampling, cancel, checkpoint)
         finally:
             StrataEngine._parse_done(self, self.done_lines.pop(0))
-
-
-class DraftCounts(unittest.TestCase):
-    """#457: GET /metrics gives each request's speculative draft counts (offered / accepted, from the engine's DONE
-    line; None when the line has no such fields) and their running sums in the totals."""
-
-    def test_drafts_in_history_and_totals(self):
-        tok = ByteTokenizer()
-        engine = DoneLineEngine(tok, "</think>\n\nok", max_context=CTX, done_lines=[
-            "DONE 4 20 40.0 30.0 stop 7 12 0",                  # 7 of 12 drafts accepted
-            "DONE 4 20 40.0 30.0 stop",                          # an engine that reports no drafts
-            "DONE 4 20 40.0 30.0 stop 3 5 0 9 10"])
-        svc = Service(engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
-        self.assertEqual((svc.totals["drafts_offered"], svc.totals["drafts_accepted"]), (0, 0))
-        httpd = serve(svc, port=0)
-        base = f"http://127.0.0.1:{httpd.server_address[1]}"
-        try:
-            for _ in range(3):
-                body = json.dumps({"model": "m", "max_tokens": 10, "messages": [{"role": "user", "content": "hi"}]})
-                with urllib.request.urlopen(urllib.request.Request(base + "/v1/chat/completions", data=body.encode(),
-                                                                   headers={"Content-Type": "application/json"}),
-                                            timeout=30) as r:
-                    self.assertEqual(r.status, 200)
-            with urllib.request.urlopen(base + "/metrics", timeout=10) as r:
-                m = json.loads(r.read())
-        finally:
-            httpd.shutdown()
-            httpd.server_close()
-        rows = m["requests"]                                      # newest first
-        self.assertEqual([(r["drafts_offered"], r["drafts_accepted"]) for r in rows], [(5, 3), (None, None), (12, 7)])
-        self.assertEqual((m["totals"]["drafts_offered"], m["totals"]["drafts_accepted"]), (17, 10))
 
 
 class PrometheusMetrics(unittest.TestCase):
     """GET /metrics/prometheus: the totals in Prometheus' text format, under llama-server's names."""
 
     def test_totals(self):
-        tok = ByteTokenizer()
-        engine = DoneLineEngine(tok, "</think>\n\nok", max_context=CTX, done_lines=[
-            "DONE 4 20 400.0 200.0 stop 7 12 5",                # 5 of the prompt's tokens reused
-            "DONE 4 20 400.0 200.0 stop 3 5 0"])
-        svc = Service(engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        engine = DoneLineEngine(tok, reply_text("", "ok"), max_context=CTX, done_lines=[
+            "DONE 4 20 400.0 200.0 stop 0 0 5",                 # 5 of the prompt's tokens reused
+            "DONE 4 20 400.0 200.0 stop 0 0 0"])
+        svc = Service(engine, tok, glm_template())
         httpd = serve(svc, port=0)
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
         try:
@@ -1964,101 +1936,25 @@ class PrometheusMetrics(unittest.TestCase):
         self.assertEqual(m["llamacpp:tokens_predicted_total"], t["output_tokens"])
         self.assertEqual(m["llamacpp:tokens_predicted_seconds_total"], 0.4)
         self.assertEqual((m["llamacpp:requests_processing"], m["llamacpp:requests_deferred"]), (0, 0))
-        self.assertEqual((m["strata:requests_total"], m["strata:drafts_offered_total"],
-                          m["strata:drafts_accepted_total"]), (2, 17, 10))
+        self.assertEqual(m["strata:requests_total"], 2)
 
 
-class PcieShare(unittest.TestCase):
-    """#588: the hit rate stays the VRAM share of the lookups; the routed experts the GPU read over PCIe (the DONE
-    line's 16th field, engine 0.1.39+) are given as their own share of all routed experts."""
-
-    def test_history(self):
-        tok = ByteTokenizer()
-        engine = DoneLineEngine(tok, "</think>\n\nok", max_context=CTX, done_lines=[
-            "DONE 4 20 40.0 30.0 stop 3 5 0 60 100 0 0 0.0 20 25",     # 25 more over PCIe: 20% of 125 routed
-            "DONE 4 20 40.0 30.0 stop 3 5 0 60 100 0 0 0.0 20 0",
-            "DONE 4 20 40.0 30.0 stop 3 5 0 60 100 0 0 0.0 20"])       # an older engine
-        svc = Service(engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
-        with contextlib.redirect_stdout(io.StringIO()) as out:
-            for _ in range(3):
-                list(svc.run(tok.encode("hi"), False, None, 10, {}, threading.Event()))
-        rows = list(svc.history)
-        self.assertEqual([r["hit_rate"] for r in rows], [0.6, 0.6, 0.6])
-        self.assertEqual([r["pcie_share"] for r in rows], [0.2, 0.0, None])
-        self.assertIn("expert cache 60.0% hit (+20.0% of the routed experts over PCIe)", out.getvalue())
-
-
-class PeerDevice(unittest.TestCase):
-    """#665: several GPUs in the config are a layer split, but --peer-device uses the second card as an expert-cache
-    tier, and the engine refuses it beside --layer-split: the server must not add one then."""
-
-    def test_a_vision_section_starts_the_engine_with_images_1322(self):
-        args = ["--native", "x"]
-        got = engine_args({"args": list(args), "vision": {"exe": "v", "gpu": True}})
-        self.assertEqual(got, args + ["--vision", "--vram-reserve-mib", "700"])
-        got = engine_args({"args": list(args), "vision": {"exe": "v", "gpu": False}})
-        self.assertEqual(got, args + ["--vision"])
-        mine = args + ["--vram-reserve-mib", "1500"]
-        self.assertEqual(engine_args({"args": list(mine), "vision": {"gpu": True}}), mine + ["--vision"])
-        done = args + ["--vision", "--vram-reserve-mib", "700"]                  # setup wrote it: unchanged
-        self.assertEqual(engine_args({"args": list(done), "vision": {"gpu": True}}), done)
-        self.assertEqual(engine_args({"args": list(args)}), args)                # no section: no images
-
-    def test_split_added_for_several_gpus(self):
-        self.assertEqual(engine_args({"args": ["--native", "x"], "gpu": [0, 1]}),
-                         ["--native", "x", "--layer-split", "auto"])
-
-    def test_no_split_with_a_peer(self):
-        args = ["--native", "x", "--peer-device", "1"]
-        self.assertEqual(engine_args({"args": list(args), "gpu": [0, 1]}), args)
-        self.assertEqual(engine_args({"args": list(args), "gpu": [0, 1], "split_skip_if_fits": True}), args)
+class SeveralGpus(unittest.TestCase):
+    """Several GPUs in the config: the engine sees them all, in the order given, and splits the layers by each card's
+    VRAM unless the config's "split" says otherwise (#665's layer split and peer device were the Qwen engine's)."""
 
     def test_both_cards_visible(self):
         from serve.server import child_env
-        env = child_env({"args": ["--peer-device", "1"], "gpu": [0, 1]})
+        env = child_env({"args": [], "gpu": [0, 1]})
         self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "0,1")
 
-
-class LearnedProfile(unittest.TestCase):
-    """#477: "expert_profile_save" in the config: the engine saves its learned profile there, and the next start
-    begins from it when it is a profile of the same model; without the key the arguments are unchanged."""
-
-    def write(self, path, nl=48, ne=512, n=4):
-        sys.path.insert(0, str(ROOT / "tools"))
-        import make_profile
-        old = make_profile.N_LAYER
-        make_profile.N_LAYER = nl
-        try:
-            make_profile.write_profile(path, [(i % nl, i // nl) for i in range(n)], n_expert=ne)
-        finally:
-            make_profile.N_LAYER = old
-
-    def test_without_the_key_nothing_changes(self):
-        args = ["--native", "x", "--expert-profile", "data/expert-profile.bin", "--adapt-every", "4"]
-        self.assertEqual(engine_args({"args": list(args)}), args)
-        self.assertEqual(engine_args({"args": list(args), "expert_profile_save": ""}), args)
-
-    def test_save_and_start_from_it(self):
-        d = Path(tempfile.mkdtemp())
-        self.write(d / "base.bin")
-        cfg = {"args": ["--expert-profile", "base.bin"], "cwd": str(d), "expert_profile_save": "learned.bin",
-               "expert_profile_save_every": 5}
-        # nothing saved yet: the config's profile, and the engine is told where to save
-        self.assertEqual(engine_args(cfg), ["--expert-profile", "base.bin", "--expert-profile-save", "learned.bin",
-                                            "--expert-profile-save-every", "5"])
-        self.write(d / "learned.bin")
-        self.assertEqual(engine_args(cfg)[:2], ["--expert-profile", "learned.bin"])
-        self.write(d / "learned.bin", ne=256)                    # another model's: not used
-        self.assertEqual(engine_args(cfg)[:2], ["--expert-profile", "base.bin"])
-        (d / "learned.bin").write_bytes(b"STRP" + bytes(20))     # not a whole profile
-        self.assertEqual(engine_args(cfg)[:2], ["--expert-profile", "base.bin"])
-        self.write(d / "learned.bin")
-        (d / "learned.bin").write_bytes((d / "learned.bin").read_bytes()[:30])   # truncated
-        self.assertEqual(engine_args(cfg)[:2], ["--expert-profile", "base.bin"])
-
-    def test_no_profile_in_the_args(self):
-        cfg = {"args": ["--native", "x"], "expert_profile_save": "learned.bin"}
-        self.assertEqual(engine_args(cfg), ["--native", "x", "--expert-profile-save", "learned.bin"])
+    def test_a_split_only_when_the_config_has_one(self):
+        args = ["-m", "x.gguf"]
+        self.assertEqual(engine_args({"args": list(args), "gpu": [0, 1]}), args)
+        self.assertEqual(engine_args({"args": list(args), "gpu": [0, 1], "split": [24, 12]}),
+                         args + ["--split", "24,12"])
+        mine = args + ["--split", "1,1"]                              # the args' own: unchanged
+        self.assertEqual(engine_args({"args": list(mine), "gpu": [0, 1], "split": [24, 12]}), mine)
 
 
 class RepeatStop(unittest.TestCase):
