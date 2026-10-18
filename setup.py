@@ -497,7 +497,13 @@ def download(url, dst: Path, what=None):
             req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "strata-setup"})
             total = int(urllib.request.urlopen(req, timeout=60).headers.get("Content-Length", 0))
             break
-        except OSError as e:                           # HTTPError too
+        except urllib.error.HTTPError as e:            # the server answers, but not with the file
+            if e.code in (401, 403, 404) or attempt == 4:
+                fail(f"{url.split('/')[2]} does not give {what or dst.name} ({e})",
+                     "run setup again (it lists the model's files again); HF_ENDPOINT, if you set one, must be a "
+                     "Hugging Face mirror" if e.code in (401, 403, 404) else hint)
+            time.sleep(5)
+        except OSError as e:
             if attempt == 4:
                 fail(f"cannot reach {url.split('/')[2]} ({e})", hint)
             time.sleep(5)

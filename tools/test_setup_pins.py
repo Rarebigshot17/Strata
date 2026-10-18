@@ -83,6 +83,19 @@ class Download(unittest.TestCase):
         self.assertEqual(seen, [])
         self.assertIn("already downloaded", out)
 
+    def test_a_missing_file_stops_at_once(self):
+        seen = []
+
+        def urlopen(req, timeout=None):
+            seen.append(req.get_method())
+            raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(setup.urllib.request, "urlopen", urlopen), \
+                mock.patch.object(setup.time, "sleep", side_effect=AssertionError("retried")):
+            with self.assertRaises(SystemExit):
+                quiet(setup.download, "https://huggingface.co/r/resolve/main/m.gguf", Path(d) / "m.gguf")
+        self.assertEqual(seen, ["HEAD"])
+
     def test_a_wrong_size_is_deleted(self):
         with tempfile.TemporaryDirectory() as d:
             s = Path(d) / "m.gguf"
