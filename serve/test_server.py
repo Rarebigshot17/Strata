@@ -1887,7 +1887,7 @@ class EngineDeath(unittest.TestCase):
 # ======================================== region B of the GLM test port (plan B3); keep this line ========================================
 
 
-from serve.glm_fixtures import GlmTokenizer, call_text, glm_template, reply_text  # noqa: E402
+from serve.glm_fixtures import GlmTokenizer, glm_template, reply_text  # noqa: E402
 
 
 class DoneLineEngine(MockEngine):
@@ -1939,9 +1939,32 @@ class PrometheusMetrics(unittest.TestCase):
         self.assertEqual(m["strata:requests_total"], 2)
 
 
+class ExpertCacheHits(unittest.TestCase):
+    """The expert cache's hit rate while the reply was written (the DONE line's hits / lookups, counted during decode):
+    each request's in the history and in its line in the server window, the sums in the totals; None from a DONE line
+    without them."""
+
+    def test_history_totals_and_log(self):
+        tok = GlmTokenizer()
+        engine = DoneLineEngine(tok, "ok", max_context=CTX, done_lines=[
+            "DONE 4 20 40.0 30.0 stop 0 0 0 60 100 0 0 0.0 20 0",
+            "DONE 4 20 40.0 30.0 stop 0 0 0 30 40 0 0 0.0 20 0",
+            "DONE 4 20 40.0 30.0 stop 0 0 0"])
+        svc = Service(engine, tok, glm_template())
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            for _ in range(3):
+                list(svc.run(tok.encode("hi"), False, None, 10, {}, threading.Event()))
+        rows = list(svc.history)
+        self.assertEqual([r["hit_rate"] for r in rows], [0.6, 0.75, None])
+        self.assertEqual((svc.totals["hits"], svc.totals["lookups"]), (90, 140))
+        self.assertIn("expert cache 60.0% hit", out.getvalue())
+        self.assertIn("expert cache 75.0% hit", out.getvalue())
+        self.assertEqual(out.getvalue().count("% hit"), 2)
+
+
 class SeveralGpus(unittest.TestCase):
     """Several GPUs in the config: the engine sees them all, in the order given, and splits the layers by each card's
-    VRAM unless the config's "split" says otherwise (#665's layer split and peer device were the Qwen engine's)."""
+    VRAM unless the config's "split" says otherwise."""
 
     def test_both_cards_visible(self):
         from serve.server import child_env
