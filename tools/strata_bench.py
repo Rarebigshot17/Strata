@@ -36,7 +36,6 @@ import os
 import platform
 import random
 import re
-import shutil
 import socket
 import statistics
 import subprocess

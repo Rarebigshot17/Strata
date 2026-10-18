@@ -1,6 +1,6 @@
-// 0.1.43 5.2: do two streams move host->device data faster than one (both copy engines)?  And what does one layer's
-// worth of expert-sized copies cost end to end (issue, copy, host function, sync)?
-//   nvcc -O2 -o h2d_bench tools/h2d_bench.cu && ./h2d_bench [device]
+// Do two streams move host->device data faster than one (both copy engines)?  And what does one layer's worth of
+// expert-sized copies cost end to end (issue, copy, host function, sync)?  Standalone: not part of the build.
+//   nvcc -O2 -o h2d_bench tools/h2d_bench.cu && ./h2d_bench [device] [bytes of one expert, default 1382400]
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <chrono>
@@ -14,15 +14,16 @@ static double ms_since(Clock::time_point t) { return std::chrono::duration<doubl
 
 int main(int argc, char** argv) {
     int dev = argc > 1 ? std::atoi(argv[1]) : 0;
+    const size_t blob = argc > 2 ? std::strtoull(argv[2], nullptr, 10) : 1382400;   // one expert's bytes
+    if (blob == 0) { std::printf("the expert size must be a positive number of bytes\n"); return 2; }
     CK(cudaSetDevice(dev));
     cudaDeviceProp p;
     CK(cudaGetDeviceProperties(&p, dev));
-    std::printf("%s asyncEngineCount=%d\n", p.name, p.asyncEngineCount);
-    const size_t blob = 1382400;                    // a Q2_0 expert
+    std::printf("%s asyncEngineCount=%d, %zu bytes per expert\n", p.name, p.asyncEngineCount, blob);
     const size_t nb = 256;                          // blobs in the arena
     const size_t arena_bytes = nb * blob;
     uint8_t* host = nullptr;
-    // like the engine's arena: plain pages registered with cudaHostRegister (PORTABLE)
+    // plain pages registered with cudaHostRegister (PORTABLE), as a store of experts in RAM would be
     host = (uint8_t*) aligned_alloc(2 << 20, (arena_bytes + (2 << 20) - 1) / (2 << 20) * (2 << 20));
     for (size_t i = 0; i < arena_bytes; i += 4096) host[i] = (uint8_t) i;
     CK(cudaHostRegister(host, arena_bytes, cudaHostRegisterPortable));
@@ -54,7 +55,7 @@ int main(int argc, char** argv) {
         }
         std::printf("big range %d stream(s): %.3f ms for %zu bytes = %.2f GB/s\n", nstreams, best, 64 * blob, 64 * blob / best / 1e6);
     }
-    // 2. per-layer latency: k blobs, then a host function, then wait for it (the engine's flag B)
+    // 2. per-layer latency: k blobs, then a host function on the stream that the CPU waits for
     for (int k : {1, 2, 4, 8, 16}) {
         for (int nstreams = 1; nstreams <= 2; ++nstreams) {
             std::vector<double> v;

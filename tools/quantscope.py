@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT OR Apache-2.0
-# From https://github.com/1872183316/quantscope (commit bfdf205), used by tools/strata_inspect.py and setup's --inspect.
+# From https://github.com/1872183316/quantscope (commit bfdf205); the examples below name Strata's model.
 """quantscope: find the real quantization of a model without downloading it.
 
 Reads only file headers (a few MB per file, via HTTP range requests) of GGUF or safetensors
@@ -9,10 +9,10 @@ type and bits per weight of every tensor group (routed experts, attention, embed
 File names such as "IQ4_XS" or "Q4_K_XL" are recipe labels; the header is the ground truth.
 
 Examples:
-  python quantscope.py ms:unsloth/Qwen3.8-Flash-Next-GGUF              # list variants
-  python quantscope.py ms:unsloth/Qwen3.8-Flash-Next-GGUF UD-Q4_K_XL   # one variant
-  python quantscope.py ms:unsloth/Qwen3.8-Flash-Next-GGUF --all        # compare all variants
-  python quantscope.py hf:Qwen/Qwen3-30B-A3B-GPTQ-Int4
+  python quantscope.py hf:unsloth/GLM-5.3-Flash-GGUF                  # list variants
+  python quantscope.py hf:unsloth/GLM-5.3-Flash-GGUF UD-IQ3_XXS       # one variant
+  python quantscope.py hf:unsloth/GLM-5.3-Flash-GGUF --all            # compare all variants
+  python quantscope.py hf:Qwen/Qwen3-30B-A3B-GPTQ-Int4                 # safetensors work too
   python quantscope.py models/model-00001-of-00003.gguf
 """
 
