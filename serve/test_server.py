@@ -1458,8 +1458,8 @@ class PrometheusMetrics(unittest.TestCase):
     def test_totals(self):
         tok = GlmTokenizer()
         engine = DoneLineEngine(tok, reply_text("", "ok"), max_context=CTX, done_lines=[
-            "DONE 4 20 400.0 200.0 stop 0 0 5",                 # 5 of the prompt's tokens reused
-            "DONE 4 20 400.0 200.0 stop 0 0 0"])
+            "DONE 4 20 400.0 200.0 stop 0 0 5 0 0 0 0 0.0 15 0",     # 5 of the prompt's tokens reused
+            "DONE 4 20 400.0 200.0 stop 0 0 0 0 0 0 0 0.0 20 0"])
         svc = Service(engine, tok, glm_template())
         httpd = serve(svc, port=0)
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
@@ -1916,7 +1916,7 @@ class LiveRate(unittest.TestCase):
         engine.max_context = 262144
         engine.prefill_tok_s_mean = 9999.0
         engine.lines.put("PP 10000 12000 2000 1000.0")  # 8000 cached, 2000 newly read in two seconds
-        engine.lines.put("DONE 1 12000 4000 10 stop 0 0 8000")
+        engine.lines.put("DONE 1 12000 4000 10 stop 0 0 8000 0 0 0 0 0.0 4000 0")
         gen = engine.generate([1], 1, {}, threading.Event())
         self.assertIsNone(next(gen))
         self.assertEqual(engine.progress, (10000, 12000))
@@ -1932,7 +1932,7 @@ class LiveRate(unittest.TestCase):
         timings = request_timings(12000, 1, engine.last)
         self.assertEqual(timings["prompt_per_second"], 1000.0)
         engine.lines.put("PP 8000 12000")
-        engine.lines.put("DONE 0 12000 0 0 stop 0 0 12000")
+        engine.lines.put("DONE 0 12000 0 0 stop 0 0 12000 0 0 0 0 0.0 0 0")
         gen = engine.generate([1], 1, {}, threading.Event())
         next(gen)
         self.assertIsNone(engine.prefill_tok_s_mean)
