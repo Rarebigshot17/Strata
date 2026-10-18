@@ -396,7 +396,15 @@ class FifoTests(unittest.TestCase):
             self.assertEqual(next(run), ("ping", None))  # a keep-alive while it waits
             self.assertEqual(svc.fifo.waiting(), 1)
             run.close()                                  # the client left
+            self.assertEqual((svc.fifo.waiting(), svc.status["queued"]), (0, 0))
+            cancel = threading.Event()
+            run = svc.run([1, 2], False, None, 8, {}, cancel)
+            self.assertEqual(next(run), ("ping", None))
+            cancel.set()                                 # cancelled while it waits: it ends without the turn
+            self.assertEqual([e[1]["finish"] for e in run], ["cancel"])
         self.assertEqual((svc.fifo.waiting(), svc.status["queued"]), (0, 0))
+        self.assertTrue(svc.fifo.locked())               # still the holder's: the cancelled one never took it
+        self.assertEqual(svc.engine.last_prompt, [])     # neither reached the engine
         svc.fifo.release()
         events = list(svc.run([1, 2], False, None, 8, {}, threading.Event()))   # the next one gets the turn
         self.assertEqual(events[-1][1]["finish"], "stop")

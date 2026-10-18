@@ -104,7 +104,7 @@ class FatalRecovery(unittest.TestCase):
         self.assertTrue(svc.engine.alive())
         self.assertTrue(svc.loaded())
         self.assertEqual(self.content(result), 'Z')
-        self.assertEqual(result[-1][1]['finish'], 'stop')
+        self.assertEqual((result[-1][1]['finish'], result[-1][1]['completion_tokens']), ('stop', 2))   # Z, <|user|>
 
     def test_internal_error_with_the_engine_still_running(self):
         # the engine caught the failure and dropped the request's state: it is not ended, the next request uses it
@@ -165,7 +165,8 @@ class FatalRecovery(unittest.TestCase):
         body['stream'] = False
         status, text = self.post(base, body)
         self.assertEqual(status, 200, text)
-        self.assertEqual(json.loads(text)['choices'][0]['message']['content'], 'Z')
+        reply = json.loads(text)
+        self.assertEqual((reply['choices'][0]['message']['content'], reply['usage']['completion_tokens']), ('Z', 2))
         self.assertTrue(self.health(base)['loaded'])
 
     def test_http_refusal_is_a_400_and_the_engine_stays(self):
