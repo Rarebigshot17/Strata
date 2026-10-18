@@ -3787,29 +3787,35 @@ class ThinkingBudget(unittest.TestCase):
 # ======================================== region C of the GLM test port (plan B3); keep this line ========================================
 
 
+from serve.frontend import CALL_START  # noqa: E402
+from serve.glm_fixtures import GlmTokenizer, call_text, glm_template, reply_text  # noqa: E402
+from serve.server import Fifo  # noqa: E402
+
+
 class CallingEngine(MockEngine):
     """Thinks, then answers in text - unless its prompt already opens a call (a forced tool_choice): then it finishes
     that call.  Records every prompt it is given."""
     THOUGHT = "I could look this up. " * 8                  # 176 reasoning tokens (one per byte)
     ANSWER = "The answer is 4."
-    ARGS = "<parameter=q>\n2+2\n</parameter>\n</function>\n</tool_call>"
+    CALL = call_text("search", q="2+2")
 
     def __init__(self, tok):
         super().__init__(tok, "x", max_context=CTX)
         self.prompts = []
 
-    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+    def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
         self.prompts.append(list(ids))
         prompt = self.tok.decode(ids)
-        if prompt.endswith("<function="):
-            text = "search>\n" + self.ARGS
-        elif prompt.endswith("<function=search>\n"):
-            text = self.ARGS
-        elif prompt.endswith("</think>\n\n"):
+        if prompt.endswith(CALL_START):
+            text = self.CALL[len(CALL_START):]
+        elif prompt.endswith(CALL_START + "search"):
+            text = self.CALL[len(CALL_START + "search"):]
+        elif prompt.endswith("</think>"):                   # thinking off: the generation prompt closed it
             text = self.ANSWER
         else:
-            text = self.THOUGHT + "</think>\n\n" + self.ANSWER
-        for t in (self.tok.encode(text) + self.tok.encode("<|im_end|>", parse_special=True))[:max_new]:
+            text = reply_text(self.THOUGHT, self.ANSWER)
+        end = "<|observation|>" if text.endswith("</tool_call>") else "<|user|>"    # GLM's turn ends
+        for t in (self.tok.encode(text) + self.tok.encode(end, parse_special=True))[:max_new]:
             if cancel.is_set():
                 return
             yield t
@@ -3826,9 +3832,9 @@ class ForcedToolChoice(unittest.TestCase):
     NO_THINKING = {"chat_template_kwargs": {"enable_thinking": False}}
 
     def setUp(self):
-        self.tok = ByteTokenizer()
+        self.tok = GlmTokenizer()
         self.engine = CallingEngine(self.tok)
-        self.svc = Service(self.engine, self.tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        self.svc = Service(self.engine, self.tok, glm_template())
         self.httpd = serve(self.svc, port=0)
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
 
@@ -3878,20 +3884,21 @@ class ForcedToolChoice(unittest.TestCase):
                     self.assertEqual((finish, calls), ("tool_calls", [("search", {"q": "2+2"})]))
                     self.assertEqual(reasoning, CallingEngine.THOUGHT)
                     first, second = self.engine.prompts
-                    opening = "<tool_call>\n<function=" + ("search>\n" if choice == self.NAMED else "")
-                    # where the thinking ended, after the blank line the template puts before a call
-                    self.assertEqual(second, first + self.tok.encode(CallingEngine.THOUGHT + "</think>\n\n" + opening))
+                    opening = CALL_START + ("search" if choice == self.NAMED else "")
+                    # where the thinking ended: GLM writes a call straight after </think>
+                    self.assertEqual(second, first + self.tok.encode(CallingEngine.THOUGHT + "</think>" + opening))
 
-    def test_a_thinking_that_ends_right_after_a_quote_opens_the_call(self):
-        # #537: that </think> waits for the character after it; the end of the turn makes it the end of the thinking
+    def test_a_thinking_that_ends_the_turn_opens_the_call(self):
+        # the reply's last token before the end of the turn is the </think> (after a quote, which Qwen's parser held
+        # back, #537): the thinking is over there and the call opens
         thought, calling = 'I will search for "2+2"', self.engine.generate
 
-        def generate(ids, max_new, sampling, cancel, embeddings=None):
-            if self.tok.decode(ids).endswith(("<function=", "<function=search>\n")):
+        def generate(ids, max_new, sampling, cancel, checkpoint=None):
+            if self.tok.decode(ids).endswith((CALL_START, CALL_START + "search")):
                 yield from calling(ids, max_new, sampling, cancel)
                 return
             self.engine.prompts.append(list(ids))
-            yield from self.tok.encode(thought + "</think>") + self.tok.encode("<|im_end|>", parse_special=True)
+            yield from self.tok.encode(thought + "</think>") + self.tok.encode("<|user|>", parse_special=True)
         self.engine.generate = generate
         for stream in (False, True):
             with self.subTest(stream=stream):
@@ -3900,7 +3907,7 @@ class ForcedToolChoice(unittest.TestCase):
                 finish, calls, reasoning = self.call_of(code, b, stream)
                 self.assertEqual((finish, calls, reasoning), ("tool_calls", [("search", {"q": "2+2"})], thought))
                 first, second = self.engine.prompts
-                self.assertEqual(second, first + self.tok.encode(thought + "</think>\n\n<tool_call>\n<function="))
+                self.assertEqual(second, first + self.tok.encode(thought + "</think>" + CALL_START))
 
     def test_without_thinking_the_prompt_ends_with_the_opening(self):
         for choice in ("required", self.NAMED):
@@ -3911,8 +3918,8 @@ class ForcedToolChoice(unittest.TestCase):
                     finish, calls, reasoning = self.call_of(code, b, stream)
                     self.assertEqual((finish, calls, reasoning), ("tool_calls", [("search", {"q": "2+2"})], ""))
                     self.assertEqual(len(self.engine.prompts), 1)
-                    opening = "<tool_call>\n<function=" + ("search>\n" if choice == self.NAMED else "")
-                    self.assertTrue(self.tok.decode(self.engine.prompts[0]).endswith("</think>\n\n" + opening))
+                    opening = CALL_START + ("search" if choice == self.NAMED else "")
+                    self.assertTrue(self.tok.decode(self.engine.prompts[0]).endswith("</think>" + opening))
 
     def test_the_budget_wrap_up_opens_the_call(self):
         from serve.server import REASONING_WRAP_UP
@@ -3921,7 +3928,7 @@ class ForcedToolChoice(unittest.TestCase):
         self.assertEqual((finish, calls), ("tool_calls", [("search", {"q": "2+2"})]))
         self.assertEqual(reasoning, CallingEngine.THOUGHT[:20] + REASONING_WRAP_UP.split("</think>")[0])
         first, second = self.engine.prompts
-        extra = self.tok.encode(REASONING_WRAP_UP + "<tool_call>\n<function=", parse_special=True)
+        extra = self.tok.encode(REASONING_WRAP_UP + CALL_START, parse_special=True)
         self.assertEqual(second, first + self.tok.encode(CallingEngine.THOUGHT[:20]) + extra)
 
     def test_auto_absent_and_none_leave_the_tools_to_the_model(self):
