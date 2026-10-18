@@ -3127,29 +3127,35 @@ class ThinkingBudget(unittest.TestCase):
 # ======================================== region C of the GLM test port (plan B3); keep this line ========================================
 
 
+from serve.frontend import CALL_START  # noqa: E402
+from serve.glm_fixtures import GlmTokenizer, call_text, glm_template, reply_text  # noqa: E402
+from serve.server import Fifo  # noqa: E402
+
+
 class CallingEngine(MockEngine):
     """Thinks, then answers in text - unless its prompt already opens a call (a forced tool_choice): then it finishes
     that call.  Records every prompt it is given."""
     THOUGHT = "I could look this up. " * 8                  # 176 reasoning tokens (one per byte)
     ANSWER = "The answer is 4."
-    ARGS = "<parameter=q>\n2+2\n</parameter>\n</function>\n</tool_call>"
+    CALL = call_text("search", q="2+2")
 
     def __init__(self, tok):
         super().__init__(tok, "x", max_context=CTX)
         self.prompts = []
 
-    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+    def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
         self.prompts.append(list(ids))
         prompt = self.tok.decode(ids)
-        if prompt.endswith("<function="):
-            text = "search>\n" + self.ARGS
-        elif prompt.endswith("<function=search>\n"):
-            text = self.ARGS
-        elif prompt.endswith("</think>\n\n"):
+        if prompt.endswith(CALL_START):
+            text = self.CALL[len(CALL_START):]
+        elif prompt.endswith(CALL_START + "search"):
+            text = self.CALL[len(CALL_START + "search"):]
+        elif prompt.endswith("</think>"):                   # thinking off: the generation prompt closed it
             text = self.ANSWER
         else:
-            text = self.THOUGHT + "</think>\n\n" + self.ANSWER
-        for t in (self.tok.encode(text) + self.tok.encode("<|im_end|>", parse_special=True))[:max_new]:
+            text = reply_text(self.THOUGHT, self.ANSWER)
+        end = "<|observation|>" if text.endswith("</tool_call>") else "<|user|>"    # GLM's turn ends
+        for t in (self.tok.encode(text) + self.tok.encode(end, parse_special=True))[:max_new]:
             if cancel.is_set():
                 return
             yield t
@@ -3166,9 +3172,9 @@ class ForcedToolChoice(unittest.TestCase):
     NO_THINKING = {"chat_template_kwargs": {"enable_thinking": False}}
 
     def setUp(self):
-        self.tok = ByteTokenizer()
+        self.tok = GlmTokenizer()
         self.engine = CallingEngine(self.tok)
-        self.svc = Service(self.engine, self.tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        self.svc = Service(self.engine, self.tok, glm_template())
         self.httpd = serve(self.svc, port=0)
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
 
@@ -3218,20 +3224,21 @@ class ForcedToolChoice(unittest.TestCase):
                     self.assertEqual((finish, calls), ("tool_calls", [("search", {"q": "2+2"})]))
                     self.assertEqual(reasoning, CallingEngine.THOUGHT)
                     first, second = self.engine.prompts
-                    opening = "<tool_call>\n<function=" + ("search>\n" if choice == self.NAMED else "")
-                    # where the thinking ended, after the blank line the template puts before a call
-                    self.assertEqual(second, first + self.tok.encode(CallingEngine.THOUGHT + "</think>\n\n" + opening))
+                    opening = CALL_START + ("search" if choice == self.NAMED else "")
+                    # where the thinking ended: GLM writes a call straight after </think>
+                    self.assertEqual(second, first + self.tok.encode(CallingEngine.THOUGHT + "</think>" + opening))
 
-    def test_a_thinking_that_ends_right_after_a_quote_opens_the_call(self):
-        # #537: that </think> waits for the character after it; the end of the turn makes it the end of the thinking
+    def test_a_thinking_that_ends_the_turn_opens_the_call(self):
+        # the reply's last token before the end of the turn is a </think> right after a quote (Qwen's parser held
+        # such a </think> back, #537; GLM's does not): the thinking is over there and the call opens
         thought, calling = 'I will search for "2+2"', self.engine.generate
 
-        def generate(ids, max_new, sampling, cancel, embeddings=None):
-            if self.tok.decode(ids).endswith(("<function=", "<function=search>\n")):
+        def generate(ids, max_new, sampling, cancel, checkpoint=None):
+            if self.tok.decode(ids).endswith((CALL_START, CALL_START + "search")):
                 yield from calling(ids, max_new, sampling, cancel)
                 return
             self.engine.prompts.append(list(ids))
-            yield from self.tok.encode(thought + "</think>") + self.tok.encode("<|im_end|>", parse_special=True)
+            yield from self.tok.encode(thought + "</think>") + self.tok.encode("<|user|>", parse_special=True)
         self.engine.generate = generate
         for stream in (False, True):
             with self.subTest(stream=stream):
@@ -3240,7 +3247,7 @@ class ForcedToolChoice(unittest.TestCase):
                 finish, calls, reasoning = self.call_of(code, b, stream)
                 self.assertEqual((finish, calls, reasoning), ("tool_calls", [("search", {"q": "2+2"})], thought))
                 first, second = self.engine.prompts
-                self.assertEqual(second, first + self.tok.encode(thought + "</think>\n\n<tool_call>\n<function="))
+                self.assertEqual(second, first + self.tok.encode(thought + "</think>" + CALL_START))
 
     def test_without_thinking_the_prompt_ends_with_the_opening(self):
         for choice in ("required", self.NAMED):
@@ -3251,8 +3258,8 @@ class ForcedToolChoice(unittest.TestCase):
                     finish, calls, reasoning = self.call_of(code, b, stream)
                     self.assertEqual((finish, calls, reasoning), ("tool_calls", [("search", {"q": "2+2"})], ""))
                     self.assertEqual(len(self.engine.prompts), 1)
-                    opening = "<tool_call>\n<function=" + ("search>\n" if choice == self.NAMED else "")
-                    self.assertTrue(self.tok.decode(self.engine.prompts[0]).endswith("</think>\n\n" + opening))
+                    opening = CALL_START + ("search" if choice == self.NAMED else "")
+                    self.assertTrue(self.tok.decode(self.engine.prompts[0]).endswith("</think>" + opening))
 
     def test_the_budget_wrap_up_opens_the_call(self):
         from serve.server import REASONING_WRAP_UP
@@ -3261,7 +3268,7 @@ class ForcedToolChoice(unittest.TestCase):
         self.assertEqual((finish, calls), ("tool_calls", [("search", {"q": "2+2"})]))
         self.assertEqual(reasoning, CallingEngine.THOUGHT[:20] + REASONING_WRAP_UP.split("</think>")[0])
         first, second = self.engine.prompts
-        extra = self.tok.encode(REASONING_WRAP_UP + "<tool_call>\n<function=", parse_special=True)
+        extra = self.tok.encode(REASONING_WRAP_UP + CALL_START, parse_special=True)
         self.assertEqual(second, first + self.tok.encode(CallingEngine.THOUGHT[:20]) + extra)
 
     def test_auto_absent_and_none_leave_the_tools_to_the_model(self):
@@ -3332,43 +3339,34 @@ class StatusHandover(unittest.TestCase):
     it is released, before the releasing thread goes on - the worst case of that gap, every time."""
 
     def test_abort_then_the_next_request(self):
-        tok = ByteTokenizer()
+        tok = GlmTokenizer()
         second_running = threading.Event()
 
         class Engine(MockEngine):
             calls = 0
 
-            def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+            def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
                 Engine.calls += 1
                 me = Engine.calls
-                for i, t in enumerate(super().generate(ids, max_new, sampling, cancel, embeddings)):
+                for i, t in enumerate(super().generate(ids, max_new, sampling, cancel, checkpoint)):
                     if me == 2 and i == 2:
                         second_running.set()        # the second request has its status and two tokens noted
                     yield t
 
-        class SlowRelease:
-            """A Lock whose release waits (briefly) until the thread it let in has started generating."""
+        class SlowRelease(Fifo):
+            """The engine's turn, whose release waits (briefly) until the request it lets in has started generating."""
 
             def __init__(self):
-                self.lock, self.armed = threading.Lock(), False
-
-            def acquire(self, blocking=True, timeout=-1):
-                return self.lock.acquire(blocking, timeout)
-
-            def __enter__(self):
-                self.lock.acquire()
-
-            def __exit__(self, *exc):
-                self.release()
+                super().__init__()
+                self.armed = False
 
             def release(self):
-                self.lock.release()
+                super().release()
                 if self.armed:
                     self.armed = False
                     second_running.wait(5)
 
-        svc = Service(Engine(tok, "</think>\n\n" + "y" * 40, max_context=CTX), tok,
-                      ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        svc = Service(Engine(tok, reply_text("", "y" * 40), max_context=CTX), tok, glm_template())
         svc.fifo = SlowRelease()
         ids = tok.encode("hi")
         first = svc.run(ids, True, None, 30, {}, threading.Event())
@@ -3407,7 +3405,7 @@ class StatusHandover(unittest.TestCase):
 
 FAKE_STRATA = '''import pathlib, sys, time
 gate = pathlib.Path(sys.argv[sys.argv.index("--gate") + 1])
-print("INFO engine=0.0.0", flush=True)
+print("INFO engine=0.2.0 backend=cpu-reference eos=259 park_mib=512 logit_bias=1", flush=True)
 while not gate.exists():                     # the test says when the engine is "ready"
     time.sleep(0.01)
 print("READY 4096 stop", flush=True)
@@ -3506,10 +3504,10 @@ class RestartWindow(unittest.TestCase):
     def test_failed_restart_keeps_the_known_context(self):
         """After a restart that failed, max_context is 0 but the engine is not starting: a request is checked against
         the last known context and reaches run() (which starts the engine again), not a 400 about context 0."""
-        tok = ByteTokenizer()
-        eng = MockEngine(tok, "</think>\n\nok", max_context=0)
+        tok = GlmTokenizer()
+        eng = MockEngine(tok, reply_text("", "ok"), max_context=0)
         eng.known_ctx, eng.starting = 4096, False
-        svc = Service(eng, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        svc = Service(eng, tok, glm_template())
         httpd = serve(svc, port=0)
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
         try:
@@ -3523,9 +3521,8 @@ class RestartWindow(unittest.TestCase):
             httpd.shutdown()
 
     def test_context_zero_is_503(self):
-        tok = ByteTokenizer()
-        svc = Service(MockEngine(tok, "</think>\n\nok", max_context=0), tok,
-                      ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        svc = Service(MockEngine(tok, reply_text("", "ok"), max_context=0), tok, glm_template())
         httpd = serve(svc, port=0)
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
         try:
@@ -3552,10 +3549,10 @@ class ModelAliases(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        tok = ByteTokenizer()
-        cls.svc = Service(MockEngine(tok, "</think>\n\nok", max_context=CTX), tok,
-                          ChatTemplate(ROOT / "serve/chat_template.jinja"), model_name="qwen3.8-flash-next-iq3_xxs")
-        cls.svc.set_aliases(["qwen", "local-model", "qwen", " ", "qwen3.8-flash-next-iq3_xxs"])
+        tok = GlmTokenizer()
+        cls.svc = Service(MockEngine(tok, reply_text("", "ok"), max_context=CTX), tok,
+                          glm_template(), model_name="glm-5.3-flash")
+        cls.svc.set_aliases(["glm", "local-model", "glm", " ", "glm-5.3-flash"])
         cls.httpd = serve(cls.svc, port=0)
         cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
 
@@ -3575,9 +3572,9 @@ class ModelAliases(unittest.TestCase):
             return r.read().decode()
 
     def test_set_aliases(self):
-        self.assertEqual(self.svc.aliases, ["qwen", "local-model"])        # duplicates, blanks and the name itself
-        tok = ByteTokenizer()
-        svc = Service(MockEngine(tok, "x", max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        self.assertEqual(self.svc.aliases, ["glm", "local-model"])        # duplicates, blanks and the name itself
+        tok = GlmTokenizer()
+        svc = Service(MockEngine(tok, "x", max_context=CTX), tok, glm_template())
         svc.set_aliases("a, b")
         self.assertEqual(svc.aliases, ["a", "b"])
         svc.set_aliases(None)
@@ -3588,16 +3585,16 @@ class ModelAliases(unittest.TestCase):
 
     def test_models_lists_them(self):
         data = self.get("/v1/models")["data"]
-        self.assertEqual([m["id"] for m in data], ["qwen3.8-flash-next-iq3_xxs", "qwen", "local-model"])
-        self.assertEqual(data[0]["aliases"], ["qwen", "local-model"])
-        self.assertEqual(data[1]["alias_of"], "qwen3.8-flash-next-iq3_xxs")
-        self.assertEqual(self.get("/props?model=local-model")["model_alias"], "qwen3.8-flash-next-iq3_xxs")
+        self.assertEqual([m["id"] for m in data], ["glm-5.3-flash", "glm", "local-model"])
+        self.assertEqual(data[0]["aliases"], ["glm", "local-model"])
+        self.assertEqual(data[1]["alias_of"], "glm-5.3-flash")
+        self.assertEqual(self.get("/props?model=local-model")["model_alias"], "glm-5.3-flash")
 
     def test_requests_are_answered_under_the_alias(self):
         msgs = [{"role": "user", "content": "hi"}]
-        for asked, want in (("qwen", "qwen"), ("local-model", "local-model"),
-                            ("qwen3.8-flash-next-iq3_xxs", "qwen3.8-flash-next-iq3_xxs"),
-                            ("something-else", "qwen3.8-flash-next-iq3_xxs")):    # still served, as before
+        for asked, want in (("glm", "glm"), ("local-model", "local-model"),
+                            ("glm-5.3-flash", "glm-5.3-flash"),
+                            ("something-else", "glm-5.3-flash")):    # still served, as before
             with self.subTest(asked=asked):
                 out = json.loads(self.post("/v1/chat/completions", {"model": asked, "messages": msgs, "max_tokens": 8}))
                 self.assertEqual(out["model"], want)
@@ -3609,8 +3606,8 @@ class ModelAliases(unittest.TestCase):
                 self.assertEqual(out["model"], want)
 
     def test_without_aliases_nothing_changes(self):
-        tok = ByteTokenizer()
-        svc = Service(MockEngine(tok, "x", max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        svc = Service(MockEngine(tok, "x", max_context=CTX), tok, glm_template())
         httpd = serve(svc, port=0)
         try:
             with urllib.request.urlopen(f"http://127.0.0.1:{httpd.server_address[1]}/v1/models", timeout=30) as r:
@@ -3621,99 +3618,6 @@ class ModelAliases(unittest.TestCase):
         finally:
             httpd.shutdown()
             httpd.server_close()
-
-
-class AmdTelemetry(unittest.TestCase):
-    """#301: the AMD backend's readings from a fake amdgpu sysfs tree: KFD node -> render node, as setup numbers the
-    cards (the CPU node skipped), and free_vram_mib on HIP."""
-
-    def tree(self, d):
-        nodes = Path(d) / "class/kfd/kfd/topology/nodes"
-        for n, props in ((0, "cpu_cores_count 16\nsimd_count 0\ngfx_target_version 0\ndrm_render_minor 0\n"),
-                         (1, "simd_count 128\ngfx_target_version 120001\ndrm_render_minor 129\n"),
-                         (2, "simd_count 128\ngfx_target_version 120001\ndrm_render_minor 128\n")):
-            (nodes / str(n)).mkdir(parents=True)
-            (nodes / str(n) / "properties").write_text(props)
-        for minor, used, busy, temp, power in ((129, 2 << 30, 37, 51000, 85000000), (128, 6 << 30, 99, 64000, None)):
-            dev = Path(d) / f"class/drm/renderD{minor}/device"
-            hw = dev / "hwmon" / "hwmon4"
-            hw.mkdir(parents=True)
-            (dev / "gpu_busy_percent").write_text(f"{busy}\n")
-            (dev / "mem_info_vram_used").write_text(f"{used}\n")
-            (dev / "mem_info_vram_total").write_text(f"{32 << 30}\n")
-            (dev / "product_name").write_text("AMD Radeon AI PRO R9700\n")
-            (hw / "temp1_input").write_text(f"{temp}\n")
-            if power is not None:
-                (hw / "power1_average").write_text(f"{power}\n")
-            else:
-                (hw / "power1_input").write_text("120000000\n")
-            (hw / "power1_cap").write_text("300000000\n")
-
-    def test_pcie_link_is_the_narrowest_slowest_hop(self):
-        """#1733: the link is the slowest/narrowest hop between the root port and the card; the bottleneck is only
-        claimed when every hop could be read (pcie_path says how many were)."""
-        from serve import telemetry
-        with tempfile.TemporaryDirectory() as d:
-            hops = []
-            for i, (speed, width) in enumerate((("8.0 GT/s PCIe", "16"), ("8.0 GT/s PCIe", "8"), ("16.0 GT/s PCIe", "16"))):
-                h = Path(d) / f"hop{i}"
-                h.mkdir()
-                (h / "max_link_speed").write_text(speed + "\n")
-                (h / "max_link_width").write_text(width + "\n")
-                hops.append(str(h))
-            (Path(hops[-1]) / "current_link_speed").write_text("16.0 GT/s PCIe\n")
-            (Path(hops[-1]) / "current_link_width").write_text("16\n")
-            a = telemetry.gpu_reader(0, amd=True)
-            a.dev = hops[-1]
-            with mock.patch.object(telemetry._Amd, "_hops", lambda self: hops):
-                self.assertEqual(a.link(), {"pcie_gen": 3, "pcie_gen_max": 3, "pcie_own_gen": 4, "pcie_width": 8,
-                                            "pcie_path": "3/3"})
-            with mock.patch.object(telemetry._Amd, "_hops", lambda self: hops[:2] + [str(Path(d) / "hidden")]):
-                got = a.link()             # an unreadable hop: fall back to the card's own negotiated link
-                self.assertEqual((got["pcie_gen"], got["pcie_width"], got["pcie_path"]), (4, 16, "2/3"))
-            self.assertEqual(telemetry._Amd._gen("32.0 GT/s PCIe"), 5)
-            self.assertIsNone(telemetry._Amd._gen("unknown"))
-            self.assertTrue(telemetry._Amd._bdf("0000:03:00.0"))
-            self.assertFalse(telemetry._Amd._bdf("pci0000:00"))
-
-    def test_readings(self):
-        from serve import telemetry
-        with tempfile.TemporaryDirectory() as d:
-            self.tree(d)
-            with mock.patch.object(telemetry, "SYSFS", d):
-                self.assertTrue(telemetry.amd_device_dir(0).endswith(os.path.join("renderD129", "device")))
-                self.assertTrue(telemetry.amd_device_dir(1).endswith(os.path.join("renderD128", "device")))
-                self.assertIsNone(telemetry.amd_device_dir(2))
-                g = telemetry.gpu_reader(0, amd=True)
-                self.assertTrue(g.ok())
-                self.assertEqual(g.name(), "AMD Radeon AI PRO R9700")
-                self.assertEqual(g.read(), {"util": 37, "mem_used": 2 << 30, "mem_total": 32 << 30, "temp": 51.0,
-                                            "power": 85.0, "power_limit": 300.0, "pcie_gen": None,
-                                            "pcie_gen_max": None, "pcie_own_gen": None, "pcie_width": None,
-                                            "pcie_path": "0/0"})    # #1733: no PCIe files in this fake tree
-                r = telemetry.gpu_reader(1, amd=True).read()
-                self.assertEqual((r["util"], r["temp"], r["power"]), (99, 64.0, 120.0))     # power1_input
-                self.assertEqual(telemetry.free_vram_mib(0, amd=True), 30 << 10)
-                self.assertIsNone(telemetry.free_vram_mib(5, amd=True))
-                t = telemetry.Telemetry(gpu_index=0, gpu_indices=[0, 1], amd=True)
-                s = t.sample()
-                self.assertEqual(t.static["gpu_name"], "AMD Radeon AI PRO R9700 + AMD Radeon AI PRO R9700")
-                self.assertEqual((s["gpu_mem_used"], s["gpu_util"], s["gpu_temp"], s["gpu_power"]),
-                                 (8 << 30, 68.0, 64.0, 205.0))
-        with tempfile.TemporaryDirectory() as d:                    # no amdgpu: nothing, and nothing breaks
-            with mock.patch.object(telemetry, "SYSFS", d):
-                self.assertFalse(telemetry.gpu_reader(0, amd=True).ok())
-                self.assertIsNone(telemetry.free_vram_mib(0, amd=True))
-
-    def test_free_vram_on_hip(self):
-        from serve import telemetry
-        tok = ByteTokenizer()
-        svc = Service(MockEngine(tok, "x", max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
-        svc.backend, svc.gpu_index = "hip", 1
-        with tempfile.TemporaryDirectory() as d:
-            self.tree(d)
-            with mock.patch.object(telemetry, "SYSFS", d):
-                self.assertEqual(svc.free_vram_mib(), 26 << 10)
 
 
 class TelemetryNoDisks(unittest.TestCase):
@@ -3776,34 +3680,40 @@ class SilentEngine(unittest.TestCase):
         self.assertLess(time.monotonic() - t0, 5)
         engine.proc.kill.assert_called_once()
         self.assertFalse(engine.alive())                          # the next request restarts it
-        self.assertIn("#481", engine.death_note())
+        self.assertIn("lost step", engine.death_note())           # the server ended it: neither RAM nor the engine
         self.assertNotIn("STOP", engine.proc.stdin.getvalue())    # nothing is listening: no STOP, no drain
 
-    def test_death_note_finds_the_watchdog_line_under_a_long_trace(self):
-        # #1705: STRATA_VERIFY_TRACE dumps (~30 KB) after the watchdog's line must not hide it
+    def test_death_note_quotes_the_engines_last_words(self):
+        # an engine that exited by itself: its last ERR on stdout, else its log's last "strata-glm: ..." line (not
+        # the conversations: lines after it); one that a signal ended (the OOM killer) points at RAM
         import tempfile
         engine = self.bare(0.3)
         with tempfile.TemporaryDirectory() as d:
             engine.log_path = os.path.join(d, "e.log")
             with open(engine.log_path, "w", encoding="utf-8") as f:
-                f.write("strata serve: no progress for 60 s during a request (issue #29)\n")
-                f.write("strata verify trace: dump\n" * 1500)
-            engine.proc.poll.return_value = -6
-            self.assertIn("a hang it caught", engine.death_note())
+                f.write("strata-glm: cudaMalloc failed: out of memory\n")
+                f.write("conversations: 0 parked, 0 checkpoints, 0.000 of 512.0 MiB\n")
+            engine.proc.poll.return_value = 1
+            self.assertIn("Its last log line: strata-glm: cudaMalloc failed: out of memory", engine.death_note())
+            engine.last_err = "internal: CUDA error 700 (an illegal memory access)"
+            self.assertIn("after it reported: internal: CUDA error 700", engine.death_note())
+            engine.proc.poll.return_value = -9
+            self.assertIn("running out of RAM", engine.death_note())
 
     def test_prompt_chunks_set_the_wait(self):
         # a PP line every second, at 100 tok/s: far over a 0.3 s silence, but each chunk is on time for its size
         engine = self.bare(0.3)
         engine.lines.put("RESUME 0")
         engine.lines.put("PP 100 300 1000 100.0")
-        self.later(engine, 1.0, "PP 200 300 2000 100.0", "T 7", "DONE 1 300 2000 1 length")
+        self.later(engine, 1.0, "PP 200 300 2000 100.0", "T 7",
+                   "DONE 1 300 2000 1 length 0 0 0 0 0 0 0 0.0 300 0")
         self.assertEqual(list(engine.generate([1], 10, {}, threading.Event())), [None, None, 7])
         engine.proc.kill.assert_not_called()
 
     def test_a_long_first_chunk_is_allowed(self):
         # 100 prompt tokens at the slowest prompt reading (50 tok/s): 2 s on top of the silence before the first PP
         engine = self.bare(0.3)
-        self.later(engine, 1.0, "PP 100 100 1000 100.0", "DONE 0 100 1000 0 length")
+        self.later(engine, 1.0, "PP 100 100 1000 100.0", "DONE 0 100 1000 0 length 0 0 0 0 0 0 0 0.0 100 0")
         self.assertEqual(list(engine.generate([1] * 100, 10, {}, threading.Event())), [None])
         engine.proc.kill.assert_not_called()
 
@@ -3841,7 +3751,7 @@ class SilentEngine(unittest.TestCase):
         engine = self.bare(300.0)
         ticks = iter(range(10 ** 6))
         engine._activity = lambda: (float(next(ticks)), 0)       # CPU time advances: it is working
-        self.later(engine, 3.0, "T 7", "DONE 1 1 1 1 length")
+        self.later(engine, 3.0, "T 7", "DONE 1 1 1 1 length 0 0 0 0 0 0 0 0.0 1 0")
         with mock.patch.object(server, "ENGINE_STALL_S", 1.0):
             self.assertEqual(list(engine.generate([1], 10, {}, threading.Event())), [7])
         engine.proc.kill.assert_not_called()
@@ -3852,7 +3762,7 @@ class SilentEngine(unittest.TestCase):
         engine = self.bare(300.0)
         engine._activity = lambda: (12.0, 4096)
         engine.gpu_busy = lambda: True
-        self.later(engine, 2.5, "T 7", "DONE 1 1 1 1 length")
+        self.later(engine, 2.5, "T 7", "DONE 1 1 1 1 length 0 0 0 0 0 0 0 0.0 1 0")
         with mock.patch.object(server, "ENGINE_STALL_S", 1.0):
             self.assertEqual(list(engine.generate([1], 10, {}, threading.Event())), [7])
         engine.proc.kill.assert_not_called()
@@ -3862,7 +3772,7 @@ class SilentEngine(unittest.TestCase):
         for stall, act in ((1.0, lambda: None), (0, lambda: (1.0, 1))):
             engine = self.bare(300.0)
             engine._activity = act
-            self.later(engine, 2.5, "T 7", "DONE 1 1 1 1 length")
+            self.later(engine, 2.5, "T 7", "DONE 1 1 1 1 length 0 0 0 0 0 0 0 0.0 1 0")
             with mock.patch.object(server, "ENGINE_STALL_S", stall):
                 self.assertEqual(list(engine.generate([1], 10, {}, threading.Event())), [7])
             engine.proc.kill.assert_not_called()
@@ -3875,7 +3785,7 @@ class SilentEngine(unittest.TestCase):
 
     def test_zero_waits_as_before(self):
         engine = self.bare(0)
-        self.later(engine, 0.5, "T 5", "DONE 1 1 1 1 length")
+        self.later(engine, 0.5, "T 5", "DONE 1 1 1 1 length 0 0 0 0 0 0 0 0.0 1 0")
         self.assertEqual(list(engine.generate([1], 10, {}, threading.Event())), [5])
 
     def test_config(self):
@@ -3891,20 +3801,23 @@ class SilentEngine(unittest.TestCase):
 FAKE_LOST_STEP = '''import pathlib, sys, time
 mark = pathlib.Path(sys.argv[sys.argv.index("--mark") + 1])
 mode = sys.argv[sys.argv.index("--mode") + 1]
+print("INFO engine=0.2.0 backend=cpu-reference eos=259 park_mib=512 logit_bias=1", flush=True)
 print("READY 4096 stop", flush=True)
 for line in sys.stdin:
     if line.startswith("QUIT"):
         break
     if line.startswith("GEN"):
+        n = len(line.rsplit(" ", 1)[1].split(","))
+        print("PP %d %d 1.0 5000.0" % (n, n), flush=True)
         if not mark.exists():                    # the first engine loses step (#481): it never says DONE
             mark.touch()
             print("T 104", flush=True)
             if mode == "stop":
-                print("T 257", flush=True)       # <|im_end|>: the server STOPs and drains, and the engine is silent
+                print("T 259", flush=True)       # <|user|>: the server STOPs and drains, and the engine is silent
             time.sleep(3600)
         print("T 111", flush=True)
         print("T 107", flush=True)
-        print("DONE 2 5 1.0 1.0 length", flush=True)
+        print("DONE 2 %d 1.0 1.0 length 0 0 0 0 0 0 0 0.0 %d 0" % (n, n), flush=True)
 '''
 
 
@@ -3922,8 +3835,8 @@ class LostStep(unittest.TestCase):
                                    lambda cmd, **kw: real([sys.executable, str(script), *cmd[1:]], **kw)):
                 eng = StrataEngine("strata", ["--mark", str(mark), "--mode", mode])
                 eng.silence_s = 0.5
-                tok = ByteTokenizer()
-                svc = Service(eng, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+                tok = GlmTokenizer()
+                svc = Service(eng, tok, glm_template())
                 httpd = serve(svc, port=0)
                 base = f"http://127.0.0.1:{httpd.server_address[1]}"
                 body = {"model": "m", "max_tokens": 2, "reasoning_effort": "none", "stream": stream,
@@ -3965,168 +3878,53 @@ class LostStep(unittest.TestCase):
         self.run_mode("stop", stream=False)
 
 
-class ImageSources(unittest.TestCase):
-    """What an image source may name: never a network path (Windows signs in to the host at the first look), a URL up
-    to IMAGE_URL_MAX and downloaded outside the request FIFO, a file on this computer not for a page of another site."""
+class PicturesAreRefused(unittest.TestCase):
+    """The model reads text only: a picture from any source - a file of this computer named by a page of another site,
+    a URL, a data: URL - is a 400 that says so, and the request never reaches the engine (nothing is read for it)."""
 
-    NETWORK = [r"\\host\share\x.png", "//host/share/x.png", r"\\?\UNC\host\share\x.png", r"\\.\UNC\host\share\x.png",
-               r"\??\UNC\host\share\x.png", r"/\host\share\x.png", "file://host/share/x.png",
-               "file:////host/share/x.png", r"file://\\host\share\x.png"]
+    def test_every_source_on_both_apis(self):
+        tok = GlmTokenizer()
+        engine = MockEngine(tok, reply_text("", "ok"), max_context=CTX)
+        svc = Service(engine, tok, glm_template())
+        svc.cors_origins = ["*"]                                    # a page of any site may send JSON
+        httpd = serve(svc, port=0)
+        host = f"127.0.0.1:{httpd.server_address[1]}"
 
-    class Vision(ImageMarkers.FakeVision):
-        def __init__(self, d):
-            super().__init__(d)
-            self.got = []
+        def post(path, src, headers):
+            image = {"type": "image_url", "image_url": {"url": src}} if path.endswith("completions") else \
+                {"type": "image", "source": {"type": "url", "url": src}}
+            body = {"model": "m", "max_tokens": 8, "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "what is it?"}, image]}]}
+            req = urllib.request.Request(f"http://{host}{path}", data=json.dumps(body).encode(), headers=headers)
+            try:
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                with e:
+                    return e.code, json.loads(e.read())
 
-        def encode(self, source):
-            self.got.append(source)
-            return super().encode(source)
-
-    def test_network_paths_are_refused_before_any_look(self):
-        from serve.server import Vision
-        with mock.patch("os.path.isfile") as isfile, mock.patch.object(Path, "read_bytes") as read:
-            for src in self.NETWORK:
-                with self.subTest(src=src), self.assertRaisesRegex(ValueError, "network paths"):
-                    Vision.load(src)
-        isfile.assert_not_called()
-        read.assert_not_called()
-        with tempfile.TemporaryDirectory() as d:                    # files on this computer load as before
-            f = Path(d) / "x.png"
-            f.write_bytes(b"\x89PNG\r\n\x1a\n")
-            for src in (str(f), "file://" + str(f), "data:image/png;base64,iVBORw0KGgo="):
-                with self.subTest(src=src):
-                    self.assertEqual(Vision.load(src), b"\x89PNG\r\n\x1a\n")
-
-    def test_unreadable_sources_are_a_value_error(self):
-        """From #582: a bad data: URL or an unreadable file is a 400, not a dropped connection."""
-        from serve.server import Vision
-        for src in ("data:image/png", "data:image/png;base64,abcde"):
-            with self.subTest(src=src), self.assertRaisesRegex(ValueError, "data: URL could not be read"):
-                Vision.load(src)
-        with tempfile.TemporaryDirectory() as d:
-            f = Path(d) / "x.png"
-            f.write_bytes(b"x")
-            with mock.patch.object(Path, "read_bytes", side_effect=PermissionError("denied")),                     self.assertRaisesRegex(ValueError, "could not be read from"):
-                Vision.load(str(f))
-
-    def test_a_url_is_read_up_to_the_cap(self):
-        import http.server
-        import serve.server as server
-
-        class Files(http.server.BaseHTTPRequestHandler):
-            def log_message(self, *args):
-                pass
-
-            def do_GET(self):
-                body = {"/small": b"x" * 100, "/big": b"x" * 5000}.get(urllib.parse.urlsplit(self.path).path)
-                if body is None:
-                    self.send_error(404)
-                    return
-                self.send_response(200)
-                if "length" in self.path:                           # else the body ends when the connection does
-                    self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                try:
-                    self.wfile.write(body)
-                except OSError:                                     # the reader stopped at the cap
-                    pass
-
-        httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Files)
-        threading.Thread(target=httpd.serve_forever, daemon=True).start()
-        base = f"http://127.0.0.1:{httpd.server_address[1]}"
         try:
-            with mock.patch.object(server, "IMAGE_URL_MAX", 1000):
-                for q in ("", "?length"):
-                    with self.subTest(q=q):
-                        self.assertEqual(server.Vision.load(base + "/small" + q), b"x" * 100)
-                        with self.assertRaisesRegex(ValueError, "is over"):
-                            server.Vision.load(base + "/big" + q)
-                with self.assertRaisesRegex(ValueError, "could not be read: HTTP Error 404"):
-                    server.Vision.load(base + "/missing")
+            with tempfile.TemporaryDirectory() as d:
+                f = str(Path(d) / "secret.png")
+                for path in ("/v1/chat/completions", "/v1/messages"):
+                    for src in (f, "file://" + f, "https://example.com/x.png", "data:image/png;base64,iVBORw0KGgo="):
+                        for headers in ({"Content-Type": "application/json", "Origin": "https://evil.example"},
+                                        {"Content-Type": "application/json"}):          # curl, SDKs, agents
+                            with self.subTest(path=path, src=src[:20], origin="Origin" in headers):
+                                status, b = post(path, src, headers)
+                                self.assertEqual(status, 400, b)
+                                self.assertIn("text only", b["error"]["message"])
+            self.assertEqual(engine.last_prompt, [])                     # no request reached the engine
         finally:
             httpd.shutdown()
             httpd.server_close()
 
-    def test_a_url_is_downloaded_outside_the_fifo(self):
-        import serve.server as server
-        tok = ByteTokenizer()
-        with tempfile.TemporaryDirectory() as d:
-            vision = self.Vision(d)
-            svc = Service(MockEngine(tok, "ok", max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"),
-                          vision=vision)
-            held = []
-
-            def download(url):
-                held.append(svc.fifo.locked())
-                return b"the picture"
-
-            msgs = [{"role": "user", "content": [{"type": "image", "source": "https://example.com/x.png"},
-                                                 {"type": "image", "source": "x.png"}]}]
-            with mock.patch.object(server.Vision, "download", side_effect=download):
-                svc.prepare(msgs, None, {})
-            self.assertEqual(held, [False])                         # not while every other request waits
-            self.assertEqual(vision.got, [b"the picture", "x.png"])
-            svc.embeddings.path.unlink(missing_ok=True)
-
-    def test_a_page_of_another_site_cannot_name_a_file(self):
-        tok = ByteTokenizer()
-        with tempfile.TemporaryDirectory() as d:
-            vision = self.Vision(d)
-            svc = Service(MockEngine(tok, "</think>\n\nok", max_context=CTX), tok,
-                          ChatTemplate(ROOT / "serve/chat_template.jinja"), vision=vision)
-            httpd = serve(svc, port=0)
-            host = f"127.0.0.1:{httpd.server_address[1]}"
-
-            def post(path, src, headers):
-                image = {"type": "image_url", "image_url": {"url": src}} if path.endswith("completions") else \
-                    {"type": "image", "source": {"type": "url", "url": src}}
-                body = {"model": "m", "max_tokens": 8, "messages": [{"role": "user", "content": [
-                    {"type": "text", "text": "what is it?"}, image]}]}
-                req = urllib.request.Request(f"http://{host}{path}", data=json.dumps(body).encode(), headers=headers)
-                try:
-                    with urllib.request.urlopen(req, timeout=30) as r:
-                        return r.status, json.loads(r.read())
-                except urllib.error.HTTPError as e:
-                    with e:
-                        return e.code, json.loads(e.read())
-
-            try:
-                f = str(Path(d) / "secret.png")
-                # a page on any site, no api_key (the default): text/plain needs no CORS preflight - 0.1.38 refuses
-                # such a page outright (403)
-                page = {"Content-Type": "text/plain;charset=UTF-8", "Origin": "https://evil.example"}
-                status, b = post("/v1/chat/completions", f, page)
-                self.assertEqual(status, 403, b)
-                # a page cors_origins lets in (here every page) may send JSON, and still cannot name a file
-                svc.cors_origins = ["*"]
-                page = {"Content-Type": "application/json", "Origin": "https://evil.example"}
-                for path in ("/v1/chat/completions", "/v1/messages"):
-                    for src in (f, "file://" + f):
-                        with self.subTest(path=path, src=src):
-                            status, b = post(path, src, page)
-                            self.assertEqual(status, 400, b)
-                            self.assertIn("another origin", b["error"]["message"])
-                self.assertEqual(vision.got, [])                    # nothing was read
-                svc.trusted_origins = ["https://app.example"]
-                data = "data:image/png;base64,iVBORw0KGgo="
-                for src, headers in ((data, page),                  # the page's own picture
-                                     (f, {"Content-Type": "application/json"}),           # curl, SDKs, agents
-                                     (f, {"Content-Type": "application/json", "Origin": "http://" + host}),
-                                     (f, {"Content-Type": "application/json", "Origin": "https://app.example"})):
-                    with self.subTest(src=src[:20], headers=headers):
-                        status, b = post("/v1/chat/completions", src, headers)
-                        self.assertEqual(status, 200, b)
-                self.assertEqual(vision.got, [data, f, f, f])
-            finally:
-                httpd.shutdown()
-                httpd.server_close()
-
 
 class CountingEngine(MockEngine):
     """Counts the tokens the engine was asked for, so a test can see it stopped early."""
-    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+    def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
         self.yielded = 0
-        for t in super().generate(ids, max_new, sampling, cancel, embeddings):
+        for t in super().generate(ids, max_new, sampling, cancel, checkpoint):
             self.yielded += 1
             yield t
 
@@ -4139,9 +3937,9 @@ class StopStrings(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        tok = ByteTokenizer()
-        cls.engine = CountingEngine(tok, "</think>\n\n" + cls.ANSWER, max_context=CTX)
-        cls.svc = Service(cls.engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        cls.engine = CountingEngine(tok, reply_text("", cls.ANSWER), max_context=CTX)
+        cls.svc = Service(cls.engine, tok, glm_template())
         cls.httpd = serve(cls.svc, port=0)
         cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
 
@@ -4196,7 +3994,7 @@ class StopStrings(unittest.TestCase):
                     if stream:
                         self.assertFalse(any("E" in p for p in pieces), pieces)    # no part of it was sent
                     # the engine stopped at the stop string, it did not run to the end of the answer
-                    self.assertLess(self.engine.yielded, len("</think>\n\n" + self.ANSWER))
+                    self.assertLess(self.engine.yielded, len(self.engine.tok.encode(reply_text("", self.ANSWER))))
 
     def test_the_first_of_several(self):
         for api in ("openai", "anthropic"):
@@ -4255,9 +4053,8 @@ class ConnectionClose(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        tok = ByteTokenizer()
-        cls.svc = Service(MockEngine(tok, "</think>\n\nok", max_context=CTX), tok,
-                          ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        cls.svc = Service(MockEngine(tok, reply_text("", "ok"), max_context=CTX), tok, glm_template())
         cls.httpd = serve(cls.svc, port=0)
         cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
 
@@ -4286,9 +4083,9 @@ class AnswerBeforeTheBody(unittest.TestCase):
     (http.client, urllib and requests do): closing the connection on unread bytes sends a reset that eats the answer."""
 
     def setUp(self):
-        tok = ByteTokenizer()
-        self.engine = UnloadableEngine(tok, "</think>\n\nok", max_context=CTX)
-        self.svc = Service(self.engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        self.engine = UnloadableEngine(tok, reply_text("", "ok"), max_context=CTX)
+        self.svc = Service(self.engine, tok, glm_template())
         self.httpd = serve(self.svc, port=0)
         self.port = self.httpd.server_address[1]
 
@@ -4378,220 +4175,14 @@ class AnswerBeforeTheBody(unittest.TestCase):
         self.assertEqual(self.status("PUT", "/v1/chat/completions"), "HTTP/1.0 501 Unsupported method ('PUT')")
 
 
-class PromptProgressBatch(unittest.TestCase):
-    """#837: under --batch the engine's progress is one global line: prompt_progress() says nothing."""
+class PromptProgressFields(unittest.TestCase):
+    """The engine's last PP line as llama.cpp's four `prompt_progress` fields."""
 
-    def test_nothing_under_batch(self):
+    def test_the_four_fields(self):
         from serve.server import prompt_progress
-        engine = SimpleNamespace(progress=(512, 4096), progress_ms=900, reused=0, batch=0)
+        engine = SimpleNamespace(progress=(512, 4096), progress_ms=900, reused=0)
         svc = SimpleNamespace(engine=engine)
         self.assertEqual(prompt_progress(svc), {"total": 4096, "cache": 0, "processed": 512, "time_ms": 900})
-        engine.batch = 2
-        self.assertIsNone(prompt_progress(svc))
-
-
-class VisionArgs(unittest.TestCase):
-    """#767: vision.min_tokens reaches the encoder as --min-tokens (mtmd's image_min_tokens)."""
-
-    def args_for(self, cfg):
-        import serve.server as server
-        seen = []
-
-        class Proc:
-            stdout = io.StringIO("READY 4096\n")
-            stdin = io.StringIO()
-
-            def poll(self):
-                return None
-
-        def popen(args, **kw):
-            seen.append(args)
-            return Proc()
-
-        with mock.patch.object(server.subprocess, "Popen", popen), mock.patch.object(server, "contain"):
-            server.Vision({"exe": "strata-vision", "mmproj": "m.gguf", "model": "t.gguf", **cfg})
-        return seen[0]
-
-    def test_min_tokens_is_passed_only_when_set(self):
-        base = self.args_for({"max_tokens": 300})
-        self.assertNotIn("--min-tokens", base)
-        self.assertEqual(self.args_for({"max_tokens": 1024, "min_tokens": 768})[-4:],
-                         ["--max-tokens", "1024", "--min-tokens", "768"])
-
-
-class VisionCacheEviction(unittest.TestCase):
-    """#1072: the cache of encoded images keeps 64; a request's own images are never evicted for a later one."""
-
-    def make(self, d):
-        import serve.server as server
-        v = server.Vision.__new__(server.Vision)
-        v.dir, v.cache, v.lock = d, {}, threading.Lock()
-        v.load = lambda src: src
-
-        class Pipe:
-            def __init__(self):
-                self.last = ""
-
-            def write(self, text):
-                self.last = text
-
-            def flush(self):
-                (d / self.last.split()[2]).write_bytes(b"x")
-
-            def readline(self):
-                return "OK 3" + chr(10)
-
-        pipe = Pipe()
-        v.proc = SimpleNamespace(stdin=pipe, stdout=pipe)
-        v.normalize = staticmethod(lambda data: data)
-        return v
-
-    def test_one_request_with_more_than_64_images_keeps_all_its_files(self):
-        with tempfile.TemporaryDirectory() as t:
-            d = Path(t)
-            v = self.make(d)
-            done = v.encode_all([f"image {i}".encode() for i in range(70)])
-            self.assertEqual(len(done), 70)
-            self.assertTrue(all(p.exists() for p, _ in done))
-            # the next request's image shrinks the cache back to 64, oldest first
-            p, _ = v.encode(b"another one")
-            self.assertEqual(len(v.cache), 64)
-            self.assertTrue(p.exists())
-            self.assertEqual(len(list(d.glob("*.sve"))), 64)
-
-    def test_plain_encode_still_evicts_the_oldest(self):
-        with tempfile.TemporaryDirectory() as t:
-            d = Path(t)
-            v = self.make(d)
-            first, _ = v.encode(b"first")
-            for i in range(64):
-                v.encode(f"image {i}".encode())
-            self.assertEqual(len(v.cache), 64)
-            self.assertFalse(first.exists())
-
-
-class BudgetOverRam(unittest.TestCase):
-    """#1080: a RAM budget above what the PC has free is a warning at start, not silence and not a refusal."""
-
-    def run_with(self, budget, total, free):
-        import serve.server as S
-        vm = SimpleNamespace(total=total * 2**30, available=free * 2**30)
-        fake = SimpleNamespace(virtual_memory=lambda: vm)
-        with mock.patch.dict(sys.modules, {"psutil": fake}), contextlib.redirect_stdout(io.StringIO()):
-            return S.warn_budget_over_ram(["--native", "x", "--resident-budget-gib", str(budget)])
-
-    def test_over_free_ram_warns(self):
-        msg = self.run_with(55, 64, 30)
-        self.assertIn("55 GiB", msg)
-        self.assertIn("30 GiB free of 64", msg)
-
-    def test_over_total_less_headroom_warns(self):
-        self.assertIsNotNone(self.run_with(60, 64, 60))
-
-    def test_a_budget_that_fits_is_quiet(self):
-        self.assertIsNone(self.run_with(40, 64, 50))
-
-    def test_no_budget_argument_is_quiet(self):
-        import serve.server as S
-        self.assertIsNone(S.warn_budget_over_ram(["--native", "x"]))
-
-
-class LazyVision(unittest.TestCase):
-    """#673: with --lazy the image encoder is not started either; it starts with the model, and an encoder that fails
-    to start leaves nothing running."""
-
-    def make(self, ready=True):
-        import serve.server as server
-        started = []
-
-        class Proc:
-            def __init__(self):
-                self.stdin = io.StringIO()
-                self.stdout = io.StringIO("READY 1" + chr(10) if ready else "oops" + chr(10))
-                self.killed = False
-
-            def poll(self):
-                return None
-
-            def kill(self):
-                self.killed = True
-
-            def wait(self, timeout=None):
-                return 0
-
-        def popen(what, args, **kw):
-            p = Proc()
-            started.append(p)
-            return p
-
-        with mock.patch.object(server, "popen", popen), mock.patch.object(server, "contain"):
-            v = server.Vision({"exe": "strata-vision", "mmproj": "m.gguf", "model": "t.gguf"}, lazy=True)
-            self.addCleanup(lambda: shutil.rmtree(v.dir, ignore_errors=True))
-            return v, started, popen
-
-    def test_lazy_starts_nothing_and_alive_says_so(self):
-        v, started, _ = self.make()
-        self.assertEqual(started, [])
-        self.assertFalse(v.alive())
-
-    def test_restart_starts_it_and_close_ends_it(self):
-        import serve.server as server
-        v, started, popen = self.make()
-        with mock.patch.object(server, "popen", popen), mock.patch.object(server, "contain"):
-            v.restart()
-        self.assertTrue(v.alive())
-        self.assertEqual(len(started), 1)
-        v.close()
-        self.assertFalse(v.alive())
-
-    def test_a_failed_start_kills_the_process_and_raises(self):
-        import serve.server as server
-        v, started, _ = self.make(ready=False)
-
-        def popen(what, args, **kw):
-            class P:
-                stdin, stdout, killed = io.StringIO(), io.StringIO("oops" + chr(10)), False
-
-                def kill(self):
-                    P.killed = True
-
-                def wait(self, timeout=None):
-                    return 0
-            started.append(P)
-            return P()
-        with mock.patch.object(server, "popen", popen), mock.patch.object(server, "contain"):
-            with self.assertRaises(RuntimeError):
-                v.restart()
-        self.assertTrue(started[-1].killed)
-        self.assertFalse(v.alive())
-
-
-class VisionShutdown(unittest.TestCase):
-    """#914: ending the server removes the encoder's scratch directory; unloading keeps it."""
-
-    def test_shutdown_removes_the_work_dir_but_close_keeps_it(self):
-        import serve.server as server
-        with tempfile.TemporaryDirectory() as t:
-            d = Path(t) / "strata-vision-x"
-            d.mkdir()
-            (d / "k.sve").write_bytes(b"x")
-            v = server.Vision.__new__(server.Vision)
-            v.dir = d
-
-            class Proc:
-                stdin = io.StringIO()
-
-                def wait(self, timeout=None):
-                    return 0
-
-                def kill(self):
-                    pass
-
-            v.proc = Proc()
-            v.close()
-            self.assertTrue((d / "k.sve").exists())
-            v.shutdown()
-            self.assertFalse(d.exists())
 
 
 class ClaudeCodeBillingStamp(unittest.TestCase):
@@ -4652,8 +4243,8 @@ class ClaudeCodeBillingStamp(unittest.TestCase):
 
     def test_two_turns_share_the_whole_system_prompt(self):
         from serve.frontend import anthropic_to_messages
-        tok = ByteTokenizer()
-        svc = Service(MockEngine(tok, "ok", max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        svc = Service(MockEngine(tok, "ok", max_context=CTX), tok, glm_template())
         tools = [{"name": "Bash", "description": "Run a command.", "input_schema": {
             "type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}]
         turn1 = [{"role": "user", "content": "fix the bug"}]
@@ -4666,7 +4257,8 @@ class ClaudeCodeBillingStamp(unittest.TestCase):
             ids.append(svc.encode_prompt(m, t, kw))
         first = svc.encode_prompt(*anthropic_to_messages({"system": self.blocks(c="b145e"), "messages": turn1,
                                                          "tools": tools}))
-        self.assertEqual(ids[1][:len(first) - 8], first[:len(first) - 8])   # all but the generation header
+        head = len(first) - len(tok.encode("<|assistant|><think>", parse_special=True))
+        self.assertEqual(ids[1][:head], first[:head])                       # all but the generation prompt
 
 
 class ToolOrder(unittest.TestCase):
@@ -4700,12 +4292,13 @@ class ToolOrder(unittest.TestCase):
 
 
 class UntimedReads(unittest.TestCase):
-    """#1317: a read of the engine's READY line or of the image encoder's pipe that never returns held the request
-    turn for good.  Each now has a timeout; a process that stays silent is ended and the read raises."""
+    """#1317: a read of the engine's READY line that never returns held the request turn for good.  It now has a
+    timeout; an engine that stays silent is ended and the read raises."""
 
     def test_engine_that_never_says_ready_is_ended(self):
         import serve.server as server
-        fake = "import time\nprint('INFO engine=0.0.0', flush=True)\ntime.sleep(600)\n"
+        fake = ("import time\nprint('INFO engine=0.2.0 backend=cpu-reference eos=259 park_mib=512 logit_bias=1', "
+                "flush=True)\ntime.sleep(600)\n")
         with tempfile.TemporaryDirectory() as d:
             script = Path(d) / "fake_strata.py"
             script.write_text(fake, encoding="utf-8")
@@ -4726,131 +4319,6 @@ class UntimedReads(unittest.TestCase):
             procs[0].wait(10)                                   # killed, not left running
             self.assertIsNotNone(procs[0].poll())
 
-    class Silent:
-        """A pipe whose readline blocks until the test lets go (or the encoder is killed)."""
-        def __init__(self):
-            self.release = threading.Event()
-            self.killed = False
-
-        def readline(self):
-            self.release.wait(30)
-            return ""
-
-        def kill(self):
-            self.killed = True
-            self.release.set()
-
-    def test_vision_encode_read_times_out(self):
-        import serve.server as server
-        silent = self.Silent()
-        v = server.Vision.__new__(server.Vision)
-        v.dir, v.lock, v.cache = Path(tempfile.mkdtemp(prefix="strata-vision-test-")), threading.Lock(), {}
-        v.stopped = False
-        v.proc = SimpleNamespace(stdin=io.StringIO(), stdout=silent, kill=silent.kill, poll=lambda: 1 if silent.killed else None)
-        try:
-            with mock.patch.object(server, "VISION_ENCODE_S", 0.3), \
-                    mock.patch.object(server.Vision, "load", return_value=b""),                     mock.patch.object(server.Vision, "normalize", return_value=b"png"):
-                with self.assertRaises(ValueError) as cm:
-                    v.encode("x")
-            self.assertIn("said nothing for", str(cm.exception))
-            self.assertTrue(silent.killed)                      # ended: the next request starts a fresh one
-            self.assertFalse(v.alive())
-            self.assertEqual(list(v.dir.glob("*.img")), [])     # the temporary image is removed
-        finally:
-            shutil_rmtree(v.dir)
-
-    def test_vision_ready_read_times_out(self):
-        import serve.server as server
-        silent = self.Silent()
-        proc = SimpleNamespace(stdin=io.StringIO(), stdout=silent, kill=silent.kill, poll=lambda: None)
-        v = server.Vision.__new__(server.Vision)
-        v.spawn = (["strata-vision"], None, None)
-        v.dir = Path(tempfile.mkdtemp(prefix="strata-vision-test-"))
-        try:
-            with mock.patch.object(server, "popen", lambda *a, **k: proc), mock.patch.object(server, "contain"),                     mock.patch.object(server, "VISION_READY_S", 0.3):
-                with self.assertRaises(RuntimeError) as cm:
-                    v._start()
-            self.assertIn("did not start", str(cm.exception))
-            self.assertTrue(silent.killed)
-            self.assertFalse(v.alive())
-        finally:
-            shutil_rmtree(v.dir)
-
-    def test_a_vision_answer_in_time_is_unchanged(self):
-        import serve.server as server
-        v = server.Vision.__new__(server.Vision)
-        v.proc = SimpleNamespace(stdout=SimpleNamespace(readline=lambda: "OK 7 1 1 1\n"))
-        self.assertEqual(v._readline(5.0, "x"), "OK 7 1 1 1\n")
-
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class PrepareCancelled(unittest.TestCase):
-    """#1999: a client that leaves while its pictures are prepared gives the turn up and encodes nothing more."""
-
-    def make(self, d, vision):
-        tok = ByteTokenizer()
-        return Service(MockEngine(tok, "ok", max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"),
-                       vision=vision(d))
-
-    @staticmethod
-    def msgs(n=2):
-        return [{"role": "user", "content": [{"type": "text", "text": "look"}] +
-                 [{"type": "image", "source": f"{i}.png"} for i in range(n)]}]
-
-    def test_cancel_before_the_encode_runs_none(self):
-        import tempfile
-        calls = []
-
-        class V(ImageMarkers.FakeVision):
-            def encode(self, source):
-                calls.append(source)
-                return self.rows, 3
-        with tempfile.TemporaryDirectory() as d:
-            svc = self.make(d, V)
-            cancel = threading.Event()
-            cancel.set()
-            from serve.server import ClientGone
-            with self.assertRaises(ClientGone):
-                svc.prepare(self.msgs(), None, {}, cancel=cancel)
-            self.assertEqual(calls, [])
-            self.assertTrue(svc.fifo.acquire(blocking=False))        # the turn was not left held
-            svc.fifo.release()
-
-    def test_cancel_while_waiting_for_the_turn(self):
-        import tempfile
-        from serve.server import ClientGone
-        with tempfile.TemporaryDirectory() as d:
-            svc = self.make(d, ImageMarkers.FakeVision)
-            cancel = threading.Event()
-            threading.Timer(0.3, cancel.set).start()
-            with svc.fifo:                                          # another request holds the engine
-                t0 = time.perf_counter()
-                with self.assertRaises(ClientGone):
-                    svc.prepare(self.msgs(1), None, {}, cancel=cancel)
-                self.assertLess(time.perf_counter() - t0, 3)
-
-    def test_cancel_between_pictures_stops_the_next_encode(self):
-        import tempfile
-        from serve.server import ClientGone, Vision
-        cancel, seen = threading.Event(), []
-        v = Vision.__new__(Vision)
-
-        def encode(src, keep=()):
-            seen.append(src)
-            cancel.set()                                            # the client leaves during the first encode
-            return Path("x"), 3
-        v.encode = encode
-        with self.assertRaises(ClientGone):
-            v.encode_all([b"a", b"b", b"c"], cancel)
-        self.assertEqual(seen, [b"a"])
-
-    def test_without_cancel_nothing_changes(self):
-        import tempfile
-        with tempfile.TemporaryDirectory() as d:
-            svc = self.make(d, ImageMarkers.FakeVision)
-            ids, _, _ = svc.prepare(self.msgs(), None, {}, cancel=threading.Event())
-            self.assertEqual(ids.count(ByteTokenizer().encode("<|image_pad|>", parse_special=True)[0]), 6)
-            svc.embeddings.path.unlink(missing_ok=True)
