@@ -121,8 +121,8 @@ class ChatTemplate:
             return [{"name": call.name, "arguments": call.arguments} for call in parsed] == calls \
                 and all(reply in prompt for reply in replies)
 
-        # GLM's template drops the reasoning of turns before the last user message unless clear_thinking is false;
-        # a template that keeps it either way (or when asked to) preserves reasoning.
+        # GLM's template keeps the reasoning of turns before the last user message only when clear_thinking is
+        # false: a template that keeps it by default or when asked to that way preserves reasoning
         history = [user, {"role": "assistant", "content": "strata_caps_answer",
                           "reasoning_content": "strata_caps_reasoning"}, user]
         return {"supports_tools": all(s in tool_prompt for s in
@@ -364,7 +364,7 @@ def _has_tag(v, tags: dict[str, str] = LITERAL_TAGS) -> bool:
 
 def mark_think_literals(messages: list[dict], tools: list[dict] | None, tags: dict[str, str] = LITERAL_TAGS):
     """#537: (messages, tools) with every special-token text in their text swapped for its mark (LITERAL_TAGS, or
-    `tags`: literal_tags() adds the tokenizer's special tokens), and whether there was one (None: no change, the same
+    `tags`: literal_tags() adds the tokenizer's special tokens), and whether there was one (False: no change, the same
     objects back - a prompt without them renders as it always did).  An assistant message's content keeps its call
     tags, and one that opens with a whole <think>...</think> block (clients that send the reasoning inline) keeps
     that block's two tags as the model's markers: the template reads them to split the reasoning off."""
