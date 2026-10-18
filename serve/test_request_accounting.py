@@ -1,4 +1,4 @@
-"""Request accounting across thinking-budget continuations, through the HTTP APIs (no GPU or model pack).
+"""Request accounting across thinking-budget continuations, through the HTTP APIs (no GPU or model).
 
     python -m unittest serve.test_request_accounting -v
 """
@@ -6,15 +6,35 @@ import json
 import unittest
 import urllib.error
 import urllib.request
-from pathlib import Path
 
-from serve.frontend import ChatTemplate
-from serve.server import ByteTokenizer, EngineDied, Service, add_carry, carry_leg, request_timings, serve
-from serve.test_server import ThinkingEngine
+from serve.glm_fixtures import GlmTokenizer, glm_template, reply_text
+from serve.server import REASONING_CLOSE, EngineDied, MockEngine, Service, request_timings, serve
+
+CTX = 32768
+
+
+class ThinkingEngine(MockEngine):
+    """Thinks THOUGHT, then answers; a prompt that already ends its thinking (the budget's wrap-up) gets the answer
+    at once, the way the model continues after </think>.  Records every prompt it is given."""
+    THOUGHT = "Let me think step by step about two plus two. " * 4          # 184 reasoning tokens (one per byte)
+    ANSWER = "The answer is 4."
+
+    def __init__(self, tok):
+        super().__init__(tok, "x", max_context=CTX)
+        self.prompts = []
+
+    def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
+        self.prompts.append(list(ids))
+        done = self.tok.decode(ids).endswith(REASONING_CLOSE)
+        text = self.ANSWER if done else reply_text(self.THOUGHT, self.ANSWER)
+        for t in (self.tok.encode(text) + self.tok.encode("<|user|>", parse_special=True))[:max_new]:
+            if cancel.is_set():
+                return
+            yield t
 
 
 class ClockedThinkingEngine(ThinkingEngine):
-    """The native DONE contract: closing a generation drains its statistics before the next one starts."""
+    """The engine's DONE contract: closing a generation drains its statistics before the next one starts."""
     REUSED = 5
 
     def __init__(self, tok):
@@ -24,7 +44,7 @@ class ClockedThinkingEngine(ThinkingEngine):
         self.fail_continuation = False
         self.cancel_continuation = False
 
-    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+    def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
         self.attempts += 1
         if self.fail_continuation and self.attempts == 2:
             raise EngineDied("the continuation ended without a DONE line")
@@ -32,9 +52,9 @@ class ClockedThinkingEngine(ThinkingEngine):
         generated = 0
         stopped = False
         try:
-            for token in super().generate(ids, max_new, sampling, cancel, embeddings):
+            for token in super().generate(ids, max_new, sampling, cancel, checkpoint):
                 generated += 1
-                stopped = token in self.tok.encode("<|im_end|>", parse_special=True)
+                stopped = token in self.tok.encode("<|user|>", parse_special=True)
                 yield token
                 if self.cancel_continuation and not first and generated == 3:
                     cancel.set()
@@ -44,18 +64,15 @@ class ClockedThinkingEngine(ThinkingEngine):
             self.last = dict(prompt_tokens=len(ids), generated=generated, reused=reused,
                              prompt_read=len(ids) - reused, finish="stop" if stopped else "cancel",
                              prompt_ms=40.0 if first else 7.0, decode_ms=200.0 if first else 80.0,
-                             drafts_offered=18 if first else 11, drafts_accepted=8 if first else 7,
-                             hits=9 if first else 7, lookups=10 if first else 8,
-                             ram_blobs=1 if first else 3, file_blobs=2 if first else 4,
-                             file_mb=1.5 if first else 2.5)
+                             hits=9 if first else 7, lookups=10 if first else 8)
             self.done.append(dict(self.last))
 
 
 class RequestAccounting(unittest.TestCase):
     def setUp(self):
-        tok = ByteTokenizer()
+        tok = GlmTokenizer()
         self.engine = ClockedThinkingEngine(tok)
-        self.svc = Service(self.engine, tok, ChatTemplate(Path(__file__).with_name("chat_template.jinja")))
+        self.svc = Service(self.engine, tok, glm_template())
         self.httpd = serve(self.svc, port=0)
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
 
@@ -100,7 +117,6 @@ class RequestAccounting(unittest.TestCase):
         self.assertGreater(completion_tokens, native_generated, "wrap-up tokens count as output, not native decode")
         self.assertEqual(timings["predicted_per_second"], round(native_generated / 0.280, 1))
         self.assertEqual(timings["predicted_per_token_ms"], round(280.0 / native_generated, 3))
-        self.assertEqual((timings["draft_n"], timings["draft_n_accepted"]), (29, 15))
         code, raw = self.request("/metrics")
         self.assertEqual(code, 200)
         metrics = json.loads(raw)
@@ -110,14 +126,15 @@ class RequestAccounting(unittest.TestCase):
         self.assertEqual(row["engine_generated"], native_generated)
         self.assertEqual(row["decode_tok_s"], timings["predicted_per_second"])
         self.assertEqual((row["prompt_ms"], row["decode_ms"]), (47.0, 280.0))
-        self.assertEqual((row["ram_blobs"], row["file_blobs"], row["file_mb"]), (4, 6, 4.0))
+        self.assertEqual((row["hits"], row["lookups"]), (16, 18))
         self.assertAlmostEqual(row["hit_rate"], 16 / 18, places=3)
         self.assertEqual((totals["requests"], totals["prompt_tokens"], totals["reused"]), (1, original, 5))
         self.assertEqual((totals["prompt_ms"], totals["decode_ms"]), (47.0, 280.0))
-        self.assertEqual((totals["drafts_offered"], totals["drafts_accepted"]), (29, 15))
+        self.assertEqual((totals["hits"], totals["lookups"]), (16, 18))
         code, raw = self.request("/v1/status")
         self.assertEqual(code, 200)
-        self.assertEqual(json.loads(raw)["last_timings"]["draft_n"], 29)
+        last = json.loads(raw)["last_timings"]
+        self.assertEqual((last["prompt_ms"], last["predicted_ms"]), (47.0, 280.0))
 
     def test_openai_nonstream_keeps_original_cache_and_all_segment_work(self):
         response = self.chat()
@@ -163,7 +180,6 @@ class RequestAccounting(unittest.TestCase):
         self.assertEqual(response["usage"]["prompt_tokens_details"]["cached_tokens"], 5)
         timings = response["timings"]
         self.assertEqual((timings["prompt_ms"], timings["predicted_ms"]), (40.0, 200.0))
-        self.assertEqual((timings["draft_n"], timings["draft_n_accepted"]), (18, 8))
 
     def test_failed_continuation_does_not_count_the_first_done_twice(self):
         self.engine.fail_continuation = True
@@ -177,35 +193,15 @@ class RequestAccounting(unittest.TestCase):
         self.assertEqual(row["finish"], "error")
         self.assertEqual(row["engine_generated"], 20)
         self.assertEqual((row["prompt_ms"], row["decode_ms"]), (40.0, 200.0))
-        self.assertEqual((metrics["totals"]["drafts_offered"], metrics["totals"]["drafts_accepted"]), (18, 8))
+        self.assertEqual((row["hits"], row["lookups"]), (9, 10))
+        self.assertEqual((metrics["totals"]["hits"], metrics["totals"]["lookups"]), (9, 10))
 
 
-class SlotLegAccounting(unittest.TestCase):
-    """#1869: a request that decoded in a batch slot and finished on the solo path keeps the slot leg's decode time and
-    tokens (the solo DONE alone said 1 token in 18 ms); #1870: prompt_n is what the engine read."""
-
-    def test_solo_leg_adds_to_the_slot_leg(self):
-        carry = {}
-        slot_leg = {"generated": 134, "decode_ms": 2900.0, "prompt_ms": 3794.7, "prompt_read": 2052, "finish": "cancel"}
-        carry_leg(carry, slot_leg)
-        solo_done = {"generated": 1, "decode_ms": 18.4, "prompt_ms": 2.0, "prompt_read": 1, "finish": "stop", "reused": 0}
-        total = add_carry(carry, solo_done)
-        self.assertEqual((total["generated"], total["decode_ms"]), (135, 2918.4))
-        self.assertEqual((total["prompt_ms"], total["prompt_read"], total["finish"]), (3794.7, 2052, "stop"))
-        timings = request_timings(2052, 135, total)
-        self.assertEqual(timings["predicted_ms"], 2918.4)
-        self.assertAlmostEqual(timings["predicted_per_second"], 46.3, places=1)
-
-    def test_two_hand_backs_sum(self):
-        carry = {}
-        carry_leg(carry, {"generated": 10, "decode_ms": 100.0, "prompt_ms": 50.0})
-        carry_leg(carry, {"generated": 20, "decode_ms": 300.0, "prompt_ms": 1.0})
-        total = add_carry(carry, {"generated": 5, "decode_ms": 50.0, "prompt_ms": 1.0})
-        self.assertEqual((total["generated"], total["decode_ms"], total["prompt_ms"]), (35, 450.0, 50.0))
-        self.assertNotIn("prompt_read", total)
+class PromptRead(unittest.TestCase):
+    """#1870: prompt_n is what the engine read."""
 
     def test_prompt_n_is_what_was_read(self):
-        # the slot already held the whole prompt: 1 token read, the conversation cache off (reused 0)
+        # the engine read 1 token of the prompt and counted none as reused
         last = {"prompt_ms": 563.5, "decode_ms": 700.0, "generated": 30, "reused": 0, "prompt_read": 1, "finish": "stop"}
         t = request_timings(43086, 30, last)
         self.assertEqual((t["prompt_n"], t["cache_n"]), (1, 43085))
