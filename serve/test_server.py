@@ -1,6 +1,9 @@
-"""serve/test_server.py - the max tokens budget over both APIs, against the mock engine (no GPU, no pack).
+"""serve/test_server.py - the GLM server (serve/server.py) and its frontend over HTTP and in process: the max tokens
+budget, API keys, the prompt GLM's template renders (literal tags and control tokens, the engine's checkpoint), tool
+calls, client shapes, the GEN line's keys, the engine dying or failing, and the rest of the server against the mock
+engine and fake engine processes (no GPU, no model).
 
-    python -m unittest serve.test_server -v
+    python3 -m unittest serve.test_server -v
 """
 from __future__ import annotations
 
@@ -22,7 +25,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve.frontend import ChatTemplate, literal_tags, mark_think_literals, unmark_think_literals  # noqa: E402
-from serve.server import (CTX_SLACK, ByteTokenizer, EngineDied, EngineNonFinite, GpuBusy, MockEngine,  # noqa: E402
+from serve.glm_fixtures import GlmTokenizer, call_text, glm_template, reply_text  # noqa: E402
+from serve.server import (CTX_SLACK, ByteTokenizer, EngineDied, EngineError, EngineNonFinite, MockEngine,  # noqa: E402
                           Service,
                           StrataEngine, api_key_of, engine_args, key_matches, prompt_progress,
                           prompt_tokens_seen,
@@ -36,9 +40,9 @@ ANSWER = "xy" * 1000                             # longer than the old 1024 fall
 
 
 class RecordingEngine(MockEngine):
-    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+    def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
         self.last_max_new = max_new
-        yield from super().generate(ids, max_new, sampling, cancel, embeddings)
+        yield from super().generate(ids, max_new, sampling, cancel, checkpoint)
 
 
 class MaxTokens(unittest.TestCase):
@@ -218,326 +222,6 @@ class FitMaxTokens(unittest.TestCase):
         self.assertIn("no room to answer", b["error"]["message"])
 
 
-class VisionTempFiles(unittest.TestCase):
-    """A request's combined image file (req-*.sve, ~10 MB a picture) goes with the request: one refused after prepare()
-    wrote it (the engine starting, no room) or whose answer never started left it in the vision directory for good."""
-
-    MSGS = [{"role": "user", "content": [{"type": "text", "text": "what is it?"},
-                                         {"type": "image", "source": "x.png"}]}]
-
-    @staticmethod
-    def leftovers(d):
-        return sorted(p.name for p in Path(d).glob("req-*.sve"))
-
-    def test_a_refused_request_writes_none(self):
-        from serve.server import EngineStarting
-        tok = ByteTokenizer()
-        with tempfile.TemporaryDirectory() as d:
-            engine = MockEngine(tok, "ok", max_context=0)
-            svc = Service(engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"),
-                          vision=ImageMarkers.FakeVision(d))
-            with self.assertRaises(EngineStarting):
-                svc.prepare(self.MSGS, None, {}, 16)
-            engine.max_context = 64                                  # the prompt alone fills it
-            with self.assertRaisesRegex(ValueError, "no room to answer"):
-                svc.prepare(self.MSGS, None, {})
-            engine.max_context = CTX
-            with self.assertRaisesRegex(ValueError, "exceeds the context"):
-                svc.prepare(self.MSGS, None, {}, CTX)
-            self.assertEqual(self.leftovers(d), [])
-            svc.prepare(self.MSGS, None, {}, 16)                     # one that fits has it
-            self.assertEqual(len(self.leftovers(d)), 1)
-            svc.drop_embeddings()                                    # ... until the request is done
-            self.assertEqual(self.leftovers(d), [])
-
-    def test_over_http(self):
-        import serve.server as server
-        tok = ByteTokenizer()
-        with tempfile.TemporaryDirectory() as d:
-            engine = MockEngine(tok, "</think>\n\nok", max_context=0)
-            svc = Service(engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"),
-                          vision=ImageMarkers.FakeVision(d))
-            httpd = serve(svc, port=0)
-            base = f"http://127.0.0.1:{httpd.server_address[1]}"
-
-            def post(path):
-                image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}} \
-                    if path.endswith("completions") else \
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
-                body = {"model": "m", "max_tokens": 8, "messages": [{"role": "user", "content": [
-                    {"type": "text", "text": "what is it?"}, image]}]}
-                req = urllib.request.Request(base + path, data=json.dumps(body).encode(),
-                                             headers={"Content-Type": "application/json"})
-                try:
-                    with urllib.request.urlopen(req, timeout=30) as r:
-                        return r.status
-                except urllib.error.HTTPError as e:
-                    with e:
-                        return e.code
-
-            try:
-                paths = ("/v1/chat/completions", "/v1/messages")
-                for path in paths:
-                    self.assertEqual(post(path), 503)                # the engine is starting (#344); clients retry
-                engine.max_context = 64
-                for path in paths:
-                    self.assertEqual(post(path), 400)                # no room to answer
-                engine.max_context = CTX
-                # the client gone after prepare(), before the answer started
-                with mock.patch.object(server, "_debug_req", side_effect=ConnectionResetError("the client is gone")):
-                    for path in paths:
-                        with self.assertRaises(OSError):
-                            post(path)
-                for path in paths:
-                    self.assertEqual(post(path), 200)
-                self.assertEqual(self.leftovers(d), [])
-            finally:
-                httpd.shutdown()
-                httpd.server_close()
-
-
-class ImageMarkers(unittest.TestCase):
-    """#150: the text "<|image_pad|>" inside a message is text, not an image's place."""
-
-    class FakeVision:
-        def __init__(self, d):
-            self.dir = Path(d)
-            self.rows = self.dir / "img.sve"
-            self.rows.write_bytes(b"rows")
-
-        def encode(self, source):
-            return self.rows, 3
-
-    def test_literal_marker_with_an_image(self):
-        import tempfile
-        tok = ByteTokenizer()
-        with tempfile.TemporaryDirectory() as d:
-            svc = Service(MockEngine(tok, "ok", max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"),
-                          vision=self.FakeVision(d))
-            pad = tok.encode("<|image_pad|>", parse_special=True)[0]
-            for text in ("the docs say <|image_pad|> marks an image", "plain"):
-                with self.subTest(text=text):
-                    msgs = [{"role": "user", "content": [{"type": "text", "text": text},
-                                                         {"type": "image", "source": "x.png"}]}]
-                    ids, _, _ = svc.prepare(msgs, None, {})
-                    self.assertEqual(ids.count(pad), 3)          # the image's three rows, nothing else
-                    self.assertIn("<|image_pad|> marks" if "docs" in text else "plain", tok.decode(ids))
-            svc.embeddings.path.unlink(missing_ok=True)
-
-    def test_anthropic_tool_result_image(self):
-        """Claude Code's Read of a picture returns it inside a tool_result: it reaches the encoder, in place."""
-        import tempfile
-        from serve.frontend import anthropic_to_messages
-        tok = ByteTokenizer()
-        img = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
-        call = {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "a.png"}}]}
-        with tempfile.TemporaryDirectory() as d:
-            svc = Service(MockEngine(tok, "ok", max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"),
-                          vision=self.FakeVision(d))
-            pad = tok.encode("<|image_pad|>", parse_special=True)[0]
-            for result, extra, n in (([img], [], 3), ([{"type": "text", "text": "a.png"}, img], [], 3),
-                                     ("plain text", [img, {"type": "text", "text": "and this one"}], 3),
-                                     ([img], [img], 6)):
-                with self.subTest(result=str(result)[:30], extra=len(extra)):
-                    msgs = [{"role": "user", "content": "look at a.png"}, call,
-                            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": result}] + extra}]
-                    m, _, _ = anthropic_to_messages({"messages": msgs})
-                    ids, _, _ = svc.prepare(m, None, {})
-                    self.assertEqual(ids.count(pad), n)
-                    prompt = tok.decode(ids)
-                    inside = prompt.split("<tool_response>", 1)[1].split("</tool_response>", 1)[0]
-                    self.assertEqual("<|vision_start|>" in inside, not isinstance(result, str))
-                    self.assertEqual("<|vision_start|>" in prompt.split("</tool_response>", 1)[1], bool(extra))
-            svc.embeddings.path.unlink(missing_ok=True)
-        # a tool's picture the server cannot read is a note, not a 400 (the client resends it every turn); the user's
-        # own picture still fails
-        class Refusing(self.FakeVision):
-            def encode(self, source):
-                if "bad" in str(source):
-                    raise ValueError("this image format needs Pillow")
-                return super().encode(source)
-        good = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
-        bad = {"type": "image", "source": {"type": "base64", "media_type": "image/webp", "data": "badd"}}
-        tool_msgs = [{"role": "user", "content": "look"}, call,
-                     {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": [bad, good]}]}]
-        with tempfile.TemporaryDirectory() as d:
-            for vision, n, note in ((None, 0, "[image omitted: this server has no image encoder]"),
-                                    (Refusing(d), 3, "[image omitted: this image format needs Pillow]")):
-                with self.subTest(vision=vision is not None):
-                    svc = Service(MockEngine(tok, "ok", max_context=CTX), tok,
-                                  ChatTemplate(ROOT / "serve/chat_template.jinja"), vision=vision)
-                    m, _, _ = anthropic_to_messages({"messages": tool_msgs})
-                    ids, _, _ = svc.prepare(m, None, {})
-                    self.assertEqual(ids.count(pad), n)
-                    self.assertIn(note, tok.decode(ids))
-                    if svc.embeddings.path:
-                        svc.embeddings.path.unlink(missing_ok=True)
-            # a tool's picture at a URL is downloaded once (the check and the prompt share the bytes), and one that
-            # cannot be fetched is a note too
-            import serve.server as server
-            url = {"type": "image", "source": {"type": "url", "url": "http://x/ok.png"}}
-            url_msgs = [{"role": "user", "content": "look"}, call,
-                        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": [url]}]}]
-            svc = Service(MockEngine(tok, "ok", max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"),
-                          vision=self.FakeVision(d))
-            m, _, _ = anthropic_to_messages({"messages": url_msgs})
-            with mock.patch.object(server.Vision, "download", return_value=b"the picture") as dl:
-                ids, _, _ = svc.prepare(m, None, {})
-            self.assertEqual((dl.call_count, ids.count(pad)), (1, 3))
-            svc.embeddings.path.unlink(missing_ok=True)
-            m, _, _ = anthropic_to_messages({"messages": url_msgs})
-            with mock.patch.object(server.Vision, "download", side_effect=ValueError("the image URL could not be read")):
-                ids, _, _ = svc.prepare(m, None, {})
-            self.assertEqual(ids.count(pad), 0)
-            self.assertIn("[image omitted: the image URL could not be read]", tok.decode(ids))
-            svc = Service(MockEngine(tok, "ok", max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
-            m, _, _ = anthropic_to_messages({"messages": [{"role": "user", "content": [good]}]})
-            with self.assertRaises(ValueError):
-                svc.prepare(m, None, {})
-        # a text-only tool result renders exactly as before: one string
-        msgs = [{"role": "user", "content": "q"}, call,
-                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "text", "text": "r"}]}]}]
-        self.assertEqual(anthropic_to_messages({"messages": msgs})[0][-1], {"role": "tool", "content": "r"})
-
-
-    def test_the_whole_marker_in_text_before_images(self):
-        # Text quoting the template's marker (an agent reading chat_template.jinja) took the first picture's rows, the
-        # later pictures moved up one and the last real marker became text - every count still matched.
-        tok = ByteTokenizer()
-        start, pad, end = (tok.encode(s, parse_special=True)[0]
-                           for s in ("<|vision_start|>", "<|image_pad|>", "<|vision_end|>"))
-        quoted = "the template writes <|vision_start|><|image_pad|><|vision_end|> per picture"
-
-        class TwoPictures(self.FakeVision):
-            def encode(self, source):
-                return self.rows, {"a.png": 2, "b.png": 5}[source]
-
-        def holds(ids, part):
-            return any(ids[i:i + len(part)] == part for i in range(len(ids) - len(part) + 1))
-
-        with tempfile.TemporaryDirectory() as d:
-            svc = Service(MockEngine(tok, "ok", max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"),
-                          vision=TwoPictures(d))
-            pictures = [{"type": "image", "source": "a.png"}, {"type": "text", "text": "and"},
-                        {"type": "image", "source": "b.png"}]
-            tools = [{"name": "read", "description": quoted, "parameters": {}}]
-            cases = {"text part": ([{"role": "user", "content": [{"type": "text", "text": quoted}, *pictures]}], None),
-                     "earlier turns and tools": ([{"role": "user", "content": "read it"},
-                                                  {"role": "assistant", "content": quoted, "reasoning_content": quoted,
-                                                   "tool_calls": [{"function": {"name": "read",
-                                                                                "arguments": {"text": quoted}}}]},
-                                                  {"role": "tool", "content": quoted},
-                                                  {"role": "user", "content": pictures}], tools)}
-            for name, (msgs, tools) in cases.items():
-                with self.subTest(case=name):
-                    ids, _, _ = svc.prepare(msgs, tools, {})
-                    starts = [j for j, t in enumerate(ids) if t == start]
-                    self.assertEqual(len(starts), 2)                 # the pictures' markers, nothing else
-                    for j, rows in zip(starts, (2, 5)):              # each followed by its own picture's rows
-                        self.assertEqual(ids[j + 1:j + 2 + rows], [pad] * rows + [end])
-                    self.assertEqual((ids.count(pad), ids.count(end)), (7, 2))
-                    self.assertTrue(holds(ids, tok.encode(quoted)))   # the text kept its own tokens
-            # no picture: the quoted markers are text too
-            ids, _, _ = svc.prepare([{"role": "user", "content": quoted}], None, {})
-            self.assertEqual([t for t in ids if t in (start, pad, end)], [])
-            # markers cut apart across three text parts are no picture's: refused, not a silent shift
-            cut = [{"type": "text", "text": "<|vision_sta"}, {"type": "text", "text": "rt|><|image_pa"},
-                   {"type": "text", "text": "d|>"}, *pictures]
-            with self.assertRaisesRegex(ValueError, "do not match"):
-                svc.prepare([{"role": "user", "content": cut}], None, {})
-            # a prompt without the marker strings has exactly the ids it had
-            old = lambda m, t=None: tok.encode(svc.template.render(m, tools=t), parse_special=True)   # noqa: E731
-            for msgs, tools in (([{"role": "user", "content": "plain text, no markers"}], None),   # (#931: control-token text is text now)
-                                ([{"role": "system", "content": "s"}, {"role": "user", "content": pictures}], None),
-                                ([{"role": "user", "content": "x"}, {"role": "assistant", "content": "",
-                                  "tool_calls": [{"function": {"name": "f", "arguments": {"a": "<|image"}}}]}],
-                                 [{"name": "f", "description": "<|vision_", "parameters": {}}])):
-                with self.subTest(msgs=msgs):
-                    self.assertEqual(svc.encode_prompt(msgs, tools, {}), old(msgs, tools))
-
-
-class VisionTempFiles(unittest.TestCase):
-    """#480 (a TEMP path with a space), #874 (the per-request embeddings file), #735 (Smart App Control)."""
-
-    def test_work_dir_has_no_space_when_temp_has_one(self):
-        from serve.server import Vision
-        with tempfile.TemporaryDirectory() as base:
-            spaced = Path(base) / "John Smith"
-            spaced.mkdir()
-            with mock.patch.object(tempfile, "tempdir", str(spaced)):
-                d = Vision.work_dir()
-            try:
-                self.assertNotIn(" ", str(d))
-                self.assertTrue(d.is_dir())
-            finally:
-                d.rmdir()
-
-    def test_enc_line_names_files_relative_to_the_encoder_dir(self):
-        from serve.server import Vision
-
-        class Pipe:
-            def __init__(self):
-                self.lines = []
-
-            def write(self, s):
-                self.lines.append(s)
-
-            def flush(self):
-                pass
-
-        pipe = Pipe()
-        v = Vision.__new__(Vision)
-        v.dir, v.lock, v.cache = Path(tempfile.mkdtemp(prefix="strata-vision-test-")), threading.Lock(), {}
-        v.proc = mock.Mock(stdin=pipe, stdout=mock.Mock(readline=lambda: "OK 7 1 1 1\n"))
-        try:
-            with mock.patch.object(Vision, "load", return_value=b""), \
-                    mock.patch.object(Vision, "normalize", return_value=b"png"):
-                out, n = v.encode("x")
-            self.assertEqual(n, 7)
-            self.assertEqual(out.parent, v.dir)                     # the cache keeps the full path
-            name = out.name
-            self.assertEqual(pipe.lines, [f"ENC {name[:-4]}.img {name}\n"])
-        finally:
-            shutil_rmtree(v.dir)
-
-    def test_combined_file_is_written_whole_and_removable(self):
-        from serve.server import combined_embeddings_path, write_temporary
-        with tempfile.TemporaryDirectory() as d:
-            a, b = Path(d) / "a.sve", Path(d) / "b.sve"
-            a.write_bytes(b"AAAA")
-            b.write_bytes(b"BB")
-            path = combined_embeddings_path(Path(d), 6)
-            try:
-                write_temporary(path, [a, b])
-                self.assertEqual(path.read_bytes(), b"AAAABB")
-            finally:
-                path.unlink(missing_ok=True)
-
-    def test_combined_file_stays_off_a_small_shm(self):
-        from serve.server import combined_embeddings_path
-        with tempfile.TemporaryDirectory() as d:
-            if os.name == "nt":
-                self.assertEqual(combined_embeddings_path(Path(d), 1).parent, Path(d))
-                return
-            with mock.patch("serve.server.shutil.disk_usage", return_value=SimpleNamespace(free=1 << 20)):
-                self.assertEqual(combined_embeddings_path(Path(d), 1 << 20).parent, Path(d))
-
-    def test_smart_app_control_is_said_in_words(self):
-        import subprocess
-        from serve.server import popen
-        for code in (4551, 1260):
-            err = OSError(22, "blocked")
-            err.winerror = code
-            with self.subTest(winerror=code), mock.patch.object(subprocess, "Popen", side_effect=err):
-                with self.assertRaises(OSError) as cm:
-                    popen("the image encoder", ["strata-vision.exe"])
-                self.assertIn("Smart App Control", str(cm.exception))
-                self.assertIn("--vision no", str(cm.exception))
-        with mock.patch.object(subprocess, "Popen", side_effect=FileNotFoundError("gone")):
-            with self.assertRaises(FileNotFoundError):
-                popen("x", ["x"])
-
-
 class ListenProblem(unittest.TestCase):
     """#769: only an address that is taken is "already in use"."""
 
@@ -554,11 +238,6 @@ class ListenProblem(unittest.TestCase):
         text = listen_problem("10.9.9.9", 8080, OSError(errno.EADDRNOTAVAIL, "cannot assign"))
         self.assertIn("10.9.9.9 is not an address of this PC", text)
         self.assertNotIn("already in use", text)
-
-
-def shutil_rmtree(path):
-    import shutil
-    shutil.rmtree(path, ignore_errors=True)
 
 
 class ThinkTokenizer(ByteTokenizer):
