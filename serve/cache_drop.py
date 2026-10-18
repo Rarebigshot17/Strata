@@ -1,6 +1,6 @@
 """Opt-in: give the model files' page cache back when the server stops (STRATA_DROP_CACHE_ON_EXIT=1).
 
-Linux keeps a stopped model's GGUF/pack files in the page cache (MemAvailable counts it, `free` shows it as used), which
+Linux keeps a stopped model's GGUF files in the page cache (MemAvailable counts it, `free` shows it as used), which
 helps a restart of the SAME model.  On a host that then starts a different, large model (a dual-socket server whose second
 NUMA node holds the old model's cache) some owners prefer the pages back at once.  Off by default.  Only this server's own
 model files are advised, and only after the engine process has ended (its mappings are gone, so the pages can go).
@@ -8,12 +8,26 @@ model files are advised, and only after the engine process has ended (its mappin
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
+
+SHARD = re.compile(r"^(.*)-(\d{5})-of-(\d{5})\.gguf$")   # llama.cpp's gguf-split names: NAME-00001-of-00004.gguf
 
 
 def enabled(env=None) -> bool:
     env = os.environ if env is None else env
     return os.name != "nt" and env.get("STRATA_DROP_CACHE_ON_EXIT", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def gguf_shards(path) -> list[str]:
+    """Every shard of a split model, given its first one (NAME-00001-of-0000N.gguf, as the engine's -m names it), in
+    order; the shards that are missing are left out.  A single-file model is itself."""
+    m = SHARD.match(str(path))
+    if not m:
+        return [str(path)] if Path(path).is_file() else []
+    n = int(m.group(3))
+    names = (f"{m.group(1)}-{i:05d}-of-{m.group(3)}.gguf" for i in range(1, n + 1))
+    return [p for p in names if Path(p).is_file()]
 
 
 def model_files(paths) -> list[str]:
@@ -61,10 +75,11 @@ def drop_after_exit(engine, env=None, advise=None) -> int:
     proc = getattr(engine, "proc", None)
     if proc is not None and proc.poll() is None:
         return 0
-    spawn = getattr(engine, "spawn", None)
-    args = list(spawn[1]) if spawn else []
-    wanted = {"--native", "--pack", "--mmproj", "--model"}
-    paths = [v for k, v in zip(args, args[1:]) if k in wanted]
-    n = drop(paths or [getattr(engine, "model_path", None)], advise)
+    model = getattr(engine, "model_path", None)          # the engine's -m (the first shard), resolved against its cwd
+    if not model:
+        spawn = getattr(engine, "spawn", None)
+        args = list(spawn[1]) if spawn else []
+        model = next((v for k, v in zip(args, args[1:]) if k == "-m"), None)
+    n = drop(gguf_shards(model) if model else [], advise)
     print(f"[strata] STRATA_DROP_CACHE_ON_EXIT: released the page cache of {n} model files", flush=True)
     return n
