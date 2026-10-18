@@ -130,8 +130,8 @@ class FatalRecovery(unittest.TestCase):
         self.wait_dead(e)
         self.assertEqual(self.content(self.run_request(svc)), 'Z')
 
-    def post(self, base, body):
-        req = urllib.request.Request(base + '/v1/chat/completions', data=json.dumps(body).encode(),
+    def post(self, base, body, path='/v1/chat/completions'):
+        req = urllib.request.Request(base + path, data=json.dumps(body).encode(),
                                      headers={'Content-Type': 'application/json'})
         try:
             with urllib.request.urlopen(req, timeout=10) as r:
@@ -175,11 +175,41 @@ class FatalRecovery(unittest.TestCase):
         body = {'messages': [{'role': 'user', 'content': 'hi'}], 'max_tokens': 8, 'reasoning_effort': 'none'}
         status, text = self.post(base, body)
         self.assertEqual(status, 400, text)
-        self.assertIn('does not fit the context', json.loads(text)['error']['message'])
+        error = json.loads(text)['error']
+        self.assertEqual(error['type'], 'invalid_request_error')
+        self.assertIn('does not fit the context', error['message'])
         self.assertTrue(self.health(base)['loaded'])
         status, text = self.post(base, body)
         self.assertEqual((status, json.loads(text)['choices'][0]['message']['content']), (200, 'Z'))
         self.assertEqual(svc.engine.proc.pid, pid)
+
+    def refusal(self, path, body):
+        """`path`'s answer (not streamed) when the engine refuses the request: a fresh engine whose first GEN is
+        refused."""
+        (self.root / 'state').unlink(missing_ok=True)
+        svc, base = self.http('invalid')
+        return self.post(base, body, path)
+
+    def test_a_refusal_is_a_400_on_the_other_apis(self):
+        for path, body in (('/v1/messages', {'model': 'm', 'max_tokens': 8,
+                                             'messages': [{'role': 'user', 'content': 'hi'}]}),
+                           ('/v1/completions', {'prompt': 'hi', 'max_tokens': 8})):
+            with self.subTest(path=path):
+                status, text = self.refusal(path, body)
+                self.assertEqual(status, 400, text)
+                error = json.loads(text)['error']
+                self.assertEqual(error['type'], 'invalid_request_error')
+                self.assertIn('does not fit the context', error['message'])
+
+    # BUG: serve/server.py's /v1/responses (not streamed) answers the engine's plain ERR, a refusal of the request,
+    # with a 500 server_error: its handler catches (EngineError, ValueError) together.  The other APIs answer a 400.
+    @unittest.expectedFailure
+    def test_a_refusal_is_a_400_on_the_responses_api(self):
+        status, text = self.refusal('/v1/responses', {'model': 'm', 'input': 'hi', 'max_output_tokens': 8})
+        self.assertEqual(status, 400, text)
+        error = json.loads(text)['error']
+        self.assertEqual(error['type'], 'invalid_request_error')
+        self.assertIn('does not fit the context', error['message'])
 
     def test_validation_error_does_not_kill_engine(self):
         e = self.engine('invalid')
