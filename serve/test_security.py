@@ -1,5 +1,5 @@
 """serve/test_security.py - the Host check (DNS rebinding) and the Origin check for requests without an API key,
-against the mock engine (no GPU, no pack).
+against the mock engine (no GPU, no model).
 
     python -m unittest serve.test_security -v
 """
@@ -16,11 +16,10 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from serve.frontend import ChatTemplate  # noqa: E402
-from serve.server import (ByteTokenizer, MockEngine, Service, allowed_hosts_of, host_allowed,  # noqa: E402
-                          host_name, host_names_for, origin_allowed, serve)
+from serve.glm_fixtures import GlmTokenizer, glm_template, reply_text  # noqa: E402
+from serve.server import (MockEngine, Service, allowed_hosts_of, host_allowed, host_name,  # noqa: E402
+                          host_names_for, origin_allowed, serve)
 
-ROOT = Path(__file__).resolve().parents[1]
 LOCAL = {"localhost", "127.0.0.1", "::1"}
 
 
@@ -98,9 +97,8 @@ class OverHttp(unittest.TestCase):
     """The checks in the running server, as a browser and as curl/the SDKs send their requests."""
 
     def setUp(self):
-        tok = ByteTokenizer()
-        self.svc = Service(MockEngine(tok, "</think>\n\nok", max_context=4096), tok,
-                           ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        self.svc = Service(MockEngine(tok, reply_text("", "ok"), max_context=4096), tok, glm_template())
         self.httpd = None
 
     def start(self, **attrs):
@@ -275,22 +273,41 @@ class OverHttp(unittest.TestCase):
         self.assertEqual(self.req("POST", "/load", {}, {"Content-Type": "application/json",
                                                         "Origin": f"http://127.0.0.1:{self.port}"})[0], 200)
 
-    # --- /slots/0?action=save|restore (session files)
-    def test_slots_need_json_from_the_own_page(self):
+    # --- every route that changes something: JSON from the own page, or from a client that is no browser
+    def test_state_changing_routes_refuse_other_pages_and_rebinding(self):
+        self.start()
+        body = {"defaults": None}
+        evil = "http://evil.example.com"
+        with mock.patch.object(self.svc, "unload", return_value="unloaded") as unload, \
+                mock.patch.object(self.svc, "load") as load, \
+                mock.patch.object(self.svc, "ensure_loaded") as ensure_loaded, \
+                mock.patch.object(self.svc, "set_shared", return_value={}) as set_shared:
+            for path in ("/unload", "/load", "/v1/unload", "/v1/load", "/settings", "/config"):
+                # a plain form POST from another site's page (it needs no CORS preflight)
+                code = self.req("POST", path, b"a=1", {"Content-Type": "application/x-www-form-urlencoded",
+                                                       "Origin": evil})[0]
+                self.assertEqual(code, 403 if path.startswith("/v1/") else 415, path)
+                self.assertEqual(self.req("POST", path, body, {"Content-Type": "application/json",
+                                                               "Origin": evil})[0], 403, path)
+                # a DNS-rebinding page: its own name in Host
+                self.assertEqual(self.req("POST", path, body, {"Content-Type": "application/json"},
+                                          host="rebind.example.com")[0], 403, path)
+        for called in (unload, load, ensure_loaded, set_shared):
+            called.assert_not_called()
+
+    # --- /slots/0?action=save|restore: llama-server's session files, which this engine does not write
+    def test_slot_save_and_restore_are_not_supported(self):
         self.start()
         body = {"filename": "a.bin"}
         for action in ("save", "restore"):
             path = f"/slots/0?action={action}"
-            self.assertEqual(self.req("POST", path, b"filename=a.bin",
-                                      {"Content-Type": "application/x-www-form-urlencoded"})[0], 415, path)
-            self.assertEqual(self.req("POST", path, body, {"Content-Type": "text/plain"})[0], 415, path)
-            for origin in ("http://evil.example.com", "null"):
-                self.assertEqual(self.req("POST", path, body, {"Content-Type": "application/json",
-                                                               "Origin": origin})[0], 403, (path, origin))
-            # JSON without an Origin (curl, scripts) or from the own page reaches the slot API: off here, so 501
-            self.assertEqual(self.req("POST", path, body, {"Content-Type": "application/json"})[0], 501, path)
-            self.assertEqual(self.req("POST", path, body, {"Content-Type": "application/json",
-                                                           "Origin": f"http://127.0.0.1:{self.port}"})[0], 501, path)
+            # nothing is saved or read, whoever asks (curl, the own page, another site's form)
+            for headers in ({"Content-Type": "application/json"},
+                            {"Content-Type": "application/json", "Origin": f"http://127.0.0.1:{self.port}"},
+                            {"Content-Type": "application/x-www-form-urlencoded", "Origin": "http://evil.example.com"}):
+                code, reply, _ = self.req("POST", path, body, headers)
+                self.assertEqual(code, 501, (path, headers))
+                self.assertEqual(reply["error"]["type"], "not_supported_error")
         self.assertEqual(self.req("POST", "/slots/0?action=save", body, {"Content-Type": "application/json"},
                                   host="rebind.example.com")[0], 403)
 
