@@ -90,11 +90,18 @@ class Download(unittest.TestCase):
             seen.append(req.get_method())
             raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
 
-        with tempfile.TemporaryDirectory() as d, mock.patch.object(setup.urllib.request, "urlopen", urlopen), \
-                mock.patch.object(setup.time, "sleep", side_effect=AssertionError("retried")):
-            with self.assertRaises(SystemExit):
-                quiet(setup.download, "https://huggingface.co/r/resolve/main/m.gguf", Path(d) / "m.gguf")
-        self.assertEqual(seen, ["HEAD"])
+        for url, said in (("https://huggingface.co/r/resolve/main/m.gguf", "it lists the model's files again"),
+                          ("https://github.com/x/archive/y.zip", "a proxy or firewall can refuse it")):
+            seen.clear()
+            out = io.StringIO()
+            with tempfile.TemporaryDirectory() as d, mock.patch.object(setup.urllib.request, "urlopen", urlopen), \
+                    mock.patch.object(setup.time, "sleep", side_effect=AssertionError("retried")), \
+                    mock.patch.dict(setup.os.environ, {}, clear=False), contextlib.redirect_stdout(out):
+                setup.os.environ.pop("HF_ENDPOINT", None)
+                with self.assertRaises(SystemExit):
+                    setup.download(url, Path(d) / "m.gguf")
+            self.assertEqual(seen, ["HEAD"])
+            self.assertIn(said, out.getvalue())
 
     def test_a_wrong_size_is_deleted(self):
         with tempfile.TemporaryDirectory() as d:

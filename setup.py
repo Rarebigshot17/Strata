@@ -499,9 +499,12 @@ def download(url, dst: Path, what=None):
             break
         except urllib.error.HTTPError as e:            # the server answers, but not with the file
             if e.code in (401, 403, 404) or attempt == 4:
+                model_file = url.startswith(hf_endpoint() + "/")
                 fail(f"{url.split('/')[2]} does not give {what or dst.name} ({e})",
-                     "run setup again (it lists the model's files again); HF_ENDPOINT, if you set one, must be a "
-                     "Hugging Face mirror" if e.code in (401, 403, 404) else hint)
+                     hint if e.code not in (401, 403, 404) else
+                     "run setup again: it lists the model's files again (HF_ENDPOINT, if you set one, must be a "
+                     "Hugging Face mirror)" if model_file else
+                     "check that this PC may reach it (a proxy or firewall can refuse it) and run it again")
             time.sleep(5)
         except OSError as e:
             if attempt == 4:
