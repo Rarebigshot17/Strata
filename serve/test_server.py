@@ -271,20 +271,41 @@ class TextOnly(unittest.TestCase):
                 self.assertIn("text only", b["error"]["message"])
 
     def test_a_tools_picture_is_a_note_in_its_place(self):
+        from serve.frontend import IMAGE_OMITTED
         for api in ("openai", "anthropic"):
-            for content, text in (([{"type": "text", "text": "a.png:"}, self.PICTURE[api]], "a.png:"),
-                                  ([self.PICTURE[api]], ""), ([{"type": "text", "text": "r"}], "r"), ("r", "r")):
+            pic = self.PICTURE[api]
+            for content, want in (([{"type": "text", "text": "a.png:"}, pic], "a.png:" + IMAGE_OMITTED),
+                                  ([pic], IMAGE_OMITTED), ([pic, {"type": "text", "text": "and"}, pic],
+                                                           IMAGE_OMITTED + "and" + IMAGE_OMITTED),
+                                  ([{"type": "text", "text": "r"}], "r"), ("r", "r")):   # a text-only result: its text
                 with self.subTest(api=api, content=str(content)[:40]):
                     status, b = self.post(api, self.with_result(api, content))
                     self.assertEqual(status, 200, b)
                     prompt = self.tok.decode(self.engine.last_prompt)
                     self.assertEqual(prompt.count("<tool_response>"), 1)
-                    result = prompt.split("<tool_response>", 1)[1].split("</tool_response>", 1)[0]
-                    if text == "r":                                  # a text-only result is its text
-                        self.assertEqual(result, "r")
-                    else:
-                        self.assertEqual(result[:len(text)], text)
-                        self.assertRegex(result[len(text):], r"^\[image omitted: [^\]]*text only\]$")
+                    self.assertEqual(prompt.split("<tool_response>", 1)[1].split("</tool_response>", 1)[0], want)
+
+    def test_a_picture_beside_a_tool_result_is_the_users(self):
+        # Anthropic: a picture next to the tool_result block, not inside it, is the user's own: still a 400
+        msgs = self.with_result("anthropic", "r")
+        msgs[-1]["content"] += [self.PICTURE["anthropic"], {"type": "text", "text": "and this one"}]
+        status, b = self.post("anthropic", msgs)
+        self.assertEqual(status, 400, b)
+        self.assertIn("text only", b["error"]["message"])
+
+    def test_the_messages_a_tool_result_becomes(self):
+        from serve.frontend import anthropic_to_messages
+        from serve.server import IMAGE_NOTE
+        # a text-only tool result is one string, as before
+        msgs = self.with_result("anthropic", [{"type": "text", "text": "r"}])
+        self.assertEqual(anthropic_to_messages({"messages": msgs})[0][-1], {"role": "tool", "content": "r"})
+        # a tool message handed to the server with its parts as a list: the server writes the note itself
+        ids, _, _ = self.svc.prepare([{"role": "user", "content": "look at a.png"},
+                                      {"role": "tool", "content": [{"type": "text", "text": "a.png:"},
+                                                                   {"type": "image", "source": "a.png"}]}], None, {})
+        self.assertIn("<tool_response>a.png:" + IMAGE_NOTE + "</tool_response>", self.tok.decode(ids))
+        with self.assertRaisesRegex(ValueError, "text only"):
+            self.svc.prepare([{"role": "user", "content": [{"type": "image", "source": "a.png"}]}], None, {})
 
 
 class ListenProblem(unittest.TestCase):
