@@ -534,9 +534,6 @@ class ToolRoundTrip(Server):
         self.assertIn("<|observation|><tool_response>before</tool_response>", second_prompt)
         self.assertEqual(r["output"][-1]["content"][0]["text"], "The file says before.")
 
-    # BUG: the parser reads a call only under a declared tool's name, so the flat `ns__tool` spelling that
-    # request_tools maps back (responses.py) never becomes a call: the client gets the call's text as the answer.
-    @unittest.expectedFailure
     def test_namespace_call_written_with_double_underscore(self):
         # A model may write Codex's MCP tools in their flat `mcp__server__tool` form; Codex only
         # runs the call when it comes back with its namespace.
@@ -552,6 +549,10 @@ class ToolRoundTrip(Server):
         call, = r["output"]
         self.assertEqual((call["namespace"], call["name"], json.loads(call["arguments"])),
                          ("mcp__websearch", "web_search", {"query": "strata"}))
+        # the parser knows the flat spelling; the prompt shows the tool under its own name only
+        prompt = self.tok.decode(self.engine.last_prompt)
+        self.assertIn("mcp__websearch.web_search", prompt)
+        self.assertNotIn("mcp__websearch__web_search", prompt)
 
     def test_namespace_and_custom_calls_come_back_under_their_own_names(self):
         self.engine.scripts = [self.tok.encode(TWO_CALLS + "<|observation|>", parse_special=True)]

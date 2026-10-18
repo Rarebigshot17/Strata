@@ -626,7 +626,7 @@ class StrataEngine:
         try:
             with open(self.log_path, "rb") as f:
                 f.seek(0, 2)
-                f.seek(max(0, f.tell() - 4096))
+                f.seek(max(0, f.tell() - 65536))  # its last words can sit behind many "conversations:" lines
                 tail = f.read().decode("utf-8", "replace")
         except (OSError, TypeError):
             pass
@@ -3821,7 +3821,7 @@ def make_handler(svc: Service):
             asm = responses_api.Assembler(req, svc.model_for(req), len(ids), names,
                                           "reasoning.encrypted_content" in include, validator is not None)
             # the request is also the sampling dict, as on the chat path (temperature, top_p, top_k, seed, ...)
-            return ids, thinking, tools, max_new, asm, validator, req
+            return ids, thinking, responses_api.parser_tools(tools, names), max_new, asm, validator, req
 
         def _count_tokens(self, req):
             """Anthropic's token count, which Claude Code asks for its context figures: the prompt this server would

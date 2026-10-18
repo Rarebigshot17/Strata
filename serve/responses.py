@@ -293,6 +293,18 @@ def request_tools(req: dict):
     return tools or None, names, skipped
 
 
+
+def parser_tools(tools, names: dict):
+    """The tools the reply is read against: the template's, plus each namespace tool's flat `ns__tool` spelling
+    (request_tools maps it back in `names`), so a call written that way is read as the call it is, not as text.
+    The template shows only the template's own names."""
+    if not tools:
+        return tools
+    by_name = {t["name"]: t for t in tools}
+    extra = [{**by_name[f"{ns}.{name}"], "name": alias} for alias, (ns, name, _kind) in names.items()
+             if ns and alias not in by_name and f"{ns}.{name}" in by_name]
+    return tools + extra
+
 def _turn_body(req: dict):
     meta = req.get("client_metadata")
     raw = meta.get("x-codex-turn-metadata") if isinstance(meta, dict) else None
