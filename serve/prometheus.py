@@ -73,7 +73,7 @@ def render(m: dict, lat: dict) -> str:
     busy = live.get("state") in ("reading", "generating")
     ctx = _num((m.get("engine") or {}).get("max_context"), 0)
     used = _num(live.get("prompt_tokens")) + _num(live.get("generated")) if busy else 0
-    # "parallel": live.running / live.waiting count the requests together (waiting: for a slot or the control lines)
+    # live.running / live.waiting, when the JSON has them, count the requests together; else the one running request
     metric("vllm:num_requests_running", "gauge", "Requests reading their prompt or generating.",
            _num(live.get("running"), int(busy)))
     metric("vllm:num_requests_waiting", "gauge", "Requests waiting for their turn.",
@@ -88,9 +88,9 @@ def render(m: dict, lat: dict) -> str:
            _num(totals.get("prompt_tokens")))
     metric("vllm:prefix_cache_hits_total", "counter", "Prompt tokens the prompt cache already held.",
            _num(totals.get("reused")))
-    metric("vllm:spec_decode_num_draft_tokens_total", "counter", "MTP draft tokens offered.",
+    metric("vllm:spec_decode_num_draft_tokens_total", "counter", "Speculative draft tokens offered (0: no drafts).",
            _num(totals.get("drafts_offered")))
-    metric("vllm:spec_decode_num_accepted_tokens_total", "counter", "MTP draft tokens accepted.",
+    metric("vllm:spec_decode_num_accepted_tokens_total", "counter", "Speculative draft tokens accepted.",
            _num(totals.get("drafts_accepted")))
     metric("vllm:num_preemptions_total", "counter", "Preempted requests (Strata does not preempt).", 0)
     for name, key, help_ in (("vllm:time_to_first_token_seconds", "ttft", "Time to the first token."),
@@ -133,7 +133,7 @@ def strata(m: dict, out: list, lab: str):
     for state in ("idle", "reading", "generating"):
         slots = live.get("slots")
         if isinstance(slots, list) and slots:
-            metric("live_slots", "gauge", "The batch slots in each state (live.slots).",
+            metric("live_slots", "gauge", "The engine's slots in each state (live.slots, when it has them).",
                    sum(1 for x in slots if isinstance(x, dict) and x.get("state") == state), f',state="{state}"')
     metric("engine_max_context", "gauge", "The engine's context (engine.max_context).", eng.get("max_context"))
     metric("totals_prompt_seconds_total", "counter", "Time spent reading prompts (totals.prompt_ms).",

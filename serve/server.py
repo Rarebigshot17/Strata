@@ -463,7 +463,7 @@ class ConvCacheLog:
             elif m := self.RESUMED.search(line):
                 st["restores"] += 1
                 st["last_event"], st["last_from"], st["last_tokens"], st["last_at"] = \
-                    "restored", m.group(1), int(m.group(2)), now
+                    "resumed", m.group(1), int(m.group(2)), now
             elif self.DROPPED.search(line):
                 st["evictions"] += 1
         return dict(st)
@@ -1328,7 +1328,7 @@ class Service:
         self.history = collections.deque(maxlen=500)    # the last finished requests, newest last (GET /metrics)
         # since the server started (the Monitor's totals, issue #35)
         self.totals = {"since": time.time(), "requests": 0, "prompt_tokens": 0, "reused": 0, "output_tokens": 0,
-                       "prompt_ms": 0.0, "decode_ms": 0.0}
+                       "prompt_ms": 0.0, "decode_ms": 0.0, "hits": 0, "lookups": 0}
         self.last_timings = None                         # the last finished request's, llama.cpp's names (/v1/status)
         from serve.prometheus import Latencies
         self.latencies = Latencies()                     # GET /metrics in Prometheus text: the latency histograms
@@ -1703,7 +1703,7 @@ class Service:
                 "tok_s_window_s": RATE_WINDOW_S if state == "generating" else None}
         if state == "reading" and progress:
             live["prompt_read"], live["prompt_total"] = progress
-        engine = {"model": self.model, "max_context": self.reported_ctx(), "images": False,
+        engine = {"model": self.model, "max_context": self.reported_ctx(),
                   **dict(getattr(self.engine, "info", {}) or {})}
         tel = self.telemetry.snapshot() if getattr(self, "telemetry", None) else {"now": {}, "history": {}, "static": {}}
         parked = self.conv_log.poll(getattr(self.engine, "log_path", None), getattr(self.engine, "log_start", None))
@@ -2275,6 +2275,8 @@ class Service:
         t["output_tokens"] += n
         t["prompt_ms"] += last.get("prompt_ms") or 0.0
         t["decode_ms"] += last.get("decode_ms") or 0.0
+        t["hits"] += last.get("hits") or 0              # the expert cache's, summed: the Monitor's overall hit rate
+        t["lookups"] += last.get("lookups") or 0
         ft = st.get("first_token")
         self.latencies.observe(ft - started if ft else None, n, (last.get("decode_ms") or 0.0) / 1000,
                                time.time() - started)
@@ -3874,7 +3876,7 @@ def lan_addresses() -> list[str]:
 
 
 def host_name(value) -> str:
-    """The name in a Host header (or an origin's host[:port]): "Example.com:8080" -> "example.com",
+    """The name in a Host header (or an origin's host[:port]): "Example.com:8101" -> "example.com",
     "[::1]:8095" -> "::1"; "" when it is malformed."""
     v = (value or "").strip().lower()
     if v.startswith("["):
@@ -4023,7 +4025,7 @@ def origin_allowed(origin: str, host, names, origins=()) -> bool:
     return bool(name) and (name in LOOPBACK_NAMES or name.endswith(".localhost") or _name_in(name, names))
 
 
-def serve(svc: Service, host="127.0.0.1", port=8095) -> ThreadingHTTPServer:
+def serve(svc: Service, host="127.0.0.1", port=DEFAULT_PORT) -> ThreadingHTTPServer:
     svc.host_names = host_names_for(host, svc.allowed_hosts, svc.trusted_origins)
     svc.start_telemetry()
     httpd = Server((host, port), make_handler(svc))
@@ -4054,10 +4056,6 @@ def origins_of(value, key: str, wildcard: bool) -> list[str]:
     return out
 
 
-SHARED_KEYS = ("reasoning_effort", "reasoning_budget_tokens", "temperature", "top_p", "top_k", "seed", "max_tokens",
-               "experimental_speed_projection")
-
-
 def clean_shared_defaults(d) -> dict:
     """The Chat settings other apps get (POST /settings): only known keys, each checked; ValueError names a bad one."""
     if d is None:
@@ -4069,7 +4067,7 @@ def clean_shared_defaults(d) -> dict:
         if value is None or value == "":
             continue
         number = isinstance(value, (int, float)) and not isinstance(value, bool)
-        if key == "reasoning_effort":
+        if key == "reasoning_effort":                          # GLM thinks or does not: none is off, the rest on
             if value not in ("none", "low", "medium", "high"):
                 raise ValueError("reasoning_effort: none, low, medium or high")
         elif key == "temperature":
@@ -4078,9 +4076,9 @@ def clean_shared_defaults(d) -> dict:
         elif key == "top_p":
             if not number or not 0 < value <= 1:
                 raise ValueError("top_p: 0 < top_p <= 1")
-        elif key == "top_k":
-            if not number or value != int(value) or not 1 <= value <= 64:
-                raise ValueError("top_k: an integer 1..64")
+        elif key == "top_k":                                   # 0: off (the whole vocabulary)
+            if not number or value != int(value) or value < 0:
+                raise ValueError("top_k: a whole number >= 0 (0: off)")
             value = int(value)
         elif key in ("seed", "max_tokens"):
             if not number or value != int(value) or value <= 0:
@@ -4090,9 +4088,6 @@ def clean_shared_defaults(d) -> dict:
             if not number or value != int(value) or value < 0:
                 raise ValueError("reasoning_budget_tokens: a whole number of tokens (0: no budget)")
             value = int(value)
-        elif key == "experimental_speed_projection":
-            if not isinstance(value, bool):
-                raise ValueError("experimental_speed_projection: true or false")
         else:
             raise ValueError(f"unknown setting {key!r}")
         out[key] = float(value) if key in ("temperature", "top_p") else value
@@ -4165,8 +4160,8 @@ def sampling_defaults_from_config(cfg: dict) -> dict:
                 raise SystemExit(f"[strata] config sampling.min_p={value!r}: expected 0 <= min_p <= 1")
             out[key] = float(value)
         elif key == "top_k":
-            if not number or value != int(value) or not 1 <= value <= 64:
-                raise SystemExit(f"[strata] config sampling.top_k={value!r}: the sampled path takes an integer 1..64")
+            if not number or value != int(value) or value < 0:
+                raise SystemExit(f"[strata] config sampling.top_k={value!r}: expected a whole number >= 0 (0 = off)")
             out[key] = int(value)
         elif key == "presence_penalty":
             if not number or value < 0:
@@ -4188,11 +4183,6 @@ def sampling_defaults_from_config(cfg: dict) -> dict:
             if not number or value != int(value) or value <= 0:
                 raise SystemExit(f"[strata] config sampling.seed={value!r}: expected a positive integer")
             out[key] = int(value)
-        elif key == "experimental_speed_projection":
-            if not isinstance(value, bool):
-                raise SystemExit(f"[strata] config sampling.experimental_speed_projection={value!r}: expected true or "
-                                 "false (the default for requests that leave it out, when the engine has the vector)")
-            out[key] = value
         else:
             print(f"[strata] config sampling.{key}={value!r}: unknown key, ignored", flush=True)
     return out
@@ -4246,8 +4236,8 @@ def check_request_sampling(req) -> None:
     that names the field, as the same value is through POST /settings or the run config.  Unchecked, the value
     replaced the configured default in run()'s merge and sampling_keys dropped it, so the reply was greedy.  Only
     types are checked: a number (int or float, never bool) for temperature, top_p, min_p and the three penalties; an
-    integer (never bool or float) for top_k, penalty_last_n and seed.  Ranges behave as before (a temperature <= 0 is
-    greedy, top_k 0 or above 64 is clamped, a seed <= 0 is unset), and an absent or null field is not checked."""
+    integer (never bool or float) for top_k, penalty_last_n and seed.  Ranges are the engine's (a temperature <= 0 is
+    greedy, top_k 0 is off, a negative top_k or a seed <= 0 is unset), and an absent or null field is not checked."""
     if isinstance(req, dict):      # #1819: llama.cpp's names; the OpenAI-style field wins when both are sent
         if req.get("repeat_penalty") is not None and req.get("repetition_penalty") is None:
             req["repetition_penalty"] = req["repeat_penalty"]
