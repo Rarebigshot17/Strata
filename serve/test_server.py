@@ -1533,8 +1533,8 @@ class PrometheusMetrics(unittest.TestCase):
     def test_totals(self):
         tok = GlmTokenizer()
         engine = DoneLineEngine(tok, reply_text("", "ok"), max_context=CTX, done_lines=[
-            "DONE 4 20 400.0 200.0 stop 0 0 5",                 # 5 of the prompt's tokens reused
-            "DONE 4 20 400.0 200.0 stop 0 0 0"])
+            "DONE 4 20 400.0 200.0 stop 0 0 5 0 0 0 0 0.0 15 0",     # 5 of the prompt's tokens reused
+            "DONE 4 20 400.0 200.0 stop 0 0 0 0 0 0 0 0.0 20 0"])
         svc = Service(engine, tok, glm_template())
         httpd = serve(svc, port=0)
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
@@ -1572,13 +1572,14 @@ class ExpertCacheHits(unittest.TestCase):
         engine = DoneLineEngine(tok, "ok", max_context=CTX, done_lines=[
             "DONE 4 20 40.0 30.0 stop 0 0 0 60 100 0 0 0.0 20 0",
             "DONE 4 20 40.0 30.0 stop 0 0 0 30 40 0 0 0.0 20 0",
+            "DONE 0 20 40.0 0.0 stop 0 0 0 0 0 0 0 0.0 20 0",       # nothing decoded: no lookups
             "DONE 4 20 40.0 30.0 stop 0 0 0"])
         svc = Service(engine, tok, glm_template())
         with contextlib.redirect_stdout(io.StringIO()) as out:
-            for _ in range(3):
+            for _ in range(4):
                 list(svc.run(tok.encode("hi"), False, None, 10, {}, threading.Event()))
         rows = list(svc.history)
-        self.assertEqual([r["hit_rate"] for r in rows], [0.6, 0.75, None])
+        self.assertEqual([r["hit_rate"] for r in rows], [0.6, 0.75, None, None])
         self.assertEqual((svc.totals["hits"], svc.totals["lookups"]), (90, 140))
         self.assertIn("expert cache 60.0% hit", out.getvalue())
         self.assertIn("expert cache 75.0% hit", out.getvalue())
@@ -1601,6 +1602,26 @@ class SeveralGpus(unittest.TestCase):
                          args + ["--split", "24,12"])
         mine = args + ["--split", "1,1"]                              # the args' own: unchanged
         self.assertEqual(engine_args({"args": list(mine), "gpu": [0, 1], "split": [24, 12]}), mine)
+
+    def test_the_configs_split_forms_and_refusals(self):
+        """A list or a string, one positive share per card of "gpu"; anything else is refused with the format."""
+        from serve.server import split_value
+        cfg = {"args": [], "gpu": [2, 0, 1]}
+        self.assertIsNone(split_value(cfg))
+        for v in (None, "", []):
+            self.assertIsNone(split_value({**cfg, "split": v}))
+        for v in ([24, 12, 10], "24,12,10", " 24, 12 ,10 ", [24.0, "12", 10]):
+            self.assertEqual(split_value({**cfg, "split": v}), "24,12,10")
+        self.assertEqual(split_value({**cfg, "split": [1.5, 1, 1]}), "1.5,1,1")
+        for bad in ("x", "24,,10", [24, 0, 10], [-1, 1, 1], [True, 1, 1]):
+            with self.assertRaises(ValueError) as e:
+                split_value({**cfg, "split": bad})
+            self.assertIn("one positive number per card", str(e.exception))
+            self.assertIn("[24, 12, 10]", str(e.exception))             # the example
+        for bad in ("24,12", [24, 12, 10, 8]):
+            with self.assertRaises(ValueError) as e:
+                split_value({**cfg, "split": bad})
+            self.assertIn("for the 3 card(s)", str(e.exception))
 
 
 class RepeatStop(unittest.TestCase):
@@ -1716,7 +1737,8 @@ class NonFiniteLogits(unittest.TestCase):
             for path, stream in (("/v1/chat/completions", False), ("/v1/chat/completions", True),
                                  ("/v1/responses", False)):
                 svc.engine.plan = [0, 0]
-                body = {"model": "m", "max_tokens": 20, "stream": stream, "messages": [{"role": "user", "content": "hi"}]}
+                body = {"model": "m", "max_tokens": 20, "stream": stream,
+                        "messages": [{"role": "user", "content": "hi"}]}
                 if path == "/v1/responses":
                     body = {"model": "m", "max_output_tokens": 20, "input": "hi"}
                 req = urllib.request.Request(base + path, data=json.dumps(body).encode(),
@@ -1801,18 +1823,28 @@ class StartNarrator(unittest.TestCase):
     GPU, the expert cache, then the warm-up that reads the experts in before READY (a heartbeat repeats its latest
     line)."""
 
-    def narrate(self, lines, before="", heartbeat=20.0, wait=0.8):
+    class Polls:
+        """narrate_start's `done`: `n` reads of the log, each one moving the test's clock on by the poll's half
+        second, then the end of the start (no sleeps racing the poll)."""
+
+        def __init__(self, n, clock):
+            self.n, self.clock = n, clock
+
+        def wait(self, timeout):
+            if self.n <= 0:
+                return True
+            self.n -= 1
+            self.clock[0] += timeout
+            return False
+
+    def narrate(self, lines, before="", heartbeat=20.0, polls=1):
         from serve.server import narrate_start
         d = tempfile.mkdtemp()
         log = Path(d) / "engine.log"
         log.write_text(before + "".join(x + "\n" for x in lines), encoding="utf-8")
-        done, out = threading.Event(), io.StringIO()
-        with contextlib.redirect_stdout(out):
-            t = threading.Thread(target=narrate_start, args=(str(log), len(before.encode()), None, done, heartbeat))
-            t.start()
-            time.sleep(wait)
-            done.set()
-            t.join(5)
+        clock, out = [1000.0], io.StringIO()
+        with mock.patch("serve.server.time.time", lambda: clock[0]), contextlib.redirect_stdout(out):
+            narrate_start(str(log), len(before.encode()), None, self.Polls(polls, clock), heartbeat)
         return out.getvalue()
 
     def test_the_words_follow_the_log(self):
@@ -1827,17 +1859,22 @@ class StartNarrator(unittest.TestCase):
         self.assertNotIn("an earlier start", said)
         self.assertIn("[strata] expert cache: 1920 slots over 46 layers", said)
         self.assertIn("reading the experts into memory", said)
+        self.assertNotIn("warming the experts", said)                 # no heartbeat yet
+        self.assertNotIn("still starting", said)
 
-    def test_the_heartbeat_repeats_the_warm_up(self):
-        said = self.narrate(["warming the experts: 12.0 of 140.0 GB (6 s, 2.00 GB/s)"], heartbeat=0.3, wait=1.5)
-        self.assertIn("[strata] warming the experts: 12.0 of 140.0 GB", said)
-        said = self.narrate([], heartbeat=0.3, wait=1.5)              # nothing logged yet: still starting
+    def test_the_heartbeat_repeats_the_latest_warm_up_line(self):
+        said = self.narrate(["warming the experts: 12.0 of 140.0 GB (6 s, 2.00 GB/s)",
+                             "warming the experts: 30.0 of 140.0 GB (15 s, 2.00 GB/s)"], heartbeat=0.3, polls=2)
+        self.assertEqual(said.count("reading the experts into memory"), 1)
+        self.assertIn("[strata] warming the experts: 30.0 of 140.0 GB", said)
+        self.assertNotIn("12.0 of 140.0 GB", said)
+        said = self.narrate([], heartbeat=0.3)                        # nothing logged yet: still starting
         self.assertIn("[strata] still starting", said)
 
 
 class CancelledRead(unittest.TestCase):
     """#471: a request cancelled while its prompt was read is recorded with the tokens the engine read (the DONE
-    line's 15th field), not the whole prompt; an older engine's line (no such field) keeps the whole prompt."""
+    line's 15th field), not the whole prompt; a line without that field keeps the whole prompt."""
 
     def test_parse_done_read_field(self):
         e = SimpleNamespace()
@@ -1850,6 +1887,8 @@ class CancelledRead(unittest.TestCase):
         last = {"finish": "cancel", "reused": 1000, "prompt_read": 2000}
         self.assertEqual(prompt_tokens_seen(98179, last), 3000)
         self.assertEqual(prompt_tokens_seen(98179, {**last, "finish": "stop"}), 98179)   # read in full: all of it
+        # stopped while it waited in the engine: its DONE reads and reuses nothing
+        self.assertEqual(prompt_tokens_seen(98179, {"finish": "cancel", "reused": 0, "prompt_read": 0}), 0)
         self.assertEqual(prompt_tokens_seen(98179, {"finish": "cancel", "reused": 0}), 98179)   # no read count
         self.assertEqual(prompt_tokens_seen(98179, {}), 98179)                          # no DONE at all
         self.assertEqual(prompt_tokens_seen(10, {**last, "prompt_read": 50}), 10)       # never past the prompt
@@ -1955,7 +1994,7 @@ class LiveRate(unittest.TestCase):
         engine.max_context = 262144
         engine.prefill_tok_s_mean = 9999.0
         engine.lines.put("PP 10000 12000 2000 1000.0")  # 8000 cached, 2000 newly read in two seconds
-        engine.lines.put("DONE 1 12000 4000 10 stop 0 0 8000")
+        engine.lines.put("DONE 1 12000 4000 10 stop 0 0 8000 0 0 0 0 0.0 4000 0")
         gen = engine.generate([1], 1, {}, threading.Event())
         self.assertIsNone(next(gen))
         self.assertEqual(engine.progress, (10000, 12000))
@@ -1971,7 +2010,7 @@ class LiveRate(unittest.TestCase):
         timings = request_timings(12000, 1, engine.last)
         self.assertEqual(timings["prompt_per_second"], 1000.0)
         engine.lines.put("PP 8000 12000")
-        engine.lines.put("DONE 0 12000 0 0 stop 0 0 12000")
+        engine.lines.put("DONE 0 12000 0 0 stop 0 0 12000 0 0 0 0 0.0 0 0")
         gen = engine.generate([1], 1, {}, threading.Event())
         next(gen)
         self.assertIsNone(engine.prefill_tok_s_mean)
@@ -2121,20 +2160,27 @@ class PromptProgress(unittest.TestCase):
         self.svc.engine = eng
         gen = eng.generate([1] * 25000, 10, {}, threading.Event())
         self.assertIsNone(next(gen))
-        self.assertEqual(prompt_progress(self.svc), {"total": 25000, "cache": 4096, "processed": 12288, "time_ms": 2200})
+        self.assertEqual(prompt_progress(self.svc),
+                         {"total": 25000, "cache": 4096, "processed": 12288, "time_ms": 2200})
         self.assertIsNone(next(gen))                  # the HB is no progress and, this soon, no ping either
         self.assertEqual(eng.progress, (25000, 25000))
         self.assertIsNone(prompt_progress(self.svc))
         self.assertEqual(list(gen), [65])
         self.assertEqual((eng.last["reused"], eng.last["prompt_read"]), (4096, 20904))
+        # the engine prints RESUME only when it reused something: the next request's progress counts no cache
+        for line in ("PP 2048 25000 500 4096.0", "T 66", "DONE 1 25000 6000.0 10.0 stop 0 0 0 0 0 0 0 0.0 25000 0"):
+            eng.lines.put(line)
+        gen = eng.generate([1] * 25000, 10, {}, threading.Event())
+        self.assertIsNone(next(gen))
+        self.assertEqual(prompt_progress(self.svc), {"total": 25000, "cache": 0, "processed": 2048, "time_ms": 500})
+        self.assertEqual(list(gen), [66])
 
     def test_nothing_before_the_first_chunk(self):
         self.engine.progress = None
         self.assertIsNone(prompt_progress(self.svc), "no PP line yet: there is no rate to show")
         self.engine.progress = (8192, self.TOTAL)
-        self.engine.reused = 0                        # an engine too old to print RESUME never sets it
-        self.assertEqual(prompt_progress(self.svc)["cache"], 0,
-                         "an engine too old to print RESUME counts the reused prefix as work")
+        self.engine.reused = 0                        # no RESUME line: the engine reused nothing
+        self.assertEqual(prompt_progress(self.svc)["cache"], 0, "a request that reused nothing has no cached prefix")
 
 
 class ConfigReasoningEffort(unittest.TestCase):
@@ -2208,7 +2254,8 @@ class SharedSettings(unittest.TestCase):
 
     def req(self, path, body, headers=None, raw=None):
         h = {"Content-Type": "application/json", **(headers or {})}
-        r = urllib.request.Request(self.base + path, data=raw if raw is not None else json.dumps(body).encode(), headers=h)
+        r = urllib.request.Request(self.base + path, data=raw if raw is not None else json.dumps(body).encode(),
+                                   headers=h)
         try:
             with urllib.request.urlopen(r, timeout=30) as resp:
                 return resp.status, json.loads(resp.read())
@@ -2217,7 +2264,8 @@ class SharedSettings(unittest.TestCase):
                 return e.code, json.loads(e.read())
 
     def chat(self, **extra):
-        return self.req("/v1/chat/completions", {"model": "m", "messages": [{"role": "user", "content": "hi"}], **extra})
+        return self.req("/v1/chat/completions",
+                        {"model": "m", "messages": [{"role": "user", "content": "hi"}], **extra})
 
     def tearDown(self):
         self.svc.set_shared(None)
@@ -2249,7 +2297,8 @@ class SharedSettings(unittest.TestCase):
         self.assertEqual((code, b["shared"]), (200, False))
         self.assertFalse(os.path.exists(self.svc.shared_path))
         self.chat()
-        self.assertEqual(self.engine.last_sampling["temperature"], 1.0)    # GLM's default again, not the Chat's 0.3
+        got = self.engine.last_sampling                              # GLM's defaults again, not the Chat's 0.3
+        self.assertEqual((got["temperature"], got["top_p"]), (1.0, 0.95))
 
     def test_a_body_without_the_defaults_wrapper_is_rejected(self):
         """A body with no "defaults" key is a mistake, not the documented "clear them" ({"defaults": null})."""
@@ -2754,7 +2803,8 @@ class SharingTheGpu(unittest.TestCase):
 
     def req(self, path, body=None):
         r = urllib.request.Request(self.base + path, data=None if body is None else json.dumps(body).encode(),
-                                   headers={"Content-Type": "application/json"}, method="GET" if body is None else "POST")
+                                   headers={"Content-Type": "application/json"},
+                                   method="GET" if body is None else "POST")
         try:
             with urllib.request.urlopen(r, timeout=30) as resp:
                 return resp.status, json.loads(resp.read())
@@ -2829,7 +2879,8 @@ class SharingTheGpu(unittest.TestCase):
 
     def _raw_chat(self):
         r = urllib.request.Request(self.base + "/v1/chat/completions",
-                                   data=json.dumps({"model": "m", "messages": [{"role": "user", "content": "hi"}]}).encode(),
+                                   data=json.dumps({"model": "m",
+                                                    "messages": [{"role": "user", "content": "hi"}]}).encode(),
                                    headers={"Content-Type": "application/json"}, method="POST")
         try:
             with urllib.request.urlopen(r, timeout=30) as resp:
@@ -2985,7 +3036,8 @@ class ReasoningCloseRetry(unittest.TestCase):
         self.svc.reasoning_close_retry = True
         c = self.chat()
         self.assertEqual(len(self.engine.prompts), 2)
-        self.assertTrue(self.tok.decode(self.engine.prompts[1]).endswith(self.engine.THOUGHT + "</think>"))
+        first, second = self.engine.prompts           # the prompt, the reasoning and </think>: no end-of-turn token
+        self.assertEqual(second, first + self.tok.encode(self.engine.THOUGHT) + self.tok.encode("</think>"))
         self.assertEqual(c["message"]["content"], EndsInsideThinkingEngine.ANSWER)
         self.assertIn("two plus two is four", c["message"]["reasoning_content"])
         self.assertEqual(c["finish_reason"], "stop")
@@ -2997,8 +3049,9 @@ class ReasoningCloseRetry(unittest.TestCase):
         self.assertEqual(len(self.engine.prompts), 1)
         self.assertEqual(c["message"]["content"], "Fine.")
 
-    def test_a_reply_that_closed_its_thinking_right_after_a_quote_is_not_touched(self):
-        # a </think> with nothing after it but the end of the turn is the end of the thinking: no answer, no retry
+    def test_a_reply_that_closed_its_thinking_without_an_answer_is_not_touched(self):
+        # a </think> with nothing after it but the end of the turn (here right after a quote) is the end of the
+        # thinking: the reply ends outside it, so there is nothing to close
         self.svc.reasoning_close_retry = True
         self.engine.THOUGHT = 'two plus two is "4"</think>'
         c = self.chat()
@@ -3109,7 +3162,8 @@ class ThinkingBudget(unittest.TestCase):
         self.assertTrue(b["choices"][0]["message"]["reasoning_content"].startswith(ThinkingEngine.THOUGHT[:20] + "\n"))
 
     def test_the_thinking_progress_line_shows_the_budget_not_max_tokens(self):
-        """#984: 'thinking: x of max 6400' read as if the budget was ignored; while a budget applies the line shows it."""
+        """#984: 'thinking: x of max 6400' read as if the budget was ignored; while a budget applies the line shows
+        it."""
         st = {"phase": "thinking", "generated": 10, "first_token": time.time() - 1, "started": time.time() - 2,
               "max_tokens": 6400, "thinking_budget": 2048}
         out = io.StringIO()
@@ -3134,7 +3188,8 @@ class ThinkingBudget(unittest.TestCase):
         self.assertTrue(msg["reasoning_content"].startswith(ThinkingEngine.THOUGHT[:150] + "\n"), msg)
         self.assertEqual((msg["content"], b["choices"][0]["finish_reason"]), (ThinkingEngine.ANSWER, "stop"))
         self.assertEqual(len(self.engine.prompts), 2)
-        self.assertIn("thinking capped at 150 of max_tokens 300 to leave room for the answer (budget 5000)", out.getvalue())
+        self.assertIn("thinking capped at 150 of max_tokens 300 to leave room for the answer (budget 5000)",
+                      out.getvalue())
 
     def test_a_budget_well_below_max_tokens_is_not_capped(self):
         out = io.StringIO()
@@ -3166,6 +3221,8 @@ class ThinkingBudget(unittest.TestCase):
         code, b = self.openai(reasoning_budget_tokens=5, reasoning_effort="none")
         self.assertEqual(code, 200, b)
         self.assertEqual(len(self.engine.prompts), 1)
+        self.assertTrue(self.tok.decode(self.engine.prompts[0]).endswith("<|assistant|></think>"))  # thinking off
+        self.assertEqual(b["choices"][0]["message"]["content"], ThinkingEngine.ANSWER)
 
     def test_no_room_left_to_answer(self):
         code, b = self.openai(reasoning_budget_tokens=20, max_tokens=40)    # 20 thought + the wrap-up > 40
