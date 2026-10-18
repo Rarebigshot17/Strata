@@ -1101,14 +1101,14 @@ class OutputParser:
                     else:
                         out.append(Event("reasoning", self._track(raw)))
                     self.buf, self.state, self.reader = body[end:], "reasoning", None
+                elif r.stage == "prose":             # not a call's name: the tag is text, the rest is read again
+                    out += self._release(False)
+                    out.append(Event("reasoning", self._track(CALL_START)))
+                    self.buf, self.state, self.reader = body, "reasoning", None
                 elif think >= 0:                     # the thinking ended inside it: it never was a call
                     out += self._release(False)
                     out.append(Event("reasoning", self._track(self.buf[:len(CALL_START) + think])))
                     self.buf, self.state, self.reader = body[think:], "reasoning", None
-                elif r.stage == "prose":             # not a call's name: the tag is text, and so is what follows
-                    out += self._release(False)
-                    out.append(Event("reasoning", self._track(CALL_START)))
-                    self.buf, self.state, self.reader = body, "reasoning", None
                 elif len(body) > RCALL_MAX:          # a call that never ends: stop holding the thinking back
                     out += self._release(False)
                     out.append(Event("reasoning", self._track(self.buf)))

@@ -441,6 +441,34 @@ class Recover(Base):
         self.assertEqual(self.calls(READ, thinking=False, recover=True), [("read_file", READ_ARGS)])
 
 
+class RandomReplies(unittest.TestCase):
+    """Random replies built from GLM's tags, names, code markers and text: every way of feeding one gives the same
+    events, the contract holds, and the streamed and plain parsers agree on the calls and the text."""
+    PARTS = ("Hello", " ", "\n", "\n\n", "`", "```", "~~~", "<tool_call>", "</tool_call>", "<arg_key>", "</arg_key>",
+             "<arg_value>", "</arg_value>", "</think>", "<think>", "read_file", "write_file", "ping", "path", "content",
+             "lines", "42", '{"a": [1, 2]}', "x y", "<", ">", "<tool", "</arg_v", "é\U0001F642", '"q"', "\\",
+             READ, "<tool_call>ping</tool_call>")
+
+    def test_random_replies(self):
+        rng = random.Random(20261018)
+        for n in range(300):
+            text = "".join(rng.choice(self.PARTS) for _ in range(rng.randint(1, 30)))
+            kw = dict(thinking=rng.random() < 0.5, tools=rng.choice((TOOLS, None)), recover=rng.random() < 0.3,
+                      finish=rng.choice(("stop", "length")))
+            with self.subTest(n=n, text=text, **kw):
+                results = []
+                for pieces in chunkings(text, seed=n, count=4):
+                    events, _ = feed(pieces, stream_tools=True, **kw)
+                    check_contract(self, events)
+                    results.append(normal(events))
+                for r in results[1:]:
+                    self.assertEqual(r, results[0])
+                plain = normal(feed([text], stream_tools=False, **kw)[0])
+                streamed = [e for e in results[0] if e[0] not in ("tool_start", "tool_args")]
+                if sum(e[0] == "tool_start" for e in results[0]) == sum(e[0] == "tool_call" for e in plain):
+                    self.assertEqual(plain, streamed)     # no call cut off: the same calls and text either way
+
+
 class Pieces(unittest.TestCase):
     def test_parse_tool_call(self):
         call = parse_tool_call("read_file<arg_key>path</arg_key><arg_value>7</arg_value>", TOOLS)
