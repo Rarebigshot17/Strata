@@ -7,11 +7,10 @@ import time
 import unittest
 import urllib.error
 import urllib.request
-from pathlib import Path
 from unittest import mock
 
-from serve.frontend import ChatTemplate
-from serve.server import ByteTokenizer, EngineDied, EngineStuck, MockEngine, Service, StrataEngine, serve
+from serve.glm_fixtures import GlmTokenizer, glm_template
+from serve.server import EngineDied, EngineStuck, MockEngine, Service, StrataEngine, serve
 
 
 class ResidentEngine(StrataEngine):
@@ -81,15 +80,26 @@ class Lifecycle(unittest.TestCase):
                 proc.kill.assert_not_called()
                 engine.close()                          # repeated cleanup is harmless
 
-    def test_close_sends_eof_before_waiting_for_windows_reader(self):
+    def test_close_sends_stop_quit_and_eof_before_waiting(self):
+        class Pipe(io.StringIO):
+            sent = None
+
+            def close(self):
+                if not self.closed:
+                    self.sent = self.getvalue()
+                super().close()
+
         engine = StrataEngine("missing-executable", [], lazy=True)
         proc = mock.Mock()
-        proc.stdin, proc.stdout = io.StringIO(), io.StringIO()
+        proc.stdin, proc.stdout = Pipe(), io.StringIO()
         proc.poll.side_effect = [None, 0]
         proc.wait.side_effect = lambda **kwargs: self.assertTrue(proc.stdin.closed)
         engine.proc = proc
+        stdin = proc.stdin
         engine.close()
         self.assertIsNone(engine.proc)
+        # the engine reads QUIT only between requests: a STOP first ends a request still running
+        self.assertEqual(stdin.sent, "STOP\nQUIT\n")
         proc.kill.assert_not_called()
 
     def test_close_does_not_forget_a_process_still_exiting(self):
@@ -119,16 +129,20 @@ class Lifecycle(unittest.TestCase):
         self.assertIsNone(engine.proc)
 
     def test_native_lazy_constructor_does_not_start_a_process(self):
-        engine = StrataEngine("missing-executable", ["--max-context", "16384"], lazy=True)
+        engine = StrataEngine("missing-executable", ["--ctx", "16384"], lazy=True)
         self.assertFalse(engine.alive())
         self.assertEqual(engine.max_context, 16384)
         self.assertIsNone(engine.exit_code())
         engine.close()
+        # without --ctx: the engine's own default context
+        engine = StrataEngine("missing-executable", ["-m", "model.gguf"], lazy=True)
+        self.assertEqual(engine.max_context, 32768)
+        engine.close()
 
     def setUp(self):
-        tok = ByteTokenizer()
+        tok = GlmTokenizer()
         self.engine = ResidentEngine(tok)
-        self.svc = Service(self.engine, tok, ChatTemplate(Path(__file__).parent / "chat_template.jinja"))
+        self.svc = Service(self.engine, tok, glm_template())
         self.httpd = serve(self.svc, port=0)
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
 

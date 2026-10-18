@@ -73,11 +73,9 @@ def render(m: dict, lat: dict) -> str:
     busy = live.get("state") in ("reading", "generating")
     ctx = _num((m.get("engine") or {}).get("max_context"), 0)
     used = _num(live.get("prompt_tokens")) + _num(live.get("generated")) if busy else 0
-    # live.running / live.waiting, when the JSON has them, count the requests together; else the one running request
-    metric("vllm:num_requests_running", "gauge", "Requests reading their prompt or generating.",
-           _num(live.get("running"), int(busy)))
-    metric("vllm:num_requests_waiting", "gauge", "Requests waiting for their turn.",
-           _num(live.get("queued")) + _num(live.get("waiting")))
+    # one request runs at a time; the others wait for their turn (live.queued)
+    metric("vllm:num_requests_running", "gauge", "Requests reading their prompt or generating.", int(busy))
+    metric("vllm:num_requests_waiting", "gauge", "Requests waiting for their turn.", _num(live.get("queued")))
     metric("vllm:kv_cache_usage_perc", "gauge", "The running request's share of the context (1 = full).",
            round(min(1.0, used / ctx), 4) if ctx else 0)
     metric("vllm:prompt_tokens_total", "counter", "Prompt tokens of the finished requests.",
@@ -88,10 +86,6 @@ def render(m: dict, lat: dict) -> str:
            _num(totals.get("prompt_tokens")))
     metric("vllm:prefix_cache_hits_total", "counter", "Prompt tokens the prompt cache already held.",
            _num(totals.get("reused")))
-    metric("vllm:spec_decode_num_draft_tokens_total", "counter", "Speculative draft tokens offered (0: no drafts).",
-           _num(totals.get("drafts_offered")))
-    metric("vllm:spec_decode_num_accepted_tokens_total", "counter", "Speculative draft tokens accepted.",
-           _num(totals.get("drafts_accepted")))
     metric("vllm:num_preemptions_total", "counter", "Preempted requests (Strata does not preempt).", 0)
     for name, key, help_ in (("vllm:time_to_first_token_seconds", "ttft", "Time to the first token."),
                              ("vllm:inter_token_latency_seconds", "itl", "Time between two tokens."),
@@ -130,11 +124,6 @@ def strata(m: dict, out: list, lab: str):
            live.get("prefill_tok_s_mean") or 0)
     metric("live_prompt_read", "gauge", "Prompt tokens read so far by the running request (live.prompt_read).",
            live.get("prompt_read") or 0)
-    for state in ("idle", "reading", "generating"):
-        slots = live.get("slots")
-        if isinstance(slots, list) and slots:
-            metric("live_slots", "gauge", "The engine's slots in each state (live.slots, when it has them).",
-                   sum(1 for x in slots if isinstance(x, dict) and x.get("state") == state), f',state="{state}"')
     metric("engine_max_context", "gauge", "The engine's context (engine.max_context).", eng.get("max_context"))
     metric("totals_prompt_seconds_total", "counter", "Time spent reading prompts (totals.prompt_ms).",
            round((totals.get("prompt_ms") or 0) / 1000, 3))
