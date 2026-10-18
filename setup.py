@@ -621,18 +621,6 @@ def gguf_dir_model(folder: Path, model: str):
          f"`hf download {REPO} --include \"*{model}*\"` leaves them")
 
 
-def whole_shard(s: Path) -> bool:
-    """A shard as long as its own tensor directory says (check_shards' test, without stopping setup)."""
-    sys.path.insert(0, str(ROOT / "tools"))
-    from gguf_reader import GGUFFile
-    try:
-        g = GGUFFile(s)
-        return s.stat().st_size >= g.data_start + max((t.offset + (t.expected_bytes() or 0) for t in g.tensors),
-                                                     default=0)
-    except (OSError, ValueError, struct.error):
-        return False
-
-
 def check_shards(shards):
     """Every shard present and whole, or setup stops naming the file and the numbers.  Whole means as long as
     its own tensor directory says (the header is read, the data is not): a truncated copy (--gguf-dir, a .part
@@ -1453,8 +1441,7 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, keep=
     cfg_path.touch()                                   # the most recently used model
     browser = cfg.get("open_browser") is not False     # #609: "open_browser": false, --no-browser
     cmd = server_command(cfg_path, port or cfg.get("port") or PORT, browser)
-    if gpu is not None:
-        cmd[-1:-1] if False else None
+    if gpu is not None:                                # before --port: the server's own --gpu, this start only
         cmd[cmd.index("--port"):cmd.index("--port")] = ["--gpu", str(gpu)]
     use = gpu if gpu is not None else cfg.get("gpu")
     byid = {g["index"]: g for g in found}
