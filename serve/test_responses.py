@@ -281,18 +281,20 @@ class NoLeakedSampler(unittest.TestCase):
 
     def test_server_close_ends_the_sampler(self):
         import threading
-        import time
+
+        def samplers():
+            return {t for t in threading.enumerate() if t.name.endswith("(_loop)")}
         tok = GlmTokenizer()
-        before = sum(1 for t in threading.enumerate() if t.name.endswith("(_loop)"))
+        # an earlier test's sampler may still be ending when this one starts: follow this server's own thread
+        before = samplers()
         httpd = serve(Service(MockEngine(tok, ANSWER, max_context=16384), tok, TEMPLATE), port=0)
-        self.assertEqual(sum(1 for t in threading.enumerate() if t.name.endswith("(_loop)")), before + 1)
+        started = samplers() - before
+        self.assertEqual(len(started), 1)
+        sampler, = started
         httpd.shutdown()
         httpd.server_close()
-        for _ in range(50):
-            if sum(1 for t in threading.enumerate() if t.name.endswith("(_loop)")) == before:
-                break
-            time.sleep(0.1)
-        self.assertEqual(sum(1 for t in threading.enumerate() if t.name.endswith("(_loop)")), before)
+        sampler.join(5)
+        self.assertFalse(sampler.is_alive())
 
 
 # ------------------------------------------------------------------------------------------------ over HTTP
@@ -705,7 +707,8 @@ class CodexCompactionOverHttp(Server):
         turn = self.first_prompt[:-len("<|assistant|><think>")]
         self.assertEqual(self.first_cp, len(self.first_ids) - 2)
         self.assertEqual(self.engine.last_prompt[:self.first_cp], self.first_ids[:self.first_cp])
-        self.assertTrue(prompt.startswith(turn + "<|assistant|></think>Checking." + call_text("exec_command", cmd="cat a.txt")
+        self.assertTrue(prompt.startswith(turn + "<|assistant|></think>Checking."
+                                          + call_text("exec_command", cmd="cat a.txt")
                                           + "<|observation|><tool_response>before</tool_response>"))
         self.assertIn("multi_agent_v1.spawn_agent", prompt[:prompt.index("<|user|>")])
         self.assertEqual(self.parser_tools[-1], None)    # the parser gets the request's tools: none
