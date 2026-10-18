@@ -493,6 +493,88 @@ class Toolkit(unittest.TestCase):
                 self.assertEqual(setup.find_nvcc(), (old, (98, 0)))
                 self.assertEqual(quiet(setup.find_nvcc, (98, 0))[0], (None, None))
 
+    def test_cuda_13_2_for_an_rtx_50_card_takes_an_older_13_x(self):
+        # #892 #968: nvcc 13.2.0 / 13.2.1 made wrong answers for sm_120; 13.2.2 (build 86) is fixed
+        version = {"/cuda-13.2/bin/nvcc": "Cuda compilation tools, release 13.2, V13.2.51"}
+        with mock.patch.object(setup, "out", lambda cmd: version.get(cmd[0], "")), \
+                mock.patch.object(setup, "find_nvcc", return_value=("/cuda-13.0/bin/nvcc", (13, 0))) as find, \
+                mock.patch.dict(os.environ, {}):
+            os.environ.pop("STRATA_NVCC", None)
+            self.assertEqual(quiet(setup.sm120_nvcc, "/cuda-13.2/bin/nvcc", (13, 2), [86, 120])[0],
+                             ("/cuda-13.0/bin/nvcc", (13, 0)))
+            find.assert_called_once_with(below=(13, 2))
+            self.assertEqual(setup.sm120_nvcc("/cuda-13.2/bin/nvcc", (13, 2), [86]), ("/cuda-13.2/bin/nvcc", (13, 2)))
+            version["/cuda-13.2/bin/nvcc"] = "Cuda compilation tools, release 13.2, V13.2.86"
+            self.assertEqual(setup.sm120_nvcc("/cuda-13.2/bin/nvcc", (13, 2), [120]), ("/cuda-13.2/bin/nvcc", (13, 2)))
+
+
+class DataFolder(unittest.TestCase):
+    """The model files live in one data folder next to the Strata folder, found from every GLM copy of Strata on the
+    PC; a copy of the Qwen version keeps its own."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(tmp.name).resolve() / "home"          # its parent is searched too: keep that one ours
+        self.root = self.checkout(self.base / "Strata")
+        for p in (mock.patch.object(setup, "ROOT", self.root),
+                  mock.patch.object(setup, "settings_path", return_value=self.base / "settings.json")):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def checkout(self, path: Path, qwen=False) -> Path:
+        (path / "src" / ("core" if qwen else "glm")).mkdir(parents=True)
+        (path / "src" / "glm").mkdir(exist_ok=True)
+        (path / "setup.py").write_text("", encoding="utf-8")
+        return path
+
+    def shard(self, folder: Path, name="glm-ud-iq3_xxs", data=b"x") -> Path:
+        s = folder / "models" / name / "GLM-5.3-Flash-00001-of-00001.gguf"
+        s.parent.mkdir(parents=True)
+        s.write_bytes(data)
+        return s
+
+    def test_other_glm_copies_are_found_and_qwen_ones_are_not(self):
+        old = self.checkout(self.base / "Strata-old")
+        unzipped = self.checkout(self.base / "Strata-glm53-flash (1)" / "Strata-glm53-flash")
+        remembered = self.checkout(self.base / "projects" / "glm")
+        self.checkout(self.base / "Strata-qwen", qwen=True)
+        self.checkout(self.base / "projects" / "Strata-not-next-to-it")
+        found = setup.other_installs({"installs": [str(remembered), str(self.root)]})
+        self.assertEqual(sorted(found), sorted([old, unzipped, remembered]))
+
+    def test_model_files_move_into_the_data_folder_and_the_configs_follow(self):
+        old = self.checkout(self.base / "Strata-old")
+        shard = self.shard(old)
+        data = self.base / "Strata-GLM-data"
+        mine = self.shard(data, "glm-iq4_xs", b"y")                        # already there: kept beside them
+        cfg = old / "strata-glm-ud-iq3_xxs.json"
+        cfg.write_text(json.dumps({"exe": "x", "args": ["-m", str(shard), "--ctx", "8192"]}), encoding="utf-8")
+        (dest, elsewhere), out = quiet(setup.data_folder, None)
+        self.assertEqual((dest, elsewhere), (data, []))
+        moved = data / "models" / "glm-ud-iq3_xxs" / shard.name
+        self.assertEqual((moved.read_bytes(), mine.read_bytes(), shard.exists()), (b"x", b"y", False))
+        self.assertEqual(json.loads(cfg.read_text(encoding="utf-8"))["args"], ["-m", str(moved), "--ctx", "8192"])
+        self.assertIn(f"model files from {old} moved to {data}", out)
+        settings = json.loads((self.base / "settings.json").read_text(encoding="utf-8"))
+        self.assertEqual((settings["data_dir"], settings["installs"][0]), (str(data), str(self.root)))
+
+    def test_a_qwen_copys_model_files_stay_where_they_are(self):
+        qwen = self.checkout(self.base / "Strata-qwen", qwen=True)
+        shard = self.shard(qwen)
+        quiet(setup.data_folder, None)
+        self.assertTrue(shard.exists())
+
+    def test_a_new_data_dir_takes_the_files_of_the_one_before(self):
+        first = self.base / "first"
+        shard = self.shard(first)
+        (self.base / "settings.json").write_text(json.dumps({"data_dir": str(first)}), encoding="utf-8")
+        (dest, _), _ = quiet(setup.data_folder, str(self.base / "second"))
+        self.assertEqual(dest, self.base / "second")
+        self.assertTrue((dest / "models" / "glm-ud-iq3_xxs" / shard.name).exists())
+        self.assertFalse(shard.exists())
+        self.assertEqual(setup.load_settings()["data_dir"], str(dest))
+
 
 class Build(unittest.TestCase):
     real_source_hash = staticmethod(setup.source_hash)
