@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT OR Apache-2.0
-# From https://github.com/1872183316/quantscope (commit bfdf205); the examples below name Strata's model.
+# From https://github.com/1872183316/quantscope (commit bfdf205); the examples below name Strata's model's GGUFs.
 """quantscope: find the real quantization of a model without downloading it.
 
 Reads only file headers (a few MB per file, via HTTP range requests) of GGUF or safetensors
