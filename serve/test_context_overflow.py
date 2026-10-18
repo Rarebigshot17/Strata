@@ -5,25 +5,33 @@
 import http.client
 import json
 import unittest
-from pathlib import Path
 from unittest import mock
 
-from serve.frontend import ChatTemplate
-from serve.server import CTX_SLACK, ByteTokenizer, MockEngine, Service, serve
+from serve.glm_fixtures import GlmTokenizer, glm_template
+from serve.server import CTX_SLACK, MockEngine, Service, serve
 
-ROOT = Path(__file__).resolve().parents[1]
 CTX = 131072
 APIS = (("/v1/chat/completions", "max_tokens"),
         ("/v1/messages", "max_tokens"),
         ("/v1/responses", "max_output_tokens"))
 
 
+def prompt_of(svc, ids):
+    """Patches the service so that every prompt it encodes is `ids` (the rendered text stays the real one)."""
+    real = svc._encode
+
+    def encode(messages, tools, kwargs):
+        _, rendered, marked, marked_tools = real(messages, tools, kwargs)
+        return list(ids), rendered, marked, marked_tools
+    return mock.patch.object(svc, "_encode", side_effect=encode)
+
+
 class ContextOverflow(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        tok = ByteTokenizer()
+        tok = GlmTokenizer()
         cls.engine = MockEngine(tok, "ok", max_context=CTX)
-        cls.svc = Service(cls.engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        cls.svc = Service(cls.engine, tok, glm_template())
         cls.httpd = serve(cls.svc, port=0)
         cls.port = cls.httpd.server_address[1]
 
@@ -43,7 +51,7 @@ class ContextOverflow(unittest.TestCase):
             body[budget_key] = max_tokens
         c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
         try:
-            with mock.patch.object(self.svc, "encode_prompt", return_value=[ord("x")] * prompt_tokens):
+            with prompt_of(self.svc, [ord("x")] * prompt_tokens):
                 c.request("POST", path, json.dumps(body), {"Content-Type": "application/json"})
                 r = c.getresponse()
                 return r.status, r.getheader("Content-Type"), json.loads(r.read())
@@ -103,7 +111,7 @@ class ContextOverflow(unittest.TestCase):
             self.svc.fit_max_tokens = fit
             for budget in (None, 0, -1, 1, room, room + 1):
                 with self.subTest(fit=fit, budget=budget), \
-                        mock.patch.object(self.svc, "encode_prompt", return_value=ids):
+                        prompt_of(self.svc, ids):
                     if budget == room + 1 and not fit:
                         with self.assertRaises(ValueError):
                             self.svc.prepare([], None, {}, budget)
