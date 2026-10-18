@@ -3221,8 +3221,8 @@ class ForcedToolChoice(unittest.TestCase):
                     self.assertEqual(second, first + self.tok.encode(CallingEngine.THOUGHT + "</think>" + opening))
 
     def test_a_thinking_that_ends_the_turn_opens_the_call(self):
-        # the reply's last token before the end of the turn is a </think> right after a quote (Qwen's parser held
-        # such a </think> back, #537; GLM's does not): the thinking is over there and the call opens
+        # #537: the reply's last token before the end of the turn is a </think> right after a quote: the thinking is
+        # over there (nothing holds that </think> back for the character after it) and the call opens
         thought, calling = 'I will search for "2+2"', self.engine.generate
 
         def generate(ids, max_new, sampling, cancel, checkpoint=None):
@@ -3251,7 +3251,8 @@ class ForcedToolChoice(unittest.TestCase):
                     self.assertEqual((finish, calls, reasoning), ("tool_calls", [("search", {"q": "2+2"})], ""))
                     self.assertEqual(len(self.engine.prompts), 1)
                     opening = CALL_START + ("search" if choice == self.NAMED else "")
-                    self.assertTrue(self.tok.decode(self.engine.prompts[0]).endswith("</think>" + opening))
+                    # the generation prompt with the thinking closed, then the opening
+                    self.assertTrue(self.tok.decode(self.engine.prompts[0]).endswith("<|assistant|></think>" + opening))
 
     def test_the_budget_wrap_up_opens_the_call(self):
         from serve.server import REASONING_WRAP_UP
@@ -3397,7 +3398,7 @@ class StatusHandover(unittest.TestCase):
 
 FAKE_STRATA = '''import pathlib, sys, time
 gate = pathlib.Path(sys.argv[sys.argv.index("--gate") + 1])
-print("INFO engine=0.2.0 backend=cpu-reference eos=259 park_mib=512 logit_bias=1", flush=True)
+print("INFO engine=0.2.0 eos=3 park_mib=512 logit_bias=1 backend=cpu-reference", flush=True)
 while not gate.exists():                     # the test says when the engine is "ready"
     time.sleep(0.01)
 print("READY 4096 stop", flush=True)
@@ -3511,6 +3512,7 @@ class RestartWindow(unittest.TestCase):
                 self.assertEqual(r.status, 200)
         finally:
             httpd.shutdown()
+            httpd.server_close()
 
     def test_context_zero_is_503(self):
         tok = GlmTokenizer()
@@ -3793,7 +3795,7 @@ class SilentEngine(unittest.TestCase):
 FAKE_LOST_STEP = '''import pathlib, sys, time
 mark = pathlib.Path(sys.argv[sys.argv.index("--mark") + 1])
 mode = sys.argv[sys.argv.index("--mode") + 1]
-print("INFO engine=0.2.0 backend=cpu-reference eos=259 park_mib=512 logit_bias=1", flush=True)
+print("INFO engine=0.2.0 eos=3 park_mib=512 logit_bias=1 backend=cpu-reference", flush=True)
 print("READY 4096 stop", flush=True)
 for line in sys.stdin:
     if line.startswith("QUIT"):
@@ -4113,7 +4115,8 @@ class AnswerBeforeTheBody(unittest.TestCase):
             self.svc.api_key = ""
 
     def test_a_wrong_key_and_a_body_of_megabytes(self):
-        """An agent client's conversation, or one screenshot, is several MiB, and a rotated key is when the 401 matters."""
+        """An agent client's conversation, or one screenshot, is several MiB, and a rotated key is when the 401
+        matters."""
         self.svc.api_key = "secret"
         try:
             self.assertEqual(self.status("POST", "/v1/chat/completions", body=b'{"x": "' + b"a" * (80 << 20) + b'"}'),
@@ -4187,7 +4190,8 @@ class ClaudeCodeBillingStamp(unittest.TestCase):
 
     def system_of(self, system):
         from serve.frontend import anthropic_to_messages
-        return anthropic_to_messages({"system": system, "messages": [{"role": "user", "content": "u"}]})[0][0]["content"]
+        messages = anthropic_to_messages({"system": system, "messages": [{"role": "user", "content": "u"}]})[0]
+        return messages[0]["content"]
 
     def blocks(self, v="bf4", c="b145e"):       # Claude Code's own shape: the header is the first text block
         return [{"type": "text", "text": self.HEADER.format(v=v, c=c)},
@@ -4289,7 +4293,7 @@ class UntimedReads(unittest.TestCase):
 
     def test_engine_that_never_says_ready_is_ended(self):
         import serve.server as server
-        fake = ("import time\nprint('INFO engine=0.2.0 backend=cpu-reference eos=259 park_mib=512 logit_bias=1', "
+        fake = ("import time\nprint('INFO engine=0.2.0 eos=3 park_mib=512 logit_bias=1 backend=cpu-reference', "
                 "flush=True)\ntime.sleep(600)\n")
         with tempfile.TemporaryDirectory() as d:
             script = Path(d) / "fake_strata.py"
