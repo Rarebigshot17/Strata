@@ -226,6 +226,9 @@ class TextOnly(unittest.TestCase):
 
     PICTURE = {"openai": {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
                "anthropic": {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}}
+    # a picture at a URL nothing answers on: it is never fetched
+    AT_URL = {"openai": {"type": "image_url", "image_url": {"url": "http://127.0.0.1:9/a.png"}},
+              "anthropic": {"type": "image", "source": {"type": "url", "url": "http://127.0.0.1:9/a.png"}}}
     CALL = {"openai": {"role": "assistant", "content": "", "tool_calls": [
                 {"id": "t1", "type": "function", "function": {"name": "Read", "arguments": '{"file_path": "a.png"}'}}]},
             "anthropic": {"role": "assistant", "content": [
@@ -264,27 +267,49 @@ class TextOnly(unittest.TestCase):
 
     def test_a_users_picture_is_a_400(self):
         for api in ("openai", "anthropic"):
-            with self.subTest(api=api):
-                status, b = self.post(api, [{"role": "user", "content": [{"type": "text", "text": "what is it?"},
-                                                                         self.PICTURE[api]]}])
-                self.assertEqual(status, 400, b)
-                self.assertIn("text only", b["error"]["message"])
+            for pic in (self.PICTURE[api], self.AT_URL[api]):
+                with self.subTest(api=api, picture=str(pic)[:50]):
+                    status, b = self.post(api, [{"role": "user", "content": [{"type": "text", "text": "what is it?"},
+                                                                             pic]}])
+                    self.assertEqual(status, 400, b)
+                    self.assertIn("text only", b["error"]["message"])
 
     def test_a_tools_picture_is_a_note_in_its_place(self):
+        from serve.frontend import IMAGE_OMITTED
         for api in ("openai", "anthropic"):
-            for content, text in (([{"type": "text", "text": "a.png:"}, self.PICTURE[api]], "a.png:"),
-                                  ([self.PICTURE[api]], ""), ([{"type": "text", "text": "r"}], "r"), ("r", "r")):
+            pic = self.PICTURE[api]
+            for content, want in (([{"type": "text", "text": "a.png:"}, pic], "a.png:" + IMAGE_OMITTED),
+                                  ([pic], IMAGE_OMITTED), ([self.AT_URL[api]], IMAGE_OMITTED),
+                                  ([pic, {"type": "text", "text": "and"}, pic], IMAGE_OMITTED + "and" + IMAGE_OMITTED),
+                                  ([{"type": "text", "text": "r"}], "r"), ("r", "r")):   # a text-only result: its text
                 with self.subTest(api=api, content=str(content)[:40]):
                     status, b = self.post(api, self.with_result(api, content))
                     self.assertEqual(status, 200, b)
                     prompt = self.tok.decode(self.engine.last_prompt)
                     self.assertEqual(prompt.count("<tool_response>"), 1)
-                    result = prompt.split("<tool_response>", 1)[1].split("</tool_response>", 1)[0]
-                    if text == "r":                                  # a text-only result is its text
-                        self.assertEqual(result, "r")
-                    else:
-                        self.assertEqual(result[:len(text)], text)
-                        self.assertRegex(result[len(text):], r"^\[image omitted: [^\]]*text only\]$")
+                    self.assertEqual(prompt.split("<tool_response>", 1)[1].split("</tool_response>", 1)[0], want)
+
+    def test_a_picture_beside_a_tool_result_is_the_users(self):
+        # Anthropic: a picture next to the tool_result block, not inside it, is the user's own: still a 400
+        msgs = self.with_result("anthropic", "r")
+        msgs[-1]["content"] += [self.PICTURE["anthropic"], {"type": "text", "text": "and this one"}]
+        status, b = self.post("anthropic", msgs)
+        self.assertEqual(status, 400, b)
+        self.assertIn("text only", b["error"]["message"])
+
+    def test_the_messages_a_tool_result_becomes(self):
+        from serve.frontend import anthropic_to_messages
+        from serve.server import IMAGE_NOTE
+        # a text-only tool result is one string, as before
+        msgs = self.with_result("anthropic", [{"type": "text", "text": "r"}])
+        self.assertEqual(anthropic_to_messages({"messages": msgs})[0][-1], {"role": "tool", "content": "r"})
+        # a tool message handed to the server with its parts as a list: the server writes the note itself
+        ids, _, _ = self.svc.prepare([{"role": "user", "content": "look at a.png"},
+                                      {"role": "tool", "content": [{"type": "text", "text": "a.png:"},
+                                                                   {"type": "image", "source": "a.png"}]}], None, {})
+        self.assertIn("<tool_response>a.png:" + IMAGE_NOTE + "</tool_response>", self.tok.decode(ids))
+        with self.assertRaisesRegex(ValueError, "text only"):
+            self.svc.prepare([{"role": "user", "content": [{"type": "image", "source": "a.png"}]}], None, {})
 
 
 class ListenProblem(unittest.TestCase):
@@ -348,9 +373,15 @@ class LiteralThinkTags(unittest.TestCase):
                 {"role": "assistant", "content": "2", "reasoning_content": "easy"}, {"role": "user", "content": "x"}]
         self.assertEqual(self.ids(msgs), self.old_ids(msgs))
         self.assertEqual(self.ids(msgs, enable_thinking=False), self.old_ids(msgs, enable_thinking=False))
+        # with a call, its result and the tools: also as the template writes them
+        msgs = [{"role": "user", "content": "x"},
+                {"role": "assistant", "content": "",
+                 "tool_calls": [{"function": {"name": "f", "arguments": {"a": "<"}}}]},
+                {"role": "tool", "content": "done"}]
+        tools = [{"name": "f", "description": "<arg", "parameters": {}}]
+        self.assertEqual(self.ids(msgs, tools), self.old_ids(msgs, tools))
 
     def test_history_tool_results_and_tools(self):
-        # clear_thinking false: the history turn's reasoning is rendered too
         def messages(lit):
             return ([{"role": "system", "content": f"The stop string is {lit}."}, {"role": "user", "content": "go"},
                      {"role": "assistant", "content": "" if lit in self.CALL_TAGS else f"It wrote {lit} here.",
@@ -359,20 +390,26 @@ class LiteralThinkTags(unittest.TestCase):
                      {"role": "tool", "content": f"file has {lit} in it"},
                      {"role": "user", "content": f"why did you write {lit}"}],
                     [{"name": "write", "description": f"writes text (may contain {lit})", "parameters": {}}])
-        for lit in self.TAGS:
-            with self.subTest(literal=lit):
-                ids = self.ids(*messages(lit), clear_thinking=False)
-                # the template's own: the tools' call format, the history's reasoning block and call, the tool's
-                # result and the generation prompt's <think>
-                self.assertEqual(self.counts(ids), self.counts(self.old_ids(*messages("X"), clear_thinking=False)))
-                text = self.tok.decode(ids)
-                parts = [f"The stop string is {lit}.", f"the {lit} tag", f"a {lit} b", f"file has {lit} in it",
-                         f"why did you write {lit}", f"may contain {lit}"]
-                for part in parts + ([] if lit in self.CALL_TAGS else [f"It wrote {lit} here."]):
-                    self.assertIn(part, text)
+        # clear_thinking false: the history turn's reasoning is rendered too; by default it is dropped
+        for kw in ({"clear_thinking": False}, {}):
+            for lit in self.TAGS:
+                with self.subTest(literal=lit, **kw):
+                    ids = self.ids(*messages(lit), **kw)
+                    # the template's own: the tools' call format, the history's reasoning block and call, the tool's
+                    # result and the generation prompt's <think>
+                    self.assertEqual(self.counts(ids), self.counts(self.old_ids(*messages("X"), **kw)))
+                    text = self.tok.decode(ids)
+                    parts = [f"The stop string is {lit}.", f"a {lit} b", f"file has {lit} in it",
+                             f"why did you write {lit}", f"may contain {lit}"]
+                    for part in parts + ([] if lit in self.CALL_TAGS else [f"It wrote {lit} here."]):
+                        self.assertIn(part, text)
+                    self.assertEqual(f"the {lit} tag" in text, kw == {"clear_thinking": False})
+        # the reasoning markers: the history turn's <think>...</think> (only </think> once its reasoning is dropped)
+        # and the generation prompt's <think>
         ids = self.ids(*messages("X"), clear_thinking=False)
-        # the reasoning markers: the history turn's <think>...</think> and the generation prompt's <think>
         self.assertEqual((ids.count(self.open), ids.count(self.close)), (2, 1))
+        ids = self.ids(*messages("X"))
+        self.assertEqual((ids.count(self.open), ids.count(self.close)), (1, 1))
 
     def test_an_assistant_reply_with_its_call_written_inline(self):
         # a client that replays the model's raw text sends the call's tags the model wrote: they stay the call's tokens
@@ -388,7 +425,8 @@ class LiteralThinkTags(unittest.TestCase):
         # an assistant turn whose content opens with its own <think>...</think> block keeps that block's markers: the
         # template splits the reasoning off there (and drops it once a user turn follows), the quoted tag stays text
         msgs = [{"role": "user", "content": "hi"},
-                {"role": "assistant", "content": "<think>\nplan: say </x> hello\n</think>\n\nHello, </think> is a tag."},
+                {"role": "assistant",
+                 "content": "<think>\nplan: say </x> hello\n</think>\n\nHello, </think> is a tag."},
                 {"role": "user", "content": "again"}]
         ids = self.ids(msgs)
         self.assertEqual((ids.count(self.open), ids.count(self.close)), (1, 1))   # the history's </think>, the prompt's
@@ -448,7 +486,6 @@ class LiteralControlTokens(unittest.TestCase):
         self.assertEqual(self.ids(msgs, enable_thinking=False), self.old_ids(msgs, enable_thinking=False))
 
     def test_history_tool_results_and_tools(self):
-        # clear_thinking false: the history turn's reasoning is rendered too
         def messages(lit):
             return ([{"role": "system", "content": f"The stop string is {lit}."}, {"role": "user", "content": "go"},
                      {"role": "assistant", "content": f"It wrote {lit} here.", "reasoning_content": f"the {lit} token",
@@ -456,14 +493,17 @@ class LiteralControlTokens(unittest.TestCase):
                      {"role": "tool", "content": f"file has {lit} in it"},
                      {"role": "user", "content": f"why did you write {lit}"}],
                     [{"name": "write", "description": f"writes text (may contain {lit})", "parameters": {}}])
-        for lit in ByteTokenizer.SPECIALS:
-            with self.subTest(literal=lit):
-                ids = self.ids(*messages(lit), clear_thinking=False)
-                self.assertEqual(self.counts(ids), self.counts(self.old_ids(*messages("X"))))   # the template's own
-                text = self.tok.decode(ids)
-                for part in (f"The stop string is {lit}.", f"It wrote {lit} here.", f"the {lit} token", f"a {lit} b",
-                             f"file has {lit} in it", f"why did you write {lit}", f"may contain {lit}"):
-                    self.assertIn(part, text)
+        # clear_thinking false: the history turn's reasoning is rendered too; by default it is dropped
+        for kw in ({"clear_thinking": False}, {}):
+            for lit in ByteTokenizer.SPECIALS:
+                with self.subTest(literal=lit, **kw):
+                    ids = self.ids(*messages(lit), **kw)
+                    self.assertEqual(self.counts(ids), self.counts(self.old_ids(*messages("X"), **kw)))   # own
+                    text = self.tok.decode(ids)
+                    for part in (f"The stop string is {lit}.", f"It wrote {lit} here.", f"a {lit} b",
+                                 f"file has {lit} in it", f"why did you write {lit}", f"may contain {lit}"):
+                        self.assertIn(part, text)
+                    self.assertEqual(f"the {lit} token" in text, kw == {"clear_thinking": False})
 
     def test_beside_a_quoted_think_tag(self):
         text = "</think> and <|user|> are both quoted here"
@@ -884,7 +924,8 @@ class UnfinishedToolCall(unittest.TestCase):
                     self.assertEqual(json.loads(streamed), {"path": "notes.txt", "content": content})
 
     def answers(self, script, max_tokens=500):
-        """(finish reason, the call's arguments) from OpenAI and Anthropic, whole and streamed, for the model's `script`."""
+        """(finish reason, the call's arguments) from OpenAI and Anthropic, whole and streamed, for the model's
+        `script`."""
         tok = GlmTokenizer()
         svc = Service(MockEngine(tok, script, max_context=CTX), tok, glm_template())
         httpd = serve(svc, port=0)
@@ -918,7 +959,8 @@ class UnfinishedToolCall(unittest.TestCase):
                                                                  for tc in c["message"].get("tool_calls") or []])
                     else:
                         m = json.loads(raw)
-                        out[api, stream] = (m["stop_reason"], [b["input"] for b in m["content"] if b["type"] == "tool_use"])
+                        out[api, stream] = (m["stop_reason"],
+                                            [b["input"] for b in m["content"] if b["type"] == "tool_use"])
         finally:
             httpd.shutdown()
             httpd.server_close()
@@ -967,7 +1009,8 @@ class UnfinishedToolCall(unittest.TestCase):
     def test_a_whole_call(self):
         whole = {"path": "notes.txt", "content": "all of it"}
         a = self.answers(self.WHOLE)
-        self.assertEqual((a["openai", False][0], [json.loads(x) for x in a["openai", False][1]]), ("tool_calls", [whole]))
+        self.assertEqual((a["openai", False][0], [json.loads(x) for x in a["openai", False][1]]),
+                         ("tool_calls", [whole]))
         self.assertEqual((a["openai", True][0], json.loads(a["openai", True][1])), ("tool_calls", whole))
         self.assertEqual(a["anthropic", False], ("tool_use", [whole]))
         self.assertEqual((a["anthropic", True][0], json.loads(a["anthropic", True][1])), ("tool_use", whole))
@@ -1017,7 +1060,8 @@ class ClientShapes(unittest.TestCase):
             "system": [{"type": "text", "text": "You are terse."}],
             "messages": [
                 {"role": "user", "content": [{"type": "text", "text": "1+1? digits only"}]},
-                {"role": "system", "content": [{"type": "text", "text": "<system-reminder>answer in digits</system-reminder>"}]}]})
+                {"role": "system",
+                 "content": [{"type": "text", "text": "<system-reminder>answer in digits</system-reminder>"}]}]})
         self.assertEqual(status, 200, b)
         text = self.prompt_text()
         self.assertIn("You are terse.", text)
@@ -1041,7 +1085,8 @@ class ClientShapes(unittest.TestCase):
         # was a user's query) answers 400, not a dropped connection
         with tempfile.TemporaryDirectory() as d:
             tpl = Path(d) / "chat_template.jinja"
-            tpl.write_text("{% if messages[-1].role != 'user' %}{{ raise_exception('No user query found in messages.') }}"
+            tpl.write_text("{% if messages[-1].role != 'user' %}"
+                           "{{ raise_exception('No user query found in messages.') }}"
                            "{% endif %}{{ messages[-1].content }}", encoding="utf-8")
             template, self.svc.template = self.svc.template, ChatTemplate(tpl)
             try:
@@ -1081,6 +1126,20 @@ class ClientShapes(unittest.TestCase):
                     self.assertIn("tools", b["error"]["message"])
         status, b = self.post("/v1/chat/completions", {"model": "x", "max_tokens": 8, "messages": msgs})
         self.assertEqual(status, 200, b)                            # the server goes on
+
+    def test_a_client_gone_before_the_answer_started(self):
+        # the connection fails after prepare(), before the answer started: that request ends, the next ones are served
+        import serve.server as server
+        body = {"model": "x", "max_tokens": 8, "messages": [{"role": "user", "content": "hi"}]}
+        paths = ("/v1/chat/completions", "/v1/messages")
+        with mock.patch.object(server, "_debug_req", side_effect=ConnectionResetError("the client is gone")), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            for path in paths:
+                with self.subTest(path=path), self.assertRaises(OSError):
+                    self.post(path, body)
+        for path in paths:
+            status, b = self.post(path, body)
+            self.assertEqual(status, 200, (path, b))
 
     def test_a_tool_schema_that_is_not_an_object_is_a_400(self):
         # #592 follow-up: a tool whose "parameters" (OpenAI) / "input_schema" (Anthropic) is a string, a number or a
@@ -1123,7 +1182,8 @@ class ClientShapes(unittest.TestCase):
 
     def test_leading_system_unchanged(self):
         from serve.frontend import anthropic_to_messages, openai_to_messages
-        msgs, _, _ = openai_to_messages({"messages": [{"role": "developer", "content": "D"}, {"role": "user", "content": "u"}]})
+        msgs, _, _ = openai_to_messages({"messages": [{"role": "developer", "content": "D"},
+                                                      {"role": "user", "content": "u"}]})
         self.assertEqual([m["role"] for m in msgs], ["system", "user"])
         msgs, _, _ = anthropic_to_messages({"system": "S", "messages": [{"role": "user", "content": "u"}]})
         self.assertEqual([m["role"] for m in msgs], ["system", "user"])
@@ -1158,8 +1218,10 @@ class ClientShapes(unittest.TestCase):
         from serve.frontend import openai_to_messages
         bad_call = [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{malformed_json"}}]
         msgs, tools, kwargs = openai_to_messages({"messages": [{"role": "user", "content": "u"},
-                                                               {"role": "assistant", "content": "", "tool_calls": bad_call}]})
-        self.assertEqual(msgs[1]["tool_calls"], [{"function": {"name": "f", "arguments": {"arguments": "{malformed_json"}}}])
+                                                               {"role": "assistant", "content": "",
+                                                                "tool_calls": bad_call}]})
+        self.assertEqual(msgs[1]["tool_calls"],
+                         [{"function": {"name": "f", "arguments": {"arguments": "{malformed_json"}}}])
         rendered = glm_template().render(msgs, tools=tools, **kwargs)
         self.assertIn("<tool_call>f<arg_key>arguments</arg_key><arg_value>{malformed_json</arg_value></tool_call>",
                       rendered)
@@ -1180,13 +1242,14 @@ class ToolArguments(unittest.TestCase):
         from serve.frontend import anthropic_to_messages, openai_to_messages
         for bad in ("{cut", "[1]", "3"):
             with self.subTest(bad=bad):
-                m = openai_to_messages({"messages": [{"role": "user", "content": "u"}, {"role": "assistant", "content": "",
+                m = openai_to_messages({"messages": [{"role": "user", "content": "u"}, {
+                    "role": "assistant", "content": "",
                     "tool_calls": [{"id": "c", "type": "function", "function": {"name": "f", "arguments": bad}}]}]})[0]
                 self.assertEqual(m[1]["tool_calls"][0]["function"]["arguments"], {"arguments": bad})
         for bad in ([1], 3, "{cut"):
             with self.subTest(anthropic=bad):
-                m = anthropic_to_messages({"messages": [{"role": "user", "content": "u"}, {"role": "assistant", "content": [
-                    {"type": "tool_use", "id": "t", "name": "f", "input": bad}]}]})[0]
+                m = anthropic_to_messages({"messages": [{"role": "user", "content": "u"}, {
+                    "role": "assistant", "content": [{"type": "tool_use", "id": "t", "name": "f", "input": bad}]}]})[0]
                 self.assertIn("arguments", m[1]["tool_calls"][0]["function"]["arguments"])
 
 
@@ -1317,6 +1380,7 @@ class ClientHangUp(unittest.TestCase):
         import socket as so
         body = json.dumps({"model": "x", "max_tokens": 20, "stream": stream,
                            "messages": [{"role": "user", "content": "a long prompt"}]}).encode()
+        self.engine.cancelled_after = None             # not the previous test's, should this request start late
         c = so.create_connection(("127.0.0.1", self.port))
         c.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
                   b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
