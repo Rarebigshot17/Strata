@@ -3278,8 +3278,9 @@ class SharingTheGpu(unittest.TestCase):
 
 
 class ThinkingEngine(MockEngine):
-    """Thinks THOUGHT, then answers; a prompt that already ends its thinking (the budget's wrap-up) gets the answer
-    at once, the way the model continues after </think>.  Records every prompt it is given."""
+    """Thinks THOUGHT, then answers; a prompt that already ends its thinking (the budget's wrap-up, or the generation
+    prompt with thinking off) gets the answer at once, the way GLM continues after </think>.  Each reply ends with
+    GLM's end of turn (<|user|>).  Records every prompt it is given."""
     THOUGHT = "Let me think step by step about two plus two. " * 4          # 184 reasoning tokens (one per byte)
     ANSWER = "The answer is 4."
 
@@ -3287,11 +3288,13 @@ class ThinkingEngine(MockEngine):
         super().__init__(tok, "x", max_context=CTX)
         self.prompts = []
 
-    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+    def reply(self, closed):
+        return self.ANSWER if closed else reply_text(self.THOUGHT, self.ANSWER)
+
+    def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
         self.prompts.append(list(ids))
-        done = self.tok.decode(ids).endswith("</think>\n\n")
-        text = self.ANSWER if done else self.THOUGHT + "</think>\n\n" + self.ANSWER
-        for t in (self.tok.encode(text) + self.tok.encode("<|im_end|>", parse_special=True))[:max_new]:
+        text = self.reply(self.tok.decode(ids).endswith("</think>"))
+        for t in (self.tok.encode(text) + self.tok.encode("<|user|>", parse_special=True))[:max_new]:
             if cancel.is_set():
                 return
             yield t
@@ -3302,23 +3305,17 @@ class EndsInsideThinkingEngine(ThinkingEngine):
     thinking (the retry) gets the answer."""
     THOUGHT = "Let me think: two plus two is four."
 
-    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
-        self.prompts.append(list(ids))
-        done = self.tok.decode(ids).endswith("</think>" + chr(10) + chr(10))
-        text = self.ANSWER if done else self.THOUGHT
-        for t in (self.tok.encode(text) + self.tok.encode("<|im_end|>", parse_special=True))[:max_new]:
-            if cancel.is_set():
-                return
-            yield t
+    def reply(self, closed):
+        return self.ANSWER if closed else self.THOUGHT
 
 
 class ReasoningCloseRetry(unittest.TestCase):
     """#1053 (opt-in): a reply that ends inside <think> with no answer is continued once with the thinking closed."""
 
     def setUp(self):
-        self.tok = ByteTokenizer()
+        self.tok = GlmTokenizer()
         self.engine = EndsInsideThinkingEngine(self.tok)
-        self.svc = Service(self.engine, self.tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        self.svc = Service(self.engine, self.tok, glm_template())
         self.httpd = serve(self.svc, port=0)
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
 
@@ -3342,20 +3339,20 @@ class ReasoningCloseRetry(unittest.TestCase):
         self.svc.reasoning_close_retry = True
         c = self.chat()
         self.assertEqual(len(self.engine.prompts), 2)
-        self.assertTrue(self.tok.decode(self.engine.prompts[1]).endswith("</think>" + chr(10) + chr(10)))
+        self.assertTrue(self.tok.decode(self.engine.prompts[1]).endswith(self.engine.THOUGHT + "</think>"))
         self.assertEqual(c["message"]["content"], EndsInsideThinkingEngine.ANSWER)
         self.assertIn("two plus two is four", c["message"]["reasoning_content"])
         self.assertEqual(c["finish_reason"], "stop")
 
     def test_a_reply_that_answered_is_not_touched(self):
         self.svc.reasoning_close_retry = True
-        self.engine.THOUGHT = "ok</think>" + chr(10) + chr(10) + "Fine."
+        self.engine.THOUGHT = reply_text("ok", "Fine.")
         c = self.chat()
         self.assertEqual(len(self.engine.prompts), 1)
         self.assertEqual(c["message"]["content"], "Fine.")
 
     def test_a_reply_that_closed_its_thinking_right_after_a_quote_is_not_touched(self):
-        # #537: that </think> waits for the character after it; the end of the turn makes it the end of the thinking
+        # a </think> with nothing after it but the end of the turn is the end of the thinking: no answer, no retry
         self.svc.reasoning_close_retry = True
         self.engine.THOUGHT = 'two plus two is "4"</think>'
         c = self.chat()
@@ -3369,9 +3366,9 @@ class ThinkingBudget(unittest.TestCase):
     continuing from the prompt plus what it generated plus the wrap-up (a prefix the engine already holds)."""
 
     def setUp(self):
-        self.tok = ByteTokenizer()
+        self.tok = GlmTokenizer()
         self.engine = ThinkingEngine(self.tok)
-        self.svc = Service(self.engine, self.tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        self.svc = Service(self.engine, self.tok, glm_template())
         self.httpd = serve(self.svc, port=0)
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
 
@@ -3471,9 +3468,10 @@ class ThinkingBudget(unittest.TestCase):
               "max_tokens": 6400, "thinking_budget": 2048}
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            self.svc._progress(0, st=st)
-            self.svc._progress(0, st={**st, "phase": "answering"})
-            self.svc._progress(0, st={**st, "thinking_budget": None})
+            for s in (st, {**st, "phase": "answering"}, {**st, "thinking_budget": None}):
+                with self.svc.status_lock:
+                    self.svc.status.update(s)
+                self.svc._progress(0)
         lines = out.getvalue().splitlines()
         self.assertIn("thinking: 10 of budget 2048 (max 6400) tokens", lines[0])
         self.assertIn("answering: 10 of max 6400 tokens", lines[1])
