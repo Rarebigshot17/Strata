@@ -17,10 +17,10 @@ What the first run does (each step is skipped when it is already done):
   6. writes strata-glm-<size>.json and run-glm-<size>.sh and starts the model
 
 Options: --model UD-IQ3_XXS|IQ4_XS, --context 131072, --port 8101, --yes (recommended answers, no questions),
---setup (set up the other size / change settings instead of starting), --no-start, --host 0.0.0.0 --api-key KEY
-(reach it from other devices on your network), --gpu N / --gpus 0,2, --park-mib N, --data-dir DIR, --models-dir
-DIR, --gguf-dir DIR (use GGUF files you already have), --build (compile the engine again), --check (only check
-this PC), --update.
+--setup (set up the other size / change settings instead of starting), --no-start, --no-browser, --host 0.0.0.0
+--api-key KEY (reach it from other devices on your network), --gpu N / --gpus 0,2, --park-mib N, --data-dir DIR,
+--models-dir DIR, --gguf-dir DIR (use GGUF files you already have), --build (compile the engine again), --check
+(only check this PC), --update.
 
 Setup recommends, it never forces: the recommended answers are the defaults (--yes, or Enter), and a bigger choice
 than it recommends - the 4-bit model on a PC whose RAM it nearly fills, a long context - is kept, with what it
