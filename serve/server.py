@@ -25,7 +25,6 @@ import contextlib
 import collections
 import hmac
 import codecs
-import ctypes
 import json
 import os
 import queue
@@ -1402,15 +1401,9 @@ class Service:
     def free_vram_mib(self) -> int | None:
         """Free VRAM on the engine's (first) GPU, from NVML; None when it can't be read (then nothing is refused)."""
         try:
-            from serve.telemetry import _Nvml
-            nv = _Nvml(int(getattr(self, "gpu_index", 0) or 0))
-            if not nv.ok():
-                return None
-            m = nv.Mem()
-            if nv.lib.nvmlDeviceGetMemoryInfo(nv.dev, ctypes.byref(m)) != 0:
-                return None
-            return int(m.free >> 20)
-        except Exception:
+            from serve.telemetry import free_vram_mib
+            return free_vram_mib(int(getattr(self, "gpu_index", 0) or 0))
+        except Exception:  # noqa: BLE001 - no NVML, no reading
             return None
 
     def ensure_loaded(self):
@@ -3783,79 +3776,6 @@ class Server(ThreadingHTTPServer):
         super().server_close()
 
 
-def warn_tight_ram(arena_mib) -> None:
-    """The model's experts live in RAM (INFO arena_mib, engine 0.1.10+).  With less than ~6 GB left beside them for the
-    system, the engine and this server, Linux ends the engine mid-answer when memory runs out (issue #27) and Windows
-    pages to disk; say so at start instead of after a lost answer."""
-    if not isinstance(arena_mib, int) or arena_mib <= 0:
-        return
-    try:
-        import psutil
-        total = psutil.virtual_memory().total
-    except Exception:  # noqa: BLE001 - psutil is optional here
-        return
-    left = total / 2**30 - arena_mib / 1024
-    if left < 6:
-        print(f"[strata] WARNING: RAM is tight - the model's experts take {arena_mib / 1024:.1f} GB of this PC's "
-              f"{total / 2**30:.0f} GB, leaving {left:.1f} GB for everything else. "
-              + ("Linux may stop the engine in the middle of an answer. " if os.name != "nt" else
-                 "Windows will slow down (paging to disk). ")
-              + "Close other programs, or run START-HERE --setup and pick a smaller size (Q2_0 / IQ2_XS).", flush=True)
-
-
-def warn_budget_over_ram(args) -> str | None:
-    """#1080: an explicit `--resident-budget-gib N` bigger than the RAM this PC has free (or than its total beside
-    ~6 GB for everything else) pushes experts into swap or the file tier: decode that is "dead slow" until the number is
-    removed.  A warning at start, never a refusal (recommend, never force).  -> the sentence printed, or None."""
-    try:
-        budget = float(args[list(args).index("--resident-budget-gib") + 1])
-    except (ValueError, IndexError):
-        return None
-    try:
-        import psutil
-        vm = psutil.virtual_memory()
-        total, free = vm.total / 2**30, vm.available / 2**30
-    except Exception:  # noqa: BLE001 - psutil is optional here
-        return None
-    if budget <= free and budget <= total - 6:
-        return None
-    msg = (f"WARNING: the RAM budget for experts is {budget:g} GiB (--resident-budget-gib), but this PC has "
-           f"{free:.0f} GiB free of {total:.0f} GiB: what does not fit goes to swap or is read from disk, which can make "
-           "decoding very slow. Lower it (setup sizes it for this PC) or remove the argument to let the engine choose.")
-    print("[strata] " + msg, flush=True)
-    return msg
-
-
-DESKTOP_FREE_MIB = 2048          # #560 #516: below this, an AMD card that also drives a Linux desktop can run out
-DESKTOP_RESERVE_MIB = 3072       # what kept KDE/Wayland alive beside a full expert cache in both reports
-
-
-def linux_desktop(env=None) -> bool:
-    """A graphical session on Linux (Wayland or X): its compositor, browser and apps take VRAM after the model has."""
-    env = os.environ if env is None else env
-    return os.name != "nt" and sys.platform != "darwin" and bool(env.get("WAYLAND_DISPLAY") or env.get("DISPLAY"))
-
-
-def desktop_vram_note(backend, vram_free_mib, args: list, desktop: bool) -> str:
-    """#560 #516: on Linux, when the desktop needs VRAM the AMD card does not have, amdgpu moves GPU memory (the expert
-    cache, ~24 GB) to system RAM, which the experts already fill - the OOM killer then ends the compositor.  The
-    default reserve (700 MiB) is sized for a card without a desktop.  A recommendation, nothing changes: "" when it
-    does not apply."""
-    if backend != "hip" or not desktop or not isinstance(vram_free_mib, int) or vram_free_mib >= DESKTOP_FREE_MIB:
-        return ""
-    try:
-        reserve = int(args[args.index("--vram-reserve-mib") + 1]) if "--vram-reserve-mib" in args else 700
-    except (ValueError, IndexError):
-        reserve = 700
-    if reserve >= DESKTOP_RESERVE_MIB:
-        return ""
-    return (f"[strata] note: {vram_free_mib} MiB of VRAM free with the model loaded. If this AMD card also drives your "
-            "desktop and the desktop or apps crash after the start (the driver moves the expert cache to RAM and "
-            "the OOM killer ends the session), keep more VRAM free: ./setup.sh --vram-reserve-mib "
-            f"{DESKTOP_RESERVE_MIB} (remembered; the expert cache gets "
-            f"{(DESKTOP_RESERVE_MIB - reserve) / 1024:.1f} GB less, a few % of speed)")
-
-
 def lan_addresses() -> list[str]:
     """This PC's IPv4 addresses on its networks (what another device types in), without loopback/link-local."""
     import socket
@@ -4188,49 +4108,6 @@ def sampling_defaults_from_config(cfg: dict) -> dict:
     return out
 
 
-def start_replicas(cfg: dict, groups: list[list[int]], exe: str, effort_end: list[str], lazy: bool):
-    """Opt-in data-parallel replicas (serve/replicas.py): one StrataEngine per card group, each with its own cards, log
-    and CPU cores, started together; the ReplicaEngine in front spreads the requests."""
-    from serve import replicas as rp
-    n = len(groups)
-    cpus = rp.cpu_sets(n, cfg.get("replica_cpus") is not False)
-    print(f"[strata] {n} replicas on the cards {' | '.join(','.join(map(str, g)) for g in groups)}"
-          f"{' (own CPU cores each)' if cpus else ''}: requests go to the least busy one, a conversation back to its own",
-          flush=True)
-    engines: list = [None] * n
-    errors: list = []
-
-    def one(i: int):
-        rc = rp.replica_cfg(cfg, i, groups[i])
-        try:
-            engines[i] = StrataEngine(exe, engine_args(rc) + effort_end, cwd=rc.get("cwd"), log=rc.get("log"),
-                                      env=child_env(rc), lazy=lazy, cpus=cpus[i] if cpus else None)
-        except BaseException as e:        # noqa: BLE001
-            errors.append((i, e))
-    rc0 = rp.replica_cfg(cfg, 0, groups[0])
-    warn_budget_over_ram(engine_args(rc0) if "args" in rc0 else [])
-    if os.environ.get("STRATA_REPLICA_START", "") == "serial":
-        for i in range(n):
-            one(i)
-    else:
-        ts = [threading.Thread(target=one, args=(i,)) for i in range(n)]
-        for t in ts:
-            t.start()
-        for t in ts:
-            t.join()
-    if errors:
-        for e in engines:
-            if e is not None:
-                try:
-                    e.close()
-                except Exception:        # noqa: BLE001
-                    pass
-        i, e = errors[0]
-        raise SystemExit(f"[strata] replica {i} did not start: {e}")
-    load = int(cfg.get("replica_load_tokens") or rp.LOAD_TOKENS)
-    return rp.ReplicaEngine(engines, load_tokens=load)
-
-
 def check_request_sampling(req) -> None:
     """A request's sampling field of the wrong JSON type ("temperature": "0.7", "top_k": 40.0, "seed": true) is a 400
     that names the field, as the same value is through POST /settings or the run config.  Unchecked, the value
@@ -4267,22 +4144,45 @@ def check_request_sampling(req) -> None:
             raise ValueError(f"{key}: {'an integer' if integer else 'a number'}")
 
 
+def config_path_of(cfg: dict, value: str) -> str:
+    """A path the run config names: a relative one is the config's "cwd"'s (the engine's folder), as for the engine."""
+    return value if os.path.isabs(value) else os.path.abspath(os.path.join(cfg.get("cwd") or ".", value))
+
+
+def chat_template_for(model: ModelFiles | None, override: str | None) -> ChatTemplate:
+    """The chat template: `override` (--chat-template, the config's "chat_template") when given, else the model's own
+    (its GGUF's tokenizer.chat_template), else serve/chat_template.jinja (GLM's).  SystemExit for a file that cannot be
+    read or a template that does not compile."""
+    try:
+        if override:
+            return ChatTemplate(override)
+        if model is not None and model.template:
+            return ChatTemplate(source=model.template)
+    except Exception as e:  # noqa: BLE001 - a file that cannot be read, a template that does not compile
+        raise SystemExit(f"[strata] the chat template cannot be used: {type(e).__name__}: {e}")
+    if model is not None:
+        print("[strata] the model's GGUF has no chat template: using serve/chat_template.jinja (GLM's)", flush=True)
+    return ChatTemplate(ROOT / "serve" / "chat_template.jinja")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--engine", choices=["mock", "strata"], default="mock")
-    ap.add_argument("--config", help="strata engine config (JSON: exe, args, cwd, tokenizer, model_name), "
-                                     "written by setup.py")
+    ap.add_argument("--config", help="the run config (JSON: exe, args with -m MODEL.gguf and --ctx N, cwd, log, gpu, "
+                                     "...), written by setup.py")
     ap.add_argument("--host", default=None,
                     help="the address to listen on: 127.0.0.1 = this PC only (the default), 0.0.0.0 = also other devices "
                          "on your network (set an API key); also \"host\" in the config")
     ap.add_argument("--script", action="append",
                     help="the mock engine's answer (default: a short greeting); given more than once, requests get "
                          "them in turn and the last one repeats")
-    ap.add_argument("--port", type=int, default=8095)
+    ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--gpu", help="the GPU to run on, as nvidia-smi numbers them, or several for a layer split "
-                                  "(\"0,2\"; also \"gpu\" in the config)")
-    ap.add_argument("--tokenizer", default=str(ROOT / "pack/full/tokenizer"),
-                    help="pack tokenizer directory (falls back to a byte tokenizer if absent)")
+                                  "(\"0,1,2\"; the layers go over them in this order; also \"gpu\" in the config)")
+    ap.add_argument("--chat-template", metavar="FILE",
+                    help="a Jinja chat template to use instead of the model's own (also \"chat_template\" in the "
+                         "config)")
+    ap.add_argument("--tokenizer", help=argparse.SUPPRESS)   # gone: the tokenizer is the model's GGUF's
     ap.add_argument("--open", action="store_true", help="open the local page in the browser once the model is ready")
     ap.add_argument("--fit-max-tokens", action="store_true",
                     help="clamp max_tokens to the remaining context instead of rejecting the request "
@@ -4293,7 +4193,7 @@ def main() -> int:
     ap.add_argument("--mcp-config", help="a JSON file with MCP servers in Claude Desktop's format ({\"mcpServers\": "
                                          "{...}}); the web app's chat can use their tools (also \"mcp_servers\" in "
                                          "the config)")
-    ap.add_argument("--lazy", action="store_true", help="start the API unloaded (the engine and the vision encoder start with the first request)")
+    ap.add_argument("--lazy", action="store_true", help="start the API unloaded (the engine starts with the first request)")
     ap.add_argument("--api-monitor", action="store_true",
                     help="the API request monitor at /api-monitor: keeps the last 100 requests' prompts and answers in "
                          "memory (also \"api_monitor\": true in the config; off by default)")
@@ -4306,18 +4206,12 @@ def main() -> int:
                          "\"min_free_vram_mib\" in the config; default: always load)")
     ap.add_argument("--before-load", help="a command run before the model is loaded again (e.g. to unload another "
                                           "server's model; also \"before_load\" in the config, a string or a list)")
-    ap.add_argument("--slot-save-path", default=None, metavar="DIR",
-                    help="enable POST /slots/0?action=save|restore {\"filename\": NAME} (llama-server's API): the "
-                         "conversation the engine holds, to or from DIR/NAME (also \"slot_save_path\" in the config)")
-    ap.add_argument("--replicas", type=int, default=None, metavar="N",
-                    help="data-parallel replicas (opt-in): cut the \"gpu\" list into N equal groups and run one engine on "
-                         "each, requests spread over them (also \"replicas\" in the config: a number, or "
-                         "[{\"gpus\": [0, 1]}, {\"gpus\": [2, 3]}])")
     a = ap.parse_args()
+    if a.tokenizer is not None:
+        ap.error("--tokenizer is gone: the tokenizer and the chat template are read from the model's GGUF (the engine's "
+                 "-m in the config's \"args\"); --chat-template replaces the template")
     cfg = json.loads(Path(a.config).read_text(encoding="utf-8-sig")) if a.config else {}   # Notepad adds a BOM
     lift_reasoning_effort_arg(cfg)
-    if a.replicas is not None:
-        cfg["replicas"] = a.replicas
     if a.gpu is not None:
         cfg["gpu"] = int(a.gpu) if a.gpu.strip().isdigit() else a.gpu
     a.host = a.host or cfg.get("host") or "127.0.0.1"   # issue #26: the run scripts pass no --host, the config can
@@ -4325,89 +4219,59 @@ def main() -> int:
         Server((a.host, a.port), BaseHTTPRequestHandler).server_close()
     except OSError as e:
         ap.error(listen_problem(a.host, a.port, e))
-    if cfg.get("tokenizer"):
-        a.tokenizer = cfg["tokenizer"]
-    tok = ByteTokenizer()
-    tpath = Path(a.tokenizer)
-    if a.engine == "strata" and not (tpath / "vocab.json").exists():
-        ap.error(f"the model's tokenizer is missing ({tpath / 'vocab.json'}); run setup again")
-    if (tpath / "vocab.json").exists():
-        import strata_tokenizer as ST
-        vocab = json.loads((tpath / "vocab.json").read_text(encoding="utf-8"))
-        tokens = [None] * len(vocab)
-        for t, i in vocab.items():
-            tokens[i] = t
-        merges = (tpath / "merges.txt").read_text(encoding="utf-8").split("\n")
-        types = json.loads((tpath / "token_type.json").read_text())
-        tok = ST.Tokenizer(tokens, merges, types)
+    # the tokenizer and the chat template: the model's own, from its GGUF (the engine's -m, the first shard)
+    model = arg_value(cfg.get("args") or [], "-m")
+    if a.engine == "strata" and not cfg:
+        ap.error("--engine strata needs --config")
+    if a.engine == "strata" and not model:
+        ap.error("the config's \"args\" name no model: -m <the model's first shard>.gguf")
+    files = None
+    if model:
+        try:
+            files = ModelFiles(config_path_of(cfg, model))
+        except (OSError, ValueError) as e:
+            raise SystemExit(f"[strata] cannot read the model's tokenizer: {e}")
+    tok = files.tokenizer if files is not None else ByteTokenizer()
+    override = a.chat_template or (config_path_of(cfg, cfg["chat_template"]) if cfg.get("chat_template") else None)
+    template = chat_template_for(files, override)
+    eos_ids = end_of_turn_ids(tok)
     hub = hub_from_config(cfg, a.mcp_config)            # before the minutes of loading: a bad entry stops here
     if a.engine == "strata":
-        if not cfg:
-            ap.error("--engine strata needs --config")
-        vision = None
+        if not eos_ids:
+            raise SystemExit("[strata] the model's tokenizer has none of GLM's end-of-turn tokens (<|endoftext|>, "
+                             "<|user|>, <|observation|>) and no eos id: is -m a GLM model?")
         env = child_env(cfg)
         sampling_defaults = sampling_defaults_from_config(cfg)
         if sampling_defaults:
             pretty = ", ".join(f"{k}={v}" for k, v in sampling_defaults.items())
             print(f"[strata] sampling defaults from the config: {pretty}", flush=True)
         lazy = a.lazy or cfg.get("lazy_load") is True
-        if cfg.get("vision"):
-            print("loading the vision encoder ..." if not lazy else
-                  "vision encoder unloaded; it starts with the model ...", flush=True)
-            # relative paths are the config's cwd's, as for the engine below
-            vcfg = {k: (os.path.abspath(os.path.join(cfg.get("cwd") or ".", v))
-                        if k in ("exe", "mmproj", "model") and isinstance(v, str) and not os.path.isabs(v) else v)
-                    for k, v in cfg["vision"].items()}
-            vision = Vision(vcfg, log=open(cfg["log"], "a", encoding="utf-8") if cfg.get("log") else None,
-                            env=vision_env(cfg, env), lazy=lazy)
+        try:
+            split = split_value(cfg)                    # before the (minutes-long) start
+            silence = engine_silence_s(cfg)             # #481
+        except ValueError as e:
+            raise SystemExit(f"[strata] config {e}")
+        if len(gpu_list(cfg)) > 1:
+            print(f"[strata] GPUs {gpu_list(cfg)}: the layers are split over them in this order "
+                  f"({'--split ' + split if split else 'by their VRAM'}), the output head on the last", flush=True)
         print("model unloaded; the first request loads it ..." if lazy else
-              "loading the model (the first start takes a minute or two) ...", flush=True)
-        warn_budget_over_ram(engine_args(cfg) if "args" in cfg else [])      # #1080
-        if layer_split_of(cfg):
-            try:
-                split = layer_split_value(cfg)          # #644: before the (minutes-long) start
-            except ValueError as e:
-                raise SystemExit(f"[strata] config {e}")
-            print(f"[strata] layer split across GPUs {gpu_list(cfg)} ({split})", flush=True)
-        elif len(gpu_list(cfg)) > 1:
-            print(f"[strata] GPUs {gpu_list(cfg)}: the later card(s) serve as the peer expert tier (--peer-device)",
-                  flush=True)
-        # a relative "exe" is the config's cwd's: Windows' CreateProcess resolves "engine/strata.exe" against nothing
-        # it is told about (WinError 2), so it is made absolute here
-        exe = cfg["exe"] if os.path.isabs(cfg["exe"]) else os.path.abspath(os.path.join(cfg.get("cwd") or ".", cfg["exe"]))
+              "loading the model (the first start takes a few minutes: the experts are read into memory) ...",
+              flush=True)
+        exe = config_path_of(cfg, cfg["exe"])
         try:
-            silence = engine_silence_s(cfg)             # #481: checked before the (minutes-long) start
-        except ValueError as e:
-            raise SystemExit(f"[strata] config {e}")
-        try:
-            effort_end = effort_end_args(cfg, exe, tok)  # #458
-        except ValueError as e:
-            raise SystemExit(f"[strata] config {e}")
-        from serve import replicas as rp
-        try:
-            groups = rp.gpu_groups(cfg)
-        except rp.ReplicaConfigError as e:
-            raise SystemExit(f"[strata] config {e}")
-        if groups:
-            engine = start_replicas(cfg, groups, exe, effort_end or [], lazy)
-        else:
-            engine = StrataEngine(exe, engine_args(cfg) + (effort_end or []), cwd=cfg.get("cwd"), log=cfg.get("log"),
-                                  env=env, lazy=lazy)
+            engine = StrataEngine(exe, engine_args(cfg, eos_ids), cwd=cfg.get("cwd"), log=cfg.get("log"), env=env,
+                                  lazy=lazy)
+        except (RuntimeError, OSError) as e:            # EngineDied (it ended before READY), or no such program
+            print(f"[strata] the engine did not start: {e}\n[strata] check \"exe\" and \"args\" in {a.config} "
+                  "(strata-glm stops at an option it does not know); the log has the engine's own words",
+                  file=sys.stderr, flush=True)
+            return 1
         engine.silence_s = silence                      # an attribute of its own: restart() keeps it
-        warn_tight_ram(engine.info.get("arena_mib"))
-        note = desktop_vram_note(cfg.get("backend"), engine.info.get("vram_free_mib"), engine.spawn[1],
-                                 linux_desktop()) if not groups else None
-        if note:                                        # #560 #516: before --open starts a browser on that card
-            print(note, flush=True)
     else:
-        effort_end = None
-        engine, vision, sampling_defaults = MockEngine(tok, a.script or [
-            "Thinking about it.</think>\n\nHello from the mock engine."]), None, {}
-    # the model's own chat template (exported with its tokenizer), else the original model's
-    tpl = tpath / "chat_template.jinja"
-    svc = Service(engine, tok, ChatTemplate(tpl if tpl.exists() else ROOT / "serve/chat_template.jinja"),
-                  model_name=cfg.get("model_name", "qwen3.8-flash-next"), vision=vision,
-                  sampling_defaults=sampling_defaults,
+        engine, sampling_defaults = MockEngine(tok, a.script or [
+            "Thinking about it.</think>Hello from the mock engine."]), {}
+    model_name = cfg.get("model_name") or (files.name if files is not None else MODEL_NAME)
+    svc = Service(engine, tok, template, model_name=model_name, sampling_defaults=sampling_defaults,
                   fit_max_tokens=a.fit_max_tokens or cfg.get("fit_max_tokens") is True)
     svc.reasoning_close_retry = cfg.get("reasoning_close_retry") is True    # #1053: opt-in, off by default
     if cfg.get("prevent_sleep") is not None and not isinstance(cfg["prevent_sleep"], bool):
@@ -4473,16 +4337,6 @@ def main() -> int:
               f"{svc.before_load_timeout_s:g} s", flush=True)
     svc.before_load_ignore_failure = cfg.get("before_load_ignore_failure") is True
     svc.before_load_strict = cfg.get("before_load_strict") is True
-    # --slot-save-path is relative to the working directory the server was started in; the config's slot_save_path
-    # to the config's "cwd" (the engine's folder) when it has one.  Either way the engine gets an absolute path.
-    if a.slot_save_path or cfg.get("slot_save_path"):
-        try:
-            svc.slot_save_path = slot_save_dir(a.slot_save_path) if a.slot_save_path else \
-                slot_save_dir(cfg["slot_save_path"], cfg.get("cwd"))
-        except (ValueError, OSError) as e:
-            raise SystemExit(f"[strata] {e}")
-        print(f"[strata] slot save/restore on: {svc.slot_save_path} (session files are kept until deleted: "
-              "about 1.2 GB per 63K-token conversation; restore only files this server wrote)", flush=True)
     mode = str(cfg.get("anthropic_thinking") or "model")   # #278: "on_request" = only when the request asks
     if mode not in ("model", "on_request"):
         raise SystemExit(f"[strata] config anthropic_thinking must be \"model\" or \"on_request\", not {mode!r}")
@@ -4495,7 +4349,6 @@ def main() -> int:
     if isinstance(rs, bool) or not isinstance(rs, int) or rs < 0:
         raise SystemExit(f"[strata] config \"repeat_stop_tokens\" must be a whole number >= 0 (0 = off), not {rs!r}")
     svc.repeat_stop_tokens = rs
-    svc.effort_end = bool(effort_end)                   # #458: "effort_position": "end" with an engine that has it
     if cfg.get("reasoning_budget_tokens") is not None:  # #123: a default thinking budget for every request
         try:
             svc.reasoning_budget_tokens = cfg["reasoning_budget_tokens"]
@@ -4505,19 +4358,15 @@ def main() -> int:
         if budget:
             print(f"[strata] thinking budget: {budget} tokens (reasoning_budget_tokens; a request can set its own)",
                   flush=True)
-    recovery = cfg.get("reasoning_loop_recovery", False)   # #728: false (default) | "stop" | "recover" (true)
+    recovery = cfg.get("reasoning_loop_recovery", False)   # #728: false (default) | "stop" (true)
     if recovery is True:
-        recovery = "recover"
-    if recovery is not False and recovery not in ("stop", "recover"):
-        raise SystemExit("[strata] config \"reasoning_loop_recovery\" must be false, \"stop\" or \"recover\", "
-                         f"not {recovery!r}")
+        recovery = "stop"
+    if recovery is not False and recovery != "stop":
+        raise SystemExit("[strata] config \"reasoning_loop_recovery\" must be false or \"stop\" (the reply ends where "
+                         f"its thinking repeats itself), not {recovery!r}")
     svc.reasoning_loop_recovery = recovery
     svc.gpu_index = (gpu_list(cfg) or [0])[0]           # the Monitor reads the card the engine runs on (issue #51)
     svc.gpu_indices = gpu_list(cfg)                     # ... or every card of a layer split (issue #112)
-    if a.engine == "strata" and groups:                 # replicas: every card of every group
-        svc.gpu_indices = [c for g in groups for c in g]
-        svc.gpu_index = svc.gpu_indices[0]
-    svc.backend = cfg.get("backend")                    # "hip": the AMD cards' readings come from sysfs (#301)
     if a.config:
         svc.config_path = a.config                      # #564: the web page's Settings view
     if a.config:                                        # the Chat settings shared with other apps, from last time
@@ -4540,7 +4389,7 @@ def main() -> int:
     svc.start_idle_unload()
     here = "127.0.0.1" if a.host in ("0.0.0.0", "", "::") else a.host
     print(f"ready: http://{here}:{a.port}/v1  (OpenAI: /v1/chat/completions, Anthropic: /v1/messages, "
-          f"context {engine.max_context} tokens{', images on' if vision else ''}"
+          f"context {svc.reported_ctx()} tokens"
           f"{', API key required' if svc.api_key else ''})", flush=True)
     print(f"       open http://{here}:{a.port}/ in a browser to chat; close this window to stop the model", flush=True)
     if a.host not in ("127.0.0.1", "localhost", "::1"):
@@ -4575,8 +4424,7 @@ def main() -> int:
             time.sleep(1)                               # Windows never delivers Ctrl+C to an untimed Event.wait()
     except KeyboardInterrupt:
         print("\n[strata] stopping (Ctrl+C again to end the engine at once) ...", flush=True)
-        closers = [httpd.shutdown, getattr(engine, "close", None), vision.shutdown if vision else None,
-                   hub.close if hub is not None else None]
+        closers = [httpd.shutdown, getattr(engine, "close", None), hub.close if hub is not None else None]
         for close in filter(None, closers):
             try:
                 close()
