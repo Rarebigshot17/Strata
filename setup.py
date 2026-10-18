@@ -544,8 +544,10 @@ def download(url, dst: Path, what=None):
             print()
             warn(f"download interrupted ({e}); retrying in 10 s ...")
             time.sleep(10)
-    if total and part.stat().st_size != total:
-        fail(f"could not finish downloading {dst.name}: {part.stat().st_size:,} bytes on disk, the server says {total:,}",
+    got = part.stat().st_size if part.exists() else 0
+    if not part.exists() or (total and got != total):  # no .part: every try failed before the first byte
+        fail(f"could not finish downloading {dst.name}: {got:,} bytes on disk"
+             + (f", the server says {total:,}" if total else ""),
              "check your internet connection and run it again (the download resumes where it stopped)")
     part.replace(dst)
     mark(dst)

@@ -103,6 +103,26 @@ class Download(unittest.TestCase):
             self.assertEqual(seen, ["HEAD"])
             self.assertIn(said, out.getvalue())
 
+    def test_a_download_that_never_gets_a_byte_stops_with_advice(self):
+        """The server answers HEAD but every GET fails: after the tries, a plain message (it was a traceback, as the
+        .part it reported on was never made)."""
+        gets = []
+
+        def urlopen(req, timeout=None):
+            if req.get_method() == "HEAD":
+                return Response(b"model bytes")
+            gets.append(req.headers.get("Range"))
+            raise urllib.error.URLError("connection reset")
+
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(setup.urllib.request, "urlopen", urlopen), \
+                mock.patch.object(setup.time, "sleep", lambda s: None), contextlib.redirect_stdout(out):
+            with self.assertRaises(SystemExit):
+                setup.download("https://example.com/m.gguf", Path(d) / "m.gguf")
+            self.assertFalse((Path(d) / "m.gguf").exists())
+        self.assertEqual(len(gets), 30)
+        self.assertIn("could not finish downloading m.gguf: 0 bytes on disk, the server says 11", out.getvalue())
+
     def test_a_wrong_size_is_deleted(self):
         with tempfile.TemporaryDirectory() as d:
             s = Path(d) / "m.gguf"
