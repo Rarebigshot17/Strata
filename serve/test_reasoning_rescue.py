@@ -314,6 +314,14 @@ class OverHttp(unittest.TestCase):
                 a = self.ask(script, max_tokens=tokens)
                 self.assertEqual(set(a.values()), {0}, a)
 
+    def test_only_the_cut_keeps_a_clean_call_as_text(self):
+        # nothing follows the call: one more token is the end of the turn, and the call is delivered
+        script = "Now.\n" + CALL
+        for tokens, want in ((self.tokens(script), 0), (self.tokens(script) + 1, 1)):
+            with self.subTest(max_tokens=tokens):
+                a = self.ask(script, max_tokens=tokens)
+                self.assertEqual(set(a.values()), {want}, a)
+
     def test_visible_answer_fences_on_all_three_apis(self):
         for name, body, want in (("fence", "Format:\n```xml\n" + RM + "\n```\nDone.", 0),
                                  ("inline", "Use `" + RM + "` here.", 0),
