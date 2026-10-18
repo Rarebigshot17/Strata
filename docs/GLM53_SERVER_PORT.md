@@ -69,6 +69,12 @@ glm53-flash once reviewed: `glm53-flash-wip-frontend` (B1), `glm53-flash-wip-ser
 `glm53-flash-wip-web` (B4 and the small serve modules), `glm53-flash-wip-setup` (C1), `glm53-flash-wip-tools`
 (C2). The tests (B3), the docs (C3) and the review (D1) follow the merge.
 
+State of the branches (October 18): B4 is finished on `glm53-flash-wip-web` (d23a8d7), waiting for the merge. A
+usage limit stopped the agents of B1, B2, C1 and C2 partway. Their uncommitted edits were saved, unreviewed, as
+"WIP ...: uncommitted work of the interrupted agent" commits: frontend 807e208, server 0254d3c (server.py cut from
+about 6,600 to 4,600 lines) and setup 7dfcc67 (setup.py cut from about 5,800 to 1,800 lines). The tools branch
+was not started. The agents were restarted to continue from these branches.
+
 - [ ] B1 `serve/frontend.py`: a GLM `OutputParser` with the same interface (events reasoning / content /
   tool_start / tool_args / tool_call; `finish`, `state`, `buf`, `pending`, `rescued`, `refused`), GLM call grammar
   `<tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value>...</tool_call>`, values verbatim (schema "string"
@@ -85,7 +91,7 @@ glm53-flash once reviewed: `glm53-flash-wip-frontend` (B1), `glm53-flash-wip-ser
   fake engine process); port the fixture-swap tests, rewrite the format tests, delete the Qwen-only ones;
   fold `test_glm_server.py` into them and retire `serve/glm_server.py`; `tools/glm53_server_check.sh` drives
   `serve/server.py`.
-- [ ] B4 `serve/runconfig.py` and the web app: GLM keys (`--vram-reserve` GB, `--park-mib`), no top_k cap,
+- [~] B4 (done on `glm53-flash-wip-web` d23a8d7, not merged yet) `serve/runconfig.py` and the web app: GLM keys (`--vram-reserve` GB, `--park-mib`), no top_k cap,
   thinking on/off, no speed projection / MTP / vision text, GLM facts in the Monitor.
 
 ### C. Install and launch
