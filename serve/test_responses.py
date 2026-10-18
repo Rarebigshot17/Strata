@@ -1,4 +1,4 @@
-"""serve/test_responses.py - #451: the Responses API (POST /v1/responses) against the mock engine (no GPU, no pack).
+"""serve/test_responses.py - #451: the Responses API (POST /v1/responses) against the mock engine (no GPU, no model).
 
     python -m unittest serve.test_responses -v
 """
@@ -15,17 +15,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve import responses  # noqa: E402
-from serve.frontend import ChatTemplate  # noqa: E402
+from serve.glm_fixtures import GlmTokenizer, call_text, glm_template, reply_text  # noqa: E402
 from serve.responses import (ENCRYPTED_PREFIX, ResponsesError, collect, input_messages, prompt_made,  # noqa: E402
                              prompt_tools, request_tools, template_kwargs, text_format, thread_title_events)
-from serve.server import ByteTokenizer, MockEngine, Service, serve  # noqa: E402
+from serve.server import IMAGE_NOTE, MockEngine, Service, serve  # noqa: E402
 
-ROOT = Path(__file__).resolve().parents[1]
-TEMPLATE = ChatTemplate(ROOT / "serve/chat_template.jinja")
+TEMPLATE = glm_template()
 
-CALL = ("Let me look.\n</think>\n\nChecking.\n\n<tool_call>\n<function=exec_command>\n<parameter=cmd>\ncat a.txt\n"
-        "</parameter>\n</function>\n</tool_call>")
-ANSWER = "Read it.\n</think>\n\nThe file says before."
+CALL = reply_text("Let me look.", "Checking.", call_text("exec_command", cmd="cat a.txt"))
+ANSWER = reply_text("Read it.", "The file says before.")
+# a namespace tool's call and a custom tool's call in one answer
+TWO_CALLS = reply_text("", "", call_text("multi_agent_v1.spawn_agent", message="hi"),
+                       call_text("apply_patch", input="*** Begin Patch"))
 TOOLS = [{"type": "function", "name": "exec_command", "description": "Runs a command.", "strict": False,
           "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}}]
 
@@ -129,7 +130,10 @@ class Parsing(unittest.TestCase):
 
     def test_effort_and_text_format(self):
         self.assertEqual(template_kwargs({"reasoning": {"effort": "minimal"}}, {}), {"enable_thinking": False})
-        self.assertEqual(template_kwargs({"reasoning": {"effort": "high"}}, {}), {"reasoning_effort": "xhigh"})
+        # GLM thinks or does not: every level that thinks is passed on as the template's reasoning_effort
+        self.assertEqual(template_kwargs({"reasoning": {"effort": "high"}}, {}), {"reasoning_effort": "high"})
+        self.assertEqual(template_kwargs({"reasoning": {"effort": "xhigh"}}, {}), {"reasoning_effort": "high"})
+        self.assertEqual(template_kwargs({"reasoning": {"effort": "none"}}, {}), {"enable_thinking": False})
         self.assertEqual(template_kwargs({"reasoning": {"summary": "auto"}}, {}), {})      # Codex: the default
         self.assertEqual(template_kwargs({}, {"reasoning_effort": "low"}), {"reasoning_effort": "low"})
         with self.assertRaises(ResponsesError):
@@ -278,7 +282,7 @@ class NoLeakedSampler(unittest.TestCase):
     def test_server_close_ends_the_sampler(self):
         import threading
         import time
-        tok = ByteTokenizer()
+        tok = GlmTokenizer()
         before = sum(1 for t in threading.enumerate() if t.name.endswith("(_loop)"))
         httpd = serve(Service(MockEngine(tok, ANSWER, max_context=16384), tok, TEMPLATE), port=0)
         self.assertEqual(sum(1 for t in threading.enumerate() if t.name.endswith("(_loop)")), before + 1)
@@ -296,7 +300,7 @@ class Server(unittest.TestCase):
     script = ANSWER
 
     def setUp(self):
-        self.tok = ByteTokenizer()
+        self.tok = GlmTokenizer()
         self.engine = MockEngine(self.tok, self.script, max_context=16384)
         self.svc = Service(self.engine, self.tok, TEMPLATE)
         self.httpd = serve(self.svc, port=0)
@@ -339,14 +343,14 @@ class OverHttp(Server):
         self.assertEqual((r["object"], r["status"], r["error"]), ("response", "completed", None))
         rs, msg = r["output"]
         self.assertEqual(rs["type"], "reasoning")
-        self.assertEqual(rs["content"], [{"type": "reasoning_text", "text": "Read it.\n"}])
+        self.assertEqual(rs["content"], [{"type": "reasoning_text", "text": "Read it."}])
         self.assertEqual(rs["summary"], [])
         self.assertNotIn("encrypted_content", rs)
         self.assertEqual(msg["type"], "message")
         self.assertEqual(msg["content"][0]["text"], "The file says before.")
         u = r["usage"]
         self.assertEqual(u["output_tokens"], len(self.tok.encode(ANSWER)) + 1)        # + the end-of-turn token
-        self.assertEqual(u["output_tokens_details"]["reasoning_tokens"], len("Read it.\n</think>"))
+        self.assertEqual(u["output_tokens_details"]["reasoning_tokens"], len(self.tok.encode("Read it.</think>")))
         self.assertEqual(u["total_tokens"], u["input_tokens"] + u["output_tokens"])
         self.assertEqual(r["store"], False)
 
@@ -379,7 +383,7 @@ class OverHttp(Server):
         replay = input_messages({"input": [{"role": "user", "content": "hi"},
                                            {"type": "reasoning", "summary": [], "encrypted_content":
                                             rs["encrypted_content"]}, msg]})
-        self.assertEqual(replay[1]["reasoning_content"], "Read it.\n")
+        self.assertEqual(replay[1]["reasoning_content"], "Read it.")
 
     def test_max_output_tokens_ends_incomplete(self):
         code, r = self.post({"model": "m", "input": "hi", "max_output_tokens": 5})
@@ -391,11 +395,12 @@ class OverHttp(Server):
         self.assertEqual(events[-1]["type"], "response.incomplete")
 
     def test_effort_none_does_not_think(self):
-        self.engine.scripts = [self.tok.encode("Hello.<|im_end|>", parse_special=True)]
+        self.engine.scripts = [self.tok.encode("Hello.<|user|>", parse_special=True)]
         self.engine.script = self.engine.scripts[0]
         code, r = self.post({"model": "m", "input": "hi", "reasoning": {"effort": "none"}})
         self.assertEqual([o["type"] for o in r["output"]], ["message"])
-        self.assertIn("<think>\n\n</think>", self.tok.decode(self.engine.last_prompt))
+        self.assertEqual(r["output"][0]["content"][0]["text"], "Hello.")
+        self.assertTrue(self.tok.decode(self.engine.last_prompt).endswith("<|assistant|></think>"))
 
     def test_errors_use_the_responses_format(self):
         for body, param in (({"model": "m"}, "input"), ({"model": "m", "input": "x", "previous_response_id": "r"},
@@ -428,24 +433,33 @@ class OverHttp(Server):
         code, r = self.post({"model": "m", "input": "hi"}, headers={"Origin": "https://evil.example.com"})
         self.assertEqual(code, 403)
 
-    def test_a_foreign_page_cannot_name_a_file_as_an_image(self):
-        """#553: the chat routes refuse a file image from another origin; so does /v1/responses."""
+    def test_pictures_are_refused_and_a_tool_s_picture_is_a_note(self):
+        """The model reads text only: a picture is a 400 that says so, from any source and any page (so #553's check
+        of a file named by another origin has nothing left to guard); a picture in a tool's result becomes a note."""
         def body(src):
             return {"model": "m", "input": [{"role": "user", "content": [
                 {"type": "input_text", "text": "what is it?"}, {"type": "input_image", "image_url": src}]}]}
-        self.svc.cors_origins = ["*"]                  # a page cors_origins lets in may send JSON, not name a file
-        for src in (r"\\host\share\x.png", "/etc/passwd", "file:///C:/x.png"):
-            with self.subTest(src=src):
-                code, r = self.post(body(src), headers={"Origin": "https://evil.example.com"})
-                self.assertEqual(code, 400, r)
-                self.assertIn("another origin", r["error"]["message"])
-        # data: and http(s) are the page's own to send: not refused by this check (no vision here, so a 400 of another kind)
-        for src in ("data:image/png;base64,iVBORw0KGgo=", "https://example.com/x.png"):
-            code, r = self.post(body(src), headers={"Origin": "https://evil.example.com"})
-            self.assertNotIn("another origin", json.dumps(r))
+        self.svc.cors_origins = ["*"]                  # a page cors_origins lets in may send JSON
+        for src in (r"\\host\share\x.png", "/etc/passwd", "file:///C:/x.png", "data:image/png;base64,iVBORw0KGgo=",
+                    "https://example.com/x.png"):
+            for origin in (None, "https://evil.example.com"):
+                with self.subTest(src=src, origin=origin):
+                    code, r = self.post(body(src), headers={"Origin": origin} if origin else None)
+                    self.assertEqual(code, 400, r)
+                    self.assertEqual(set(r["error"]), {"message", "type", "param", "code"})
+                    self.assertIn("text only", r["error"]["message"])
+        self.assertEqual(self.engine.last_prompt, [])   # none reached the engine
+        result = [{"type": "input_text", "text": "x.png: "},
+                  {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo="}]
+        code, r = self.post({"model": "m", "tools": TOOLS, "input": [
+            {"role": "user", "content": "look at x.png"},
+            {"type": "function_call", "call_id": "c1", "name": "exec_command", "arguments": "{\"cmd\": \"cat x.png\"}"},
+            {"type": "function_call_output", "call_id": "c1", "output": result}]})
+        self.assertEqual(code, 200, r)
+        self.assertIn(f"<tool_response>x.png: {IMAGE_NOTE}</tool_response>", self.tok.decode(self.engine.last_prompt))
 
     def test_json_schema_text_format(self):
-        self.engine.scripts = [self.tok.encode("</think>\n\n{\"n\": 3}<|im_end|>", parse_special=True)]
+        self.engine.scripts = [self.tok.encode(reply_text("", "{\"n\": 3}") + "<|user|>", parse_special=True)]
         self.engine.script = self.engine.scripts[0]
         fmt = {"type": "json_schema", "name": "num", "strict": True,
                "schema": {"type": "object", "properties": {"n": {"type": "integer"}}, "required": ["n"]}}
@@ -475,12 +489,12 @@ class OverHttp(Server):
         self.assertEqual(rec["path"], "/v1/responses")
         full = self.svc.request_records(rec["id"])
         self.assertEqual(full["output"], "The file says before.")
-        self.assertEqual(full["reasoning"], "Read it.\n")
+        self.assertEqual(full["reasoning"], "Read it.")
         self.assertIn("/v1/responses", self.svc.v1_status()["dialects"])
 
 
 class ToolRoundTrip(Server):
-    script = [CALL, ANSWER]
+    script = [CALL + "<|observation|>", ANSWER]       # GLM ends a turn that calls a tool with <|observation|>
 
     def test_function_call_round_trip(self):
         user = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "what is in a.txt?"}]}
@@ -513,16 +527,16 @@ class ToolRoundTrip(Server):
                                                        "output": "before"}]})
         self.assertEqual(code, 200, r)
         second_prompt = self.tok.decode(self.engine.last_prompt)
-        self.assertTrue(second_prompt.startswith(first_prompt + CALL + "<|im_end|>"), second_prompt[-600:])
-        self.assertIn("<tool_response>\nbefore\n</tool_response>", second_prompt)
+        self.assertTrue(second_prompt.startswith(first_prompt + CALL + "<|observation|>"), second_prompt[-600:])
+        self.assertIn("<|observation|><tool_response>before</tool_response>", second_prompt)
         self.assertEqual(r["output"][-1]["content"][0]["text"], "The file says before.")
 
     def test_namespace_call_written_with_double_underscore(self):
-        # Qwen writes Codex's MCP tools in their flat `mcp__server__tool` form; Codex only
+        # A model may write Codex's MCP tools in their flat `mcp__server__tool` form; Codex only
         # runs the call when it comes back with its namespace.
         self.engine.scripts = [self.tok.encode(
-            "</think>\n\n<tool_call>\n<function=mcp__websearch__web_search>\n<parameter=query>\nstrata\n"
-            "</parameter>\n</function>\n</tool_call><|im_end|>", parse_special=True)]
+            reply_text("", "", call_text("mcp__websearch__web_search", query="strata")) + "<|observation|>",
+            parse_special=True)]
         self.engine.script = self.engine.scripts[0]
         tools = [{"type": "namespace", "name": "mcp__websearch", "description": "Search.", "tools": [
             {"type": "function", "name": "web_search",
@@ -534,10 +548,7 @@ class ToolRoundTrip(Server):
                          ("mcp__websearch", "web_search", {"query": "strata"}))
 
     def test_namespace_and_custom_calls_come_back_under_their_own_names(self):
-        self.engine.scripts = [self.tok.encode(
-            "</think>\n\n<tool_call>\n<function=multi_agent_v1.spawn_agent>\n<parameter=message>\nhi\n</parameter>\n"
-            "</function>\n</tool_call>\n<tool_call>\n<function=apply_patch>\n<parameter=input>\n*** Begin Patch\n"
-            "</parameter>\n</function>\n</tool_call><|im_end|>", parse_special=True)]
+        self.engine.scripts = [self.tok.encode(TWO_CALLS + "<|observation|>", parse_special=True)]
         self.engine.script = self.engine.scripts[0]
         tools = [{"type": "namespace", "name": "multi_agent_v1", "description": "Agents.", "tools": [
             {"type": "function", "name": "spawn_agent", "strict": False,
@@ -578,7 +589,7 @@ class JsonFormatWithTools(Server):
         self.engine.script = self.engine.scripts[0]
 
     def test_a_tool_call_passes_through(self):
-        self.script_with(CALL + "<|im_end|>")
+        self.script_with(CALL + "<|observation|>")
         for stream in (False, True):
             code, r = self.post(self.request(stream=stream))
             self.assertEqual(code, 200, r)
@@ -592,7 +603,7 @@ class JsonFormatWithTools(Server):
         self.assertIn("applies only to your final answer", self.tok.decode(self.engine.last_prompt))
 
     def test_the_final_text_answer_is_the_schema_object(self):
-        self.script_with('</think>\n\n{"outcome": "allow", "rationale": "read only"}<|im_end|>')
+        self.script_with(reply_text("", '{"outcome": "allow", "rationale": "read only"}') + "<|user|>")
         code, r = self.post(self.request())
         self.assertEqual(code, 200, r)
         self.assertEqual(json.loads(r["output"][-1]["content"][0]["text"]),
@@ -606,7 +617,7 @@ class JsonFormatWithTools(Server):
             import jsonschema  # noqa: F401
         except ImportError:
             self.skipTest("the schema check needs jsonschema")
-        self.script_with('</think>\n\n{"outcome": 3}<|im_end|>')
+        self.script_with(reply_text("", '{"outcome": 3}') + "<|user|>")
         code, r = self.post(self.request())
         self.assertEqual((code, r["error"]["code"]), (502, "structured_output_failed"))
 
@@ -647,9 +658,7 @@ class ThreadTitle(Server):
 
 class CodexCompactionOverHttp(Server):
     # the compaction answer is tool calls the conversation's tools would make a namespace call and a custom call
-    script = [CALL, "</think>\n\n<tool_call>\n<function=multi_agent_v1.spawn_agent>\n<parameter=message>\nhi\n"
-                    "</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=apply_patch>\n<parameter=input>\n"
-                    "*** Begin Patch\n</parameter>\n</function>\n</tool_call>"]
+    script = [CALL, TWO_CALLS]
     tools = TOOLS + [{"type": "namespace", "name": "multi_agent_v1", "description": "Agents.", "tools": [
         {"type": "function", "name": "spawn_agent", "parameters": {"type": "object", "properties": {
             "message": {"type": "string"}}}}]}, {"type": "custom", "name": "apply_patch", "description": "Edit files."}]
@@ -687,8 +696,8 @@ class CodexCompactionOverHttp(Server):
     def test_the_kept_tools_shape_only_the_prompt(self):
         prompt, code, r = self.compaction(codex_meta("compaction"))
         self.assertEqual(code, 200, r)
-        self.assertTrue(prompt.startswith(self.first_prompt + CALL + "<|im_end|>"))   # the cached conversation
-        self.assertIn("multi_agent_v1.spawn_agent", prompt[:prompt.index("<|im_end|>")])
+        self.assertTrue(prompt.startswith(self.first_prompt + CALL + "<|observation|>"))   # the cached conversation
+        self.assertIn("multi_agent_v1.spawn_agent", prompt[:prompt.index("<|user|>")])
         self.assertEqual(self.parser_tools[-1], None)    # the parser gets the request's tools: none
         self.assertEqual(r["tools"], [])
         # the calls come back as for any request without tools: no namespace, no custom tool
@@ -700,7 +709,7 @@ class CodexCompactionOverHttp(Server):
         plain, code, r2 = self.compaction({})
         self.assertEqual(code, 200, r2)
         self.assertFalse(plain.startswith(self.first_prompt))
-        self.assertNotIn("multi_agent_v1.spawn_agent", plain[:plain.index("<|im_end|>")])
+        self.assertNotIn("multi_agent_v1.spawn_agent", plain[:plain.index("<|user|>")])
         self.assertEqual(self.parser_tools[-1], None)
         self.assertEqual([(o["type"], o["name"], o.get("namespace")) for o in r2["output"]], outputs)
 
