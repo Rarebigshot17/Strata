@@ -69,29 +69,30 @@ glm53-flash once reviewed: `glm53-flash-wip-frontend` (B1), `glm53-flash-wip-ser
 `glm53-flash-wip-web` (B4 and the small serve modules), `glm53-flash-wip-setup` (C1), `glm53-flash-wip-tools`
 (C2). The tests (B3), the docs (C3) and the review (D1) follow the merge.
 
-State of the branches (October 18): B4 is finished on `glm53-flash-wip-web` (d23a8d7), waiting for the merge. A
-usage limit stopped the agents of B1, B2, C1 and C2 partway. Their uncommitted edits were saved, unreviewed, as
-"WIP ...: uncommitted work of the interrupted agent" commits: frontend 807e208, server 0254d3c (server.py cut from
-about 6,600 to 4,600 lines) and setup 7dfcc67 (setup.py cut from about 5,800 to 1,800 lines). The tools branch
-was not started. The agents were restarted to continue from these branches.
+State of the branches (October 18): B1, B2 and B4 are merged into glm53-flash (f639844); with them the GLM
+focused tests (`serve.test_glm_engine_protocol`, `serve.test_glm_parser`, `serve.test_frontend`, ...: 165 tests) and
+`tools/glm53_server_check.sh` (10 checks on the CPU engine) pass. The old test suite still expects Qwen: B3 is split
+over `glm53-flash-wip-tests-a` ... `-f` (test_server.py's three regions, the reasoning tests, the API tests, the
+engine-process tests with the removed features' tests and serve/glm_server.py), with the shared fixtures in
+`serve/glm_fixtures.py`. C1 and C2 continue on `glm53-flash-wip-setup` and `glm53-flash-wip-tools`.
 
-- [ ] B1 `serve/frontend.py`: a GLM `OutputParser` with the same interface (events reasoning / content /
+- [x] B1 (merged in fd94fb6) `serve/frontend.py`: a GLM `OutputParser` with the same interface (events reasoning / content /
   tool_start / tool_args / tool_call; `finish`, `state`, `buf`, `pending`, `rescued`, `refused`), GLM call grammar
   `<tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value>...</tool_call>`, values verbatim (schema "string"
   raw, else JSON), no Qwen quoted-`</think>` rule, a reply that opens its own `<think>`; `forced_call` GLM
   openings; `ChatTemplate` from a source string with `strftime_now` and GLM capability probes; literal marking
   of every type-3/4 token the tokenizer has; `clear_thinking` and other template kwargs passed through; tool
   message content flattened to text.
-- [ ] B2 `serve/server.py`: tokenizer and template from the GGUF (`pre` from the GGUF, default glm5);
+- [x] B2 (merged in f639844) `serve/server.py`: tokenizer and template from the GGUF (`pre` from the GGUF, default glm5);
   `stop_ids` and `--eos-ids` = `<|endoftext|>`, `<|user|>`, `<|observation|>` + GGUF eos; `cp=` computed in
   `prepare` (also for MCP rounds); engine args for strata-glm; STOP before QUIT; `ERR internal:` as a server
   error (5xx); `HB`; Monitor figures from GLM's INFO and its `conversations:` log lines; ordered FIFO;
   `/v1/completions`; removals listed under Decisions; GLM ByteTokenizer / MockEngine for tests.
-- [ ] B3 Tests: GLM fixture kit (template = GLM, GLM ByteTokenizer, MockEngine ending in `<|user|>`, a GLM
+- [~] B3 (in progress on the tests-a ... -f branches) Tests: GLM fixture kit (template = GLM, GLM ByteTokenizer, MockEngine ending in `<|user|>`, a GLM
   fake engine process); port the fixture-swap tests, rewrite the format tests, delete the Qwen-only ones;
   fold `test_glm_server.py` into them and retire `serve/glm_server.py`; `tools/glm53_server_check.sh` drives
   `serve/server.py`.
-- [~] B4 (done on `glm53-flash-wip-web` d23a8d7, not merged yet) `serve/runconfig.py` and the web app: GLM keys (`--vram-reserve` GB, `--park-mib`), no top_k cap,
+- [x] B4 (merged in aa7d1bd) `serve/runconfig.py` and the web app: GLM keys (`--vram-reserve` GB, `--park-mib`), no top_k cap,
   thinking on/off, no speed projection / MTP / vision text, GLM facts in the Monitor.
 
 ### C. Install and launch
@@ -100,7 +101,7 @@ was not started. The agents were restarted to continue from these branches.
   strata-glm, the shards from `unsloth/GLM-5.3-Flash-GGUF` (file names listed from the repository at run time),
   the run config, the run script, start on 8101. `setup.sh`, `update.sh`, Docker, `chat.py`, requirements.
 - [ ] C2 `tools/`: keep the GLM tools and generic HTTP tools; delete Qwen and HIP tooling with its tests.
-- [ ] C3 Docs: README for GLM, delete Qwen/HIP docs and the translated READMEs, AGENTS.md.
+- [~] C3 (Qwen/AMD pages and translated READMEs removed, HOW_IT_WORKS and LOGIT_BIAS rewritten) Docs: README for GLM, delete Qwen/HIP docs and the translated READMEs, AGENTS.md.
 
 ### D. Review
 
