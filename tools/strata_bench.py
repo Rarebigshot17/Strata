@@ -888,7 +888,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Measure this Strata install and write a shareable report (see the top of this file).")
     ap.add_argument("--config", help="the model config to run (default: the newest strata-glm-*.json of this folder)")
     ap.add_argument("--url", help="use the server already running at this address (http://127.0.0.1:8101) instead of starting one")
-    ap.add_argument("--port", type=int, help="the port to start the server on (default: the config's)")
+    ap.add_argument("--port", type=int, help=f"the port to start the server on (default: the config's, else {DEFAULT_PORT})")
     ap.add_argument("--gpu", help="start the server on this GPU only (as the server's --gpu)")
     ap.add_argument("--api-key", default=os.environ.get("STRATA_API_KEY") or os.environ.get("STRATA_KEY", ""),
                     help="the server's API key, if it has one (or STRATA_API_KEY, the server's own variable, or STRATA_KEY)")
