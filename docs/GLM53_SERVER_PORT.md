@@ -69,12 +69,13 @@ glm53-flash once reviewed: `glm53-flash-wip-frontend` (B1), `glm53-flash-wip-ser
 `glm53-flash-wip-web` (B4 and the small serve modules), `glm53-flash-wip-setup` (C1), `glm53-flash-wip-tools`
 (C2). The tests (B3), the docs (C3) and the review (D1) follow the merge.
 
-State of the branches (October 18): B1, B2 and B4 are merged into glm53-flash (f639844); with them the GLM
-focused tests (`serve.test_glm_engine_protocol`, `serve.test_glm_parser`, `serve.test_frontend`, ...: 165 tests) and
-`tools/glm53_server_check.sh` (10 checks on the CPU engine) pass. The old test suite still expects Qwen: B3 is split
-over `glm53-flash-wip-tests-a` ... `-f` (test_server.py's three regions, the reasoning tests, the API tests, the
-engine-process tests with the removed features' tests and serve/glm_server.py), with the shared fixtures in
-`serve/glm_fixtures.py`. C1 and C2 continue on `glm53-flash-wip-setup` and `glm53-flash-wip-tools`.
+State of the branches (October 18, evening): B1, B2, B4 and most of B3 are merged into glm53-flash: the test
+port's parts a-e, each reviewed by a second agent. Part f (the engine-process tests, the removed features' tests,
+retiring serve/glm_server.py) and C1/C2 (`glm53-flash-wip-setup`, `glm53-flash-wip-tools`) are in their reviews.
+Bugs the port's tests found and fixed on glm53-flash: a call cut off by the end of a reply was still returned as a
+call to run in non-streamed OpenAI and Anthropic answers (#211); a namespace tool written as `ns__tool` came back as
+text on /v1/responses; a call quoted on a "> " line inside the reasoning could be run. Added: OpenAI's
+`stream_options.include_usage`. D1 (the review) has started on a snapshot of 334ad57.
 
 - [x] B1 (merged in fd94fb6) `serve/frontend.py`: a GLM `OutputParser` with the same interface (events reasoning / content /
   tool_start / tool_args / tool_call; `finish`, `state`, `buf`, `pending`, `rescued`, `refused`), GLM call grammar
@@ -88,7 +89,7 @@ engine-process tests with the removed features' tests and serve/glm_server.py), 
   `prepare` (also for MCP rounds); engine args for strata-glm; STOP before QUIT; `ERR internal:` as a server
   error (5xx); `HB`; Monitor figures from GLM's INFO and its `conversations:` log lines; ordered FIFO;
   `/v1/completions`; removals listed under Decisions; GLM ByteTokenizer / MockEngine for tests.
-- [~] B3 (in progress on the tests-a ... -f branches) Tests: GLM fixture kit (template = GLM, GLM ByteTokenizer, MockEngine ending in `<|user|>`, a GLM
+- [~] B3 (parts a-e merged and reviewed; part f in review) Tests: GLM fixture kit (template = GLM, GLM ByteTokenizer, MockEngine ending in `<|user|>`, a GLM
   fake engine process); port the fixture-swap tests, rewrite the format tests, delete the Qwen-only ones;
   fold `test_glm_server.py` into them and retire `serve/glm_server.py`; `tools/glm53_server_check.sh` drives
   `serve/server.py`.
