@@ -981,9 +981,9 @@ class ClientShapes(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        tok = ByteTokenizer()
-        cls.engine = RecordingPrompt(tok, "</think>\n\n2", max_context=CTX)
-        cls.svc = Service(cls.engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        cls.engine = MockEngine(tok, reply_text("", "2"), max_context=CTX)
+        cls.svc = Service(cls.engine, tok, glm_template())
         cls.httpd = serve(cls.svc, port=0)
         cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
 
@@ -1003,7 +1003,7 @@ class ClientShapes(unittest.TestCase):
                 return e.code, json.loads(e.read())
 
     def prompt_text(self):
-        return bytes(i for i in self.engine.last_ids if i < 256).decode("utf-8", "replace")
+        return bytes(i for i in self.engine.last_prompt if i < 256).decode("utf-8", "replace")
 
     def test_query_string(self):
         body = {"model": "x", "max_tokens": 20, "messages": [{"role": "user", "content": "hi"}]}
@@ -1039,8 +1039,8 @@ class ClientShapes(unittest.TestCase):
             self.assertIn(part, text)
 
     def test_no_user_turn_is_a_400(self):
-        # #365: the template's own refusal (Qwen's "No user query found in messages." when no turn is a user's query)
-        # answers 400, not a dropped connection
+        # #365: a template's own refusal (raise_exception: Qwen's said "No user query found in messages." when no turn
+        # was a user's query) answers 400, not a dropped connection
         with tempfile.TemporaryDirectory() as d:
             tpl = Path(d) / "chat_template.jinja"
             tpl.write_text("{% if messages[-1].role != 'user' %}{{ raise_exception('No user query found in messages.') }}"
@@ -1123,24 +1123,6 @@ class ClientShapes(unittest.TestCase):
                 if tools:
                     self.assertIn("get_weather", self.prompt_text())
 
-    def test_vision_temp_image_removed_when_the_pipe_fails(self):
-        # #352: the temporary image goes even when the encoder's pipe raises
-        from serve.server import Vision
-
-        class Gone:
-            def write(self, _):
-                raise BrokenPipeError("the encoder is gone")
-
-        v = Vision.__new__(Vision)
-        v.dir, v.lock, v.cache = Path(tempfile.mkdtemp(prefix="strata-vision-test-")), threading.Lock(), {}
-        v.proc = mock.Mock(stdin=Gone())
-        with mock.patch.object(Vision, "load", return_value=b""), mock.patch.object(Vision, "normalize",
-                                                                                   return_value=b"png"):
-            with self.assertRaises(BrokenPipeError):
-                v.encode("x")
-        self.assertEqual(list(v.dir.iterdir()), [])
-        v.dir.rmdir()
-
     def test_leading_system_unchanged(self):
         from serve.frontend import anthropic_to_messages, openai_to_messages
         msgs, _, _ = openai_to_messages({"messages": [{"role": "developer", "content": "D"}, {"role": "user", "content": "u"}]})
@@ -1180,10 +1162,9 @@ class ClientShapes(unittest.TestCase):
         msgs, tools, kwargs = openai_to_messages({"messages": [{"role": "user", "content": "u"},
                                                                {"role": "assistant", "content": "", "tool_calls": bad_call}]})
         self.assertEqual(msgs[1]["tool_calls"], [{"function": {"name": "f", "arguments": {"arguments": "{malformed_json"}}}])
-        tpl = ChatTemplate(ROOT / "serve/chat_template.jinja")
-        rendered = tpl.render(msgs, tools=tools, **kwargs)
-        self.assertIn("<function=f>", rendered)
-        self.assertIn("<parameter=arguments>\n{malformed_json", rendered)
+        rendered = glm_template().render(msgs, tools=tools, **kwargs)
+        self.assertIn("<tool_call>f<arg_key>arguments</arg_key><arg_value>{malformed_json</arg_value></tool_call>",
+                      rendered)
 
 
 class ToolArguments(unittest.TestCase):
@@ -1212,248 +1193,73 @@ class ToolArguments(unittest.TestCase):
 
 
 class SamplingKeys(unittest.TestCase):
-    """The GEN line's sampling keys: top_k 0 ("off") or wider than the engine's 64 get the widest list, 64 (they used
-    to fall back to the engine default 20); a penalty always carries its window."""
+    """The GEN line's sampling keys: top_k as asked (0: off, the whole vocabulary; strata-glm has no cap on it); a
+    penalty always carries its window."""
 
     def keys(self, **sampling):
         return StrataEngine.sampling_keys(sampling).split()
 
     def test_top_k(self):
-        self.assertIn("top_k=10", self.keys(temperature=0.7, top_k=10))
-        self.assertIn("top_k=64", self.keys(temperature=0.7, top_k=64))
-        self.assertIn("top_k=64", self.keys(temperature=0.7, top_k=0))
-        self.assertIn("top_k=64", self.keys(temperature=0.7, top_k=100))
+        for k in (10, 64, 0, 100, 1000):
+            self.assertIn(f"top_k={k}", self.keys(temperature=0.7, top_k=k))
         for bad in (-1, True, 2.5, "20"):
             self.assertFalse([k for k in self.keys(temperature=0.7, top_k=bad) if k.startswith("top_k=")], bad)
-
-    def test_tune_keys(self):
-        k = self.keys(temperature=0, strata_tune={"pcie_frac": 0.2, "spec_min_p": 0.7})
-        self.assertIn("pcie_frac=0.2", k)
-        self.assertIn("spec_min_p=0.7", k)
-        bad = self.keys(strata_tune={"pcie_frac": 3, "spec_min_p": True, "pool_workers": 2})
-        self.assertFalse([x for x in bad if x.split("=")[0] in ("pcie_frac", "spec_min_p", "pool_workers")])
-
-    def test_tune_aux_cpus(self):
-        for val, want in ((True, "aux_cpus=1"), (1, "aux_cpus=1"), (False, "aux_cpus=0"), (0, "aux_cpus=0"),
-                          (1.0, "aux_cpus=1"), (0.0, "aux_cpus=0")):
-            self.assertIn(want, self.keys(strata_tune={"aux_cpus": val}), val)
-        for bad in (2, -1, 0.5, "1", None, "auto"):
-            self.assertFalse([x for x in self.keys(strata_tune={"aux_cpus": bad}) if x.startswith("aux_cpus=")], bad)
-        self.assertFalse([x for x in self.keys(temperature=0) if x.startswith("aux_cpus=")])
-
-    def test_checkpoint_key(self):
-        self.assertIn("ckpt=0", self.keys(temperature=0, strata_checkpoint=False))
-        for absent in ({}, {"strata_checkpoint": True}, {"strata_checkpoint": 0}, {"cache_prompt": False}):
-            self.assertNotIn("ckpt=0", self.keys(**absent), absent)
 
     def test_penalty_window(self):
         self.assertIn("penalty_last_n=64", self.keys(presence_penalty=1.5))
         self.assertIn("penalty_last_n=4096", self.keys(repetition_penalty=1.1, penalty_last_n=4096))
         self.assertFalse([k for k in self.keys(temperature=0.7) if k.startswith("penalty")])
 
+    def test_no_qwen_engine_keys(self):
+        # the Qwen engine's tuning, checkpoint and pinned-prefix fields are not sent (strata-glm has none of them)
+        self.assertEqual(self.keys(strata_tune={"pcie_frac": 0.2, "spec_min_p": 0.7, "aux_cpus": 1},
+                                   strata_checkpoint=False, strata_prefix={"tokens": 1234}), [])
+
 
 class SharedPrefix(unittest.TestCase):
-    """R1: "strata_prefix" marks the first messages as a shared prefix; the engine gets pin=N."""
-
-    @classmethod
-    def setUpClass(cls):
-        tok = ByteTokenizer()
-        cls.svc = Service(MockEngine(tok, "ok", max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
-        cls.tok = tok
-
-    def keys(self, **sampling):
-        return StrataEngine.sampling_keys(sampling).split()
+    """"strata_prefix" (the Qwen engine's pinned prefix) is accepted and ignored: the request is served with the
+    prompt it has without it."""
 
     MSGS = [{"role": "system", "content": "You answer questions about the document."},
             {"role": "user", "content": "DOC " * 40},
             {"role": "user", "content": "Which word repeats?"}]
 
-    def test_pin_key(self):
-        self.assertIn("pin=1234", self.keys(strata_prefix={"tokens": 1234}))
-        for absent in ({}, {"strata_prefix": {}}, {"strata_prefix": {"messages": 2}}, {"strata_prefix": {"tokens": 0}},
-                       {"strata_prefix": {"tokens": True}}, {"strata_prefix": "x"}):
-            self.assertFalse([k for k in self.keys(**absent) if k.startswith("pin=")], absent)
-
-    def test_messages_resolve_to_the_boundary_token(self):
-        req = {"strata_prefix": {"messages": 2}}
-        ids, _, _ = self.svc.prepare(self.MSGS, None, {}, 16, req=req)
-        n = req["strata_prefix"]["tokens"]
-        text = self.tok.decode(ids[:n], errors="replace")
-        self.assertTrue(text.endswith("DOC<|im_end|>\n"), text[-40:])   # right where the next message's turn starts
-        self.assertEqual(self.tok.decode(ids[n:n + 1]), "<|im_start|>")
-        head = self.svc.encode_prompt(self.MSGS[:2], None, {"add_generation_prompt": False})
-        self.assertEqual(ids[:n], head[:n])
-
-    def test_tokens_and_unusable_prefixes(self):
-        ids, _, _ = self.svc.prepare(self.MSGS, None, {}, 16)
-        req = {"strata_prefix": {"tokens": 100}}
-        self.svc.prepare(self.MSGS, None, {}, 16, req=req)
-        self.assertEqual(req["strata_prefix"], {"tokens": 100})
-        for spec in ({"messages": 3}, {"messages": 9}, {"tokens": len(ids)},       # leaves no last message / no suffix
-                     {"message": 1, "chars": 5000}, {"message": 7, "chars": 3}):   # more text than the message has
-            req = {"strata_prefix": spec}
-            with contextlib.redirect_stdout(io.StringIO()):
-                self.svc.prepare(self.MSGS, None, {}, 16, req=req)
-            self.assertEqual(req["strata_prefix"], {}, spec)                     # said in the log, never a refusal
-        for bad in ({"messages": 0}, {"messages": "2"}, {"messages": True}, {"tokens": 1.5}, {"x": 1},
-                    {"messages": 1, "tokens": 2}, {"message": 1}, {"chars": 3}, {"message": -1, "chars": 3}, [], "pin", {}):
-            with self.assertRaises(ValueError, msg=bad):
-                self.svc.prepare(self.MSGS, None, {}, 16, req={"strata_prefix": bad})
-
-    def test_chars_end_inside_a_message(self):
-        # a document and its question in ONE message: the prefix is the first 160 characters of it
-        text = "DOC " * 40 + "Which word repeats?"
-        msgs = [{"role": "user", "content": text}]
-        req = {"strata_prefix": {"message": 0, "chars": 160}}
-        ids, _, _ = self.svc.prepare(msgs, None, {}, 16, req=req)
-        n = req["strata_prefix"]["tokens"]
-        self.assertEqual(self.tok.decode(ids[:n]).split("user\n", 1)[1], "DOC " * 40)   # exactly those characters
-        # a system message first: message 1 is the user's
-        msgs = [{"role": "system", "content": "S"}, {"role": "user", "content": text}]
-        req = {"strata_prefix": {"message": 1, "chars": 160}}
-        ids, _, _ = self.svc.prepare(msgs, None, {}, 16, req=req)
-        self.assertEqual(self.tok.decode(ids[:req["strata_prefix"]["tokens"]]).split("user\n", 1)[1], "DOC " * 40)
-
-    def test_without_the_field_nothing_changes(self):
-        req = {"temperature": 0}
-        ids, _, _ = self.svc.prepare(self.MSGS, None, {}, 16, req=req)
-        self.assertEqual(req, {"temperature": 0})
-        self.assertEqual(ids, self.svc.prepare(self.MSGS, None, {}, 16)[0])
+    def test_the_field_is_ignored(self):
+        tok = GlmTokenizer()
+        engine = MockEngine(tok, reply_text("", "ok"), max_context=CTX)
+        httpd = serve(Service(engine, tok, glm_template()), port=0)
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        prompts = []
+        try:
+            for prefix in (None, {"messages": 2}, {"tokens": 100}, {"message": 1, "chars": 5000}, "pin", 0):
+                with self.subTest(prefix=prefix):
+                    body = {"model": "m", "max_tokens": 4, "messages": self.MSGS,
+                            **({} if prefix is None else {"strata_prefix": prefix})}
+                    req = urllib.request.Request(base + "/v1/chat/completions", data=json.dumps(body).encode(),
+                                                 headers={"Content-Type": "application/json"})
+                    with contextlib.redirect_stdout(io.StringIO()), urllib.request.urlopen(req, timeout=30) as r:
+                        self.assertEqual(r.status, 200)
+                    prompts.append(engine.last_prompt)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+        self.assertEqual(len(prompts), 6)
+        self.assertTrue(all(ids == prompts[0] for ids in prompts))
 
 
 class GpuChoice(unittest.TestCase):
-    """Issue #51: the config's \"gpu\" reaches the engine as CUDA_VISIBLE_DEVICES, numbered like nvidia-smi."""
+    """Issue #51: the config's \"gpu\" reaches the engine as CUDA_VISIBLE_DEVICES, numbered like nvidia-smi, in the
+    order given (the engine's split and its output head follow it)."""
 
     def test_env(self):
         from serve.server import child_env
         env = child_env({"gpu": 1})
         self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "1")
         self.assertEqual(env["CUDA_DEVICE_ORDER"], "PCI_BUS_ID")
+        self.assertEqual(child_env({"gpu": [2, 0, 1]})["CUDA_VISIBLE_DEVICES"], "2,0,1")
         plain = child_env({})                     # no choice: the environment as it was (existing installs)
         self.assertEqual(plain.get("CUDA_VISIBLE_DEVICES"), os.environ.get("CUDA_VISIBLE_DEVICES"))
         self.assertEqual(plain.get("CUDA_DEVICE_ORDER"), os.environ.get("CUDA_DEVICE_ORDER"))
-
-    def test_card_order(self):
-        """#1352: with an auto layer split the faster card (SMs x clock) goes last; ties, a manual split, a
-        measurement we lack, HIP and "gpu_order": "as_given" keep the config's order."""
-        from serve.server import child_env, hip_speed_scores, ordered_gpus
-        fast_first = {0: 8448.0 * 2610, 2: 4608.0 * 2575}      # 4070 Ti SUPER (66 SMs) vs 5060 Ti (36 SMs), shaped
-        base = {"gpu": [0, 2], "args": []}
-        self.assertEqual(ordered_gpus(base, fast_first), [2, 0])
-        self.assertEqual(ordered_gpus({"gpu": [2, 0], "args": []}, fast_first), [2, 0])
-        self.assertEqual(ordered_gpus(base, {0: 5.0, 2: 5.0}), [0, 2])                       # identical cards
-        self.assertEqual(ordered_gpus(base, {0: 173740000.0, 2: 171640000.0}), [0, 2])      # #1760: two 5070 Ti, 1.2% apart
-        self.assertEqual(ordered_gpus(base, {0: 106.0, 2: 100.0}), [2, 0])                    # 6% apart: a real difference
-        self.assertEqual(ordered_gpus({**base, "gpu_order": "as_given"}, fast_first), [0, 2])
-        self.assertEqual(ordered_gpus({**base, "layer_split": "24"}, fast_first), [0, 2])
-        self.assertEqual(ordered_gpus({**base, "args": ["--layer-split", "24"]}, fast_first), [0, 2])
-        self.assertEqual(ordered_gpus({**base, "backend": "hip"}, fast_first), [2, 0])           # AMD: same rule
-        self.assertEqual(ordered_gpus({**base, "backend": "hip"}, {0: 7.0, 2: 7.0}), [0, 2])      # identical cards (the R9700s)
-        self.assertEqual(ordered_gpus(base, {0: 1.0}), [0, 2])                               # a card unmeasured
-        self.assertEqual(ordered_gpus({"gpu": 1, "args": []}, {1: 1.0}), [1])
-        self.assertEqual(ordered_gpus({"gpu": [0, 1, 2], "args": []}, {0: 3.0, 1: 9.0, 2: 6.0}), [0, 2, 1])
-        self.assertEqual(ordered_gpus({"gpu": [0, 1, 2], "args": []}, {0: 3.0, 1: 3.0, 2: 3.0}), [0, 1, 2])
-        # #1576: the reorder is skipped when it would land the last stage (head + draft + verify + cache) on a card
-        # with less VRAM than the config's own last card - the reporter's fast 12 GB / slow 22 GB pair
-        fast_small = {"gpu": [0, 1], "args": []}
-        speeds = {0: 8448.0 * 2610, 1: 4352.0 * 1665}     # 4070 Ti vs 2080 Ti
-        self.assertEqual(ordered_gpus(fast_small, speeds, {0: 12288, 1: 22528}), [0, 1])   # keep: tail would shrink
-        self.assertEqual(ordered_gpus(fast_small, speeds, {0: 24576, 1: 12288}), [1, 0])   # faster AND bigger: reorder
-        self.assertEqual(ordered_gpus(fast_small, speeds, {0: 16384, 1: 16384}), [1, 0])   # equal VRAM: reorder
-        self.assertEqual(ordered_gpus(fast_small, speeds, {0: 12288}), [1, 0])             # a card unmeasured: reorder
-        self.assertEqual(ordered_gpus({"gpu": [0, 1, 2], "args": []}, {0: 3.0, 1: 9.0, 2: 6.0},
-                                    {0: 8192, 1: 12288, 2: 24576}), [0, 1, 2])  # tail 1 (12G) < given tail 2 (24G)
-        self.assertEqual(child_env({"gpu": [0, 2], "args": [], "gpu_order": "as_given"})["CUDA_VISIBLE_DEVICES"], "0,2")
-        self.assertIsNone(hip_speed_scores([0], root="/nonexistent/kfd"))
-
-    def test_kfd_scores(self):
-        """AMD on Linux: the GPU nodes of the KFD topology, SIMDs x clock, node order = the config's index."""
-        import tempfile
-        from serve.server import hip_speed_scores
-        with tempfile.TemporaryDirectory() as d:
-            for n, simd, clk in ((0, 0, 0), (1, 128, 2350), (2, 64, 2000), (3, 128, 2350)):
-                os.makedirs(os.path.join(d, str(n)))
-                with open(os.path.join(d, str(n), "properties"), "w") as f:
-                    f.write(f"simd_count {simd}\nmax_engine_clk_fcompute {clk}\ngfx_target_version 120001\n")
-            sc = hip_speed_scores([0, 1, 2], root=d)
-            self.assertEqual(sc, {0: 128 * 2350.0, 1: 64 * 2000.0, 2: 128 * 2350.0})
-            self.assertIsNone(hip_speed_scores([0, 1, 2, 3], root=d))      # a card the topology does not have
-
-    def test_vision_device(self):
-        # #408: the image encoder on its own card; the engine's environment stays as it was
-        from serve.server import child_env, vision_env
-        cfg = {"gpu": [0, 1], "gpu_order": "as_given", "vision": {"exe": "v", "cuda_device": 2}}
-        env = child_env(cfg)
-        venv = vision_env(cfg, env)
-        self.assertEqual(venv["CUDA_VISIBLE_DEVICES"], "2")
-        self.assertEqual(venv["CUDA_DEVICE_ORDER"], "PCI_BUS_ID")
-        self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "0,1")
-        plain = {"gpu": [0, 1], "vision": {"exe": "v"}}
-        self.assertIs(vision_env(plain, env), env)          # no cuda_device: the engine's environment, unchanged
-
-    def test_hip_ordinal(self):
-        """#325: on Windows the HIP ordinal setup resolved wins over the config's "gpu" (an iGPU takes HIP's 0)."""
-        from serve.server import child_env
-        self.assertEqual(child_env({"backend": "hip", "gpu": 1})["HIP_VISIBLE_DEVICES"], "1")       # Linux: KFD order
-        self.assertEqual(child_env({"backend": "hip", "hip_ordinal": 1})["HIP_VISIBLE_DEVICES"], "1")
-        self.assertEqual(child_env({"backend": "hip", "gpu": 0, "hip_ordinal": 1})["HIP_VISIBLE_DEVICES"], "1")
-        self.assertEqual(child_env({"backend": "hip", "gpu": [1, 0], "hip_ordinal": 2})["HIP_VISIBLE_DEVICES"],
-                         "1,0")                                          # a layer split keeps its list
-        self.assertEqual(child_env({"backend": "hip", "gpu": 0, "hip_ordinal": "x"})["HIP_VISIBLE_DEVICES"], "0")
-        plain = child_env({"backend": "hip"})
-        self.assertEqual(plain.get("HIP_VISIBLE_DEVICES"), os.environ.get("HIP_VISIBLE_DEVICES"))
-
-
-class HipEnvGuard(unittest.TestCase):
-    """#654: a HIP_PATH that points nowhere and an unwritable TEMP crash the AMD runtime; both are repaired, a healthy
-    environment is not touched."""
-
-    def test_stale_hip_path_dropped(self):
-        import tempfile
-        from serve.server import hip_env_guard
-        with tempfile.TemporaryDirectory() as d:
-            gone = os.path.join(d, "TheRock", "build")
-            env = {"HIP_PATH": gone, "HIP_DEVICE_LIB_PATH": gone, "LLVM_PATH": d}
-            said = hip_env_guard(env, {"log": os.path.join(d, "x.log")})
-            self.assertNotIn("HIP_PATH", env)
-            self.assertNotIn("HIP_DEVICE_LIB_PATH", env)
-            self.assertEqual(env["LLVM_PATH"], d)             # exists: left alone
-            self.assertEqual(len(said), 2)
-
-    def test_unwritable_temp_replaced(self):
-        import tempfile
-        from serve.server import hip_env_guard
-        with tempfile.TemporaryDirectory() as d:
-            nothing = os.path.join(d, "no", "such", "dir")
-            env = {"TEMP": nothing, "TMP": d}
-            hip_env_guard(env, {"log": os.path.join(d, "x.log")})
-            self.assertEqual(env["TMP"], d)                   # writable: untouched
-            self.assertTrue(os.path.samefile(env["TEMP"], os.path.join(d, "tmp")))
-            self.assertTrue(os.path.isdir(env["TEMP"]))
-
-    def test_healthy_untouched(self):
-        import tempfile
-        from serve.server import hip_env_guard
-        with tempfile.TemporaryDirectory() as d:
-            env = {"HIP_PATH": d, "TEMP": d}
-            before = dict(env)
-            self.assertEqual(hip_env_guard(env, {}), [])
-            self.assertEqual(env, before)
-
-    def test_only_for_hip(self):
-        from serve.server import child_env
-        os.environ["HIP_PATH"] = r"Z:\definitely\not\here"
-        try:
-            self.assertEqual(child_env({}).get("HIP_PATH"), os.environ["HIP_PATH"])
-            self.assertNotIn("HIP_PATH", child_env({"backend": "hip"}))
-        finally:
-            del os.environ["HIP_PATH"]
-
-
-class RecordingPrompt(MockEngine):
-    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
-        self.last_ids = list(ids)
-        yield from super().generate(ids, max_new, sampling, cancel, embeddings)
 
 
 class DyingEngine(MockEngine):
@@ -1470,8 +1276,8 @@ class DyingEngine(MockEngine):
         self.dead, self.die_after = False, None
         self.restarts += 1
 
-    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
-        for i, t in enumerate(super().generate(ids, max_new, sampling, cancel, embeddings)):
+    def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
+        for i, t in enumerate(super().generate(ids, max_new, sampling, cancel, checkpoint)):
             if self.die_after is not None and i == self.die_after:
                 self.dead = True
                 raise EngineDied("the engine stopped unexpectedly (exit code -9)")
@@ -1481,7 +1287,7 @@ class DyingEngine(MockEngine):
 class SlowPromptEngine(MockEngine):
     """Reads a "long prompt" for up to 20 s without a token (the engine sends nothing then), stopping on cancel."""
 
-    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+    def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
         self.cancelled_after = None
         t0 = time.monotonic()
         while time.monotonic() - t0 < 20:
@@ -1489,7 +1295,7 @@ class SlowPromptEngine(MockEngine):
                 self.cancelled_after = time.monotonic() - t0
                 return
             time.sleep(0.05)
-        yield from super().generate(ids, max_new, sampling, cancel, embeddings)
+        yield from super().generate(ids, max_new, sampling, cancel, checkpoint)
 
 
 class ClientHangUp(unittest.TestCase):
@@ -1498,9 +1304,9 @@ class ClientHangUp(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        tok = ByteTokenizer()
-        cls.engine = SlowPromptEngine(tok, "</think>\n\nOK", max_context=CTX)
-        cls.svc = Service(cls.engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        cls.engine = SlowPromptEngine(tok, reply_text("", "OK"), max_context=CTX)
+        cls.svc = Service(cls.engine, tok, glm_template())
         cls.httpd = serve(cls.svc, port=0)
         cls.port = cls.httpd.server_address[1]
 
@@ -1535,9 +1341,9 @@ class EngineDeath(unittest.TestCase):
     """Issue #27: a dead engine is an error (not "length"), and the next request starts it again."""
 
     def test_error_then_restart(self):
-        tok = ByteTokenizer()
-        eng = DyingEngine(tok, "</think>\n\n" + ANSWER, max_context=CTX)
-        svc = Service(eng, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        tok = GlmTokenizer()
+        eng = DyingEngine(tok, reply_text("", ANSWER), max_context=CTX)
+        svc = Service(eng, tok, glm_template())
         httpd = serve(svc, port=0)
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
         try:
@@ -1567,31 +1373,64 @@ class EngineDeath(unittest.TestCase):
 
     def test_engine_err_mid_stream(self):
         """The engine's ERR line after the stream started reaches the client as an error event (it used to be a
-        400 written into the open stream, which clients read as an empty answer)."""
-        class ErrEngine(MockEngine):
-            def generate(self, ids, max_new, sampling, cancel, embeddings=None):
-                yield None                                  # a prompt-progress heartbeat: the stream has started
-                raise ValueError("verify: layer 31 never rang (an illegal memory access was encountered)")
+        400 written into the open stream, which clients read as an empty answer): a refusal (`ERR <reason>`, a
+        ValueError) and the engine's own failure (`ERR internal: ...`, EngineError) alike."""
+        for error in (ValueError("the prompt does not fit the engine's context"),
+                      EngineError("the engine failed: CUDA error 700 (an illegal memory access was encountered)")):
+            class ErrEngine(MockEngine):
+                def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
+                    yield None                              # a prompt-progress heartbeat: the stream has started
+                    raise error
 
-        tok = ByteTokenizer()
-        svc = Service(ErrEngine(tok, ANSWER, max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
-        httpd = serve(svc, port=0)
-        base = f"http://127.0.0.1:{httpd.server_address[1]}"
-        try:
-            for path, body in [("/v1/chat/completions", {"model": "m", "stream": True, "max_tokens": 20,
-                                                          "messages": [{"role": "user", "content": "hi"}]}),
-                               ("/v1/messages", {"model": "m", "stream": True, "max_tokens": 20,
-                                                 "messages": [{"role": "user", "content": "hi"}]})]:
-                req = urllib.request.Request(base + path, data=json.dumps(body).encode(),
-                                             headers={"Content-Type": "application/json"})
-                with urllib.request.urlopen(req, timeout=30) as r:
-                    text = r.read().decode()
-                self.assertIn("illegal memory access", text, path)
-                self.assertNotIn("HTTP/1", text, path)
-                self.assertEqual(svc.metrics()["requests"][0]["finish"], "error")
-        finally:
-            httpd.shutdown()
-            httpd.server_close()
+            tok = GlmTokenizer()
+            svc = Service(ErrEngine(tok, ANSWER, max_context=CTX), tok, glm_template())
+            httpd = serve(svc, port=0)
+            base = f"http://127.0.0.1:{httpd.server_address[1]}"
+            try:
+                for path in ("/v1/chat/completions", "/v1/messages"):
+                    with self.subTest(error=type(error).__name__, path=path):
+                        body = {"model": "m", "stream": True, "max_tokens": 20,
+                                "messages": [{"role": "user", "content": "hi"}]}
+                        req = urllib.request.Request(base + path, data=json.dumps(body).encode(),
+                                                     headers={"Content-Type": "application/json"})
+                        with urllib.request.urlopen(req, timeout=30) as r:
+                            text = r.read().decode()
+                        self.assertIn(str(error).split(": ", 1)[-1], text)
+                        self.assertNotIn("HTTP/1", text)
+                        self.assertEqual(svc.metrics()["requests"][0]["finish"], "error")
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+
+    def test_engine_err_before_the_answer(self):
+        """Before anything was sent, a refusal (`ERR <reason>`) is the request's fault, a 400; the engine's own
+        failure (`ERR internal: ...`) the server's, a 500 - never a 400 the client would not retry."""
+        for error, status in ((ValueError("the prompt does not fit the engine's context"), 400),
+                              (EngineError("the engine failed: CUDA error 700"), 500)):
+            class ErrEngine(MockEngine):
+                def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
+                    raise error
+                    yield                                   # a generator, as the engines are
+
+            tok = GlmTokenizer()
+            svc = Service(ErrEngine(tok, ANSWER, max_context=CTX), tok, glm_template())
+            httpd = serve(svc, port=0)
+            base = f"http://127.0.0.1:{httpd.server_address[1]}"
+            try:
+                for path in ("/v1/chat/completions", "/v1/messages"):
+                    with self.subTest(error=type(error).__name__, path=path):
+                        body = {"model": "m", "max_tokens": 20, "messages": [{"role": "user", "content": "hi"}]}
+                        req = urllib.request.Request(base + path, data=json.dumps(body).encode(),
+                                                     headers={"Content-Type": "application/json"})
+                        with contextlib.redirect_stdout(io.StringIO()), \
+                                self.assertRaises(urllib.error.HTTPError) as cm:
+                            urllib.request.urlopen(req, timeout=30)
+                        with cm.exception as e:
+                            self.assertEqual(e.code, status)
+                            self.assertIn(str(error).split(": ", 1)[-1], json.loads(e.read())["error"]["message"])
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
 
 
 # ======================================== region B of the GLM test port (plan B3); keep this line ========================================
