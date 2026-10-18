@@ -3,11 +3,11 @@
 Everything here is text: no model, no GPU. The engine consumes token ids and produces text deltas; this module
 
   * normalizes OpenAI Chat Completions and Anthropic Messages requests into the chat template's message form,
-  * renders the model's own Jinja chat template (pack `tokenizer/chat_template.jinja`) exactly as Hugging Face
-    does (checked against the pack's `chat_golden.json`, 10 cases incl. thinking and tools),
+  * renders the model's own Jinja chat template (GLM's, from the GGUF; `serve/chat_template.jinja` is GLM-4.7-Flash's,
+    the same format) exactly as Hugging Face does,
   * parses the streamed output incrementally into reasoning (`<think>...</think>`), content and tool calls in
-    the template's XML form (`<tool_call><function=NAME><parameter=P>VALUE</parameter>...</function></tool_call>`),
-    never emitting a partial tag to the client.
+    GLM's form (`<tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value>...</tool_call>`), never emitting a
+    partial tag to the client.
 
 Design note: plan v0.3 describes a single C++ process. The frontend is Python first because the template is Jinja
 and the formats change often; the engine boundary is token ids in, text deltas out, which keeps a later C++ port
@@ -74,11 +74,11 @@ class ChatTemplate:
                                     **kwargs)
 
     def _detect_caps(self) -> dict[str, bool]:
-        """llama.cpp's capability names, checked at load time against this template and Strata's tool-call format.
+        """llama.cpp's capability names, checked at load time against this template and GLM's tool-call format.
         These are rendering hints, not a guarantee that the model will follow a request."""
-        def render(messages, tools=None):
+        def render(messages, tools=None, **kwargs):
             try:
-                return self.render(messages, tools=tools)
+                return self.render(messages, tools=tools, **kwargs)
             except Exception as exc:                # noqa: BLE001 - a hint only: never stop the server for a probe
                 # A template may reject a role or feature (a custom one may fail in any way): the feature is off,
                 # discovery still answers for the others, and the start-up goes on.
@@ -99,26 +99,28 @@ class ChatTemplate:
             replies = [f"strata_caps_result_{i}" for i in range(count)]
             messages += [{"role": "tool", "content": reply} for reply in replies] + [user]
             prompt = render(messages, tools)
-            # Instructions include example XML and literal tag names, which are not model output. Parse only
-            # complete calls to our probe functions, using the same body parser as OutputParser.
-            bodies = re.findall(r"<tool_call>\s*(<function=strata_caps_call_\d+>.*?</function>)\s*</tool_call>",
-                                prompt, re.S)
+            # The instructions show the call format with placeholder names, which is not model output. Read only
+            # complete calls to our probe functions, the way OutputParser reads a call.
+            bodies = re.findall(r"<tool_call>(\s*strata_caps_call_\d+.*?)</tool_call>", prompt, re.S)
             try:
-                parsed = [parse_tool_call(body) for body in bodies]
+                parsed = [parse_tool_call(body, tools) for body in bodies]
             except ValueError:
                 return False
             return [{"name": call.name, "arguments": call.arguments} for call in parsed] == calls \
                 and all(reply in prompt for reply in replies)
 
+        # GLM's template drops the reasoning of turns before the last user message unless clear_thinking is false;
+        # a template that keeps it either way (or when asked to) preserves reasoning.
         history = [user, {"role": "assistant", "content": "strata_caps_answer",
                           "reasoning_content": "strata_caps_reasoning"}, user]
         return {"supports_tools": all(s in tool_prompt for s in
-                                      ("strata_caps_call_0", "strata_caps_description", "<tool_call>", "<function=")),
+                                      ("strata_caps_call_0", "strata_caps_description", CALL_START, KEY_START)),
                 "supports_tool_calls": calls_supported(1),
                 "supports_system_role": "strata_caps_system" in render(
                     [{"role": "system", "content": "strata_caps_system"}, user]),
                 "supports_parallel_tool_calls": calls_supported(2),
-                "supports_preserve_reasoning": "strata_caps_reasoning" in render(history)}
+                "supports_preserve_reasoning": any("strata_caps_reasoning" in render(history, **kwargs)
+                                                   for kwargs in ({}, {"clear_thinking": False}))}
 
 
 # ------------------------------------------------------------------------------------------------ requests
@@ -137,10 +139,11 @@ def _text_of(content) -> str:
 
 IMAGE_PARTS = ("image_url", "input_image", "image")
 
-# Thinking levels.  The model's template knows low, medium and xhigh (its default; "high" means xhigh), and
-# enable_thinking=false for none.  Clients spell these many ways; everything maps onto those four.
+# Thinking levels.  GLM's template switches thinking on or off (enable_thinking=false for none); it has no levels.
+# low, medium and high still reach it as reasoning_effort, with thinking on, for a template that reads them.  Clients
+# spell these many ways; everything maps onto those four.
 EFFORT = {"none": None, "off": None, "minimal": None, "disabled": None, "false": None,
-          "low": "low", "medium": "medium", "high": "xhigh", "xhigh": "xhigh", "max": "xhigh", "maximum": "xhigh"}
+          "low": "low", "medium": "medium", "high": "high", "xhigh": "high", "max": "high", "maximum": "high"}
 
 
 def effort_kwargs(value) -> dict:
@@ -162,7 +165,44 @@ def budget_effort(tokens) -> dict:
         n = int(tokens)
     except (TypeError, ValueError):
         return {}
-    return {"reasoning_effort": "low" if n < 2048 else "medium" if n < 8192 else "xhigh"}
+    return {"reasoning_effort": "low" if n < 2048 else "medium" if n < 8192 else "high"}
+
+
+# The names the server gives the template itself: a client's chat_template_kwargs cannot replace them
+RESERVED_KWARGS = ("messages", "tools", "add_generation_prompt", "raise_exception", "strftime_now")
+
+
+def _off(value) -> bool:
+    """enable_thinking as a client sends it: false, 0, null, or the words "false", "off", "no", "0" turn it off."""
+    return not value or (isinstance(value, str) and value.strip().lower() in ("false", "off", "no", "0"))
+
+
+def template_kwargs(kwargs: dict, extra) -> dict:
+    """`kwargs` (from the request's own effort or thinking fields) with the client's chat_template_kwargs on top - the
+    vLLM / llama.cpp convention, {"chat_template_kwargs": {"enable_thinking": false, "clear_thinking": false}}.  Every
+    key reaches the template (GLM's reads clear_thinking: false keeps the reasoning of earlier turns), except the
+    names the server sets itself; reasoning_effort is read as the request's own effort, and enable_thinking false
+    turns thinking off whatever the effort says."""
+    if extra is None:
+        return kwargs
+    if not isinstance(extra, dict):
+        raise ValueError("chat_template_kwargs must be an object")
+    out = dict(kwargs)
+    if "reasoning_effort" in extra:
+        out = {k: v for k, v in out.items() if k not in ("enable_thinking", "reasoning_effort")}
+        out.update(effort_kwargs(extra["reasoning_effort"]))
+    if "enable_thinking" in extra:
+        if _off(extra["enable_thinking"]):
+            out.pop("reasoning_effort", None)
+            out["enable_thinking"] = False
+        else:
+            out["enable_thinking"] = True
+    for k, v in extra.items():
+        if k in RESERVED_KWARGS:
+            LOGGER.debug("chat_template_kwargs.%s is set by the server; the client's value is left out", k)
+        elif k not in ("enable_thinking", "reasoning_effort"):
+            out[k] = v
+    return out
 
 
 def _has_image(content) -> bool:
