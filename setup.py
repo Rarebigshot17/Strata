@@ -1469,6 +1469,62 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, keep=
 
 
 # ------------------------------------------------------------------------------------------------ main
+def check_pc(a) -> tuple:
+    """Step 1: the NVIDIA GPUs (compute capability 7.5 or newer) and their driver, the RAM and the CPU.  Stops when the
+    engine cannot run here.  Returns (every GPU, the ones this install runs on, whether the config names them, RAM)."""
+    step(1, "checking your PC")
+    found = gpus()
+    if not found:
+        fail("no NVIDIA GPU found (nvidia-smi did not answer)",
+             f"install the NVIDIA driver ({MIN_DRIVER} or newer; Ubuntu: sudo ubuntu-drivers install) and restart")
+    gpu_table(found)
+    sel, name_gpus = choose_gpus(a, found)
+    cards = [g for g in found if g["index"] in sel]
+    ok("GPUs: " + " + ".join(gpu_name(g) for g in cards) + (" (the model's layers are shared across them)"
+                                                             if len(cards) > 1 else ""))
+    old = min(cards, key=driver_major)
+    if driver_major(old) < MIN_DRIVER:
+        fail(f"the NVIDIA driver is too old ({old['driver']}; {MIN_DRIVER} or newer is needed: the engine is built "
+             "with CUDA 13)", "update it (Ubuntu: sudo ubuntu-drivers install, or https://www.nvidia.com/drivers), "
+                              "restart, and run this again")
+    ok(f"driver {old['driver']}, compute capability " + ", ".join(sorted({cc(g) for g in cards}))
+       + f" (the engine is compiled for {cuda_archs(card_archs(cards))})")
+    ram = ram_gb()
+    fits = [m for m in MODELS if model_fit(m, ram) != "no"]
+    (ok if fits else warn)(f"RAM: {ram:.0f} GB" + ("" if fits else " - less than either size's experts need beside "
+                                                                    "Linux and the server"))
+    cpu, avx2 = cpu_info()
+    if avx2:
+        ok(f"CPU: {cpu} (AVX2)")
+    else:
+        warn(f"CPU: {cpu} has no AVX2: the experts the GPUs do not hold are computed on the CPU, several times slower "
+             "than on a CPU with AVX2")
+    return found, sel, name_gpus, ram
+
+
+def check_only(a) -> int:
+    """--check: step 1 and which size fits this PC's RAM, nothing installed or moved.  Exit code 1 when neither does."""
+    _found, _sel, _named, ram = check_pc(a)
+    where = Path(a.models_dir or a.data_dir or ROOT.parent).expanduser().resolve()
+    while not where.exists():                          # a folder setup would make: the drive it would be on
+        where = where.parent
+    free = shutil.disk_usage(where).free / 1e9
+    say()
+    for m, d in MODELS.items():
+        verdict = {"fits": "fits", "tight": "fits, with little RAM to spare", "no": "does not fit"}
+        say(f"  {m:10s} {d['bits']}: ~{d['experts_gb']} GB of experts in RAM - "
+            f"{verdict[model_fit(m, ram)]} ({fit_text(m, ram)}); download ~{d['download_gb']} GB"
+            + ("" if free >= d["download_gb"] + 1 else f", but only {free:.0f} GB of disk space is free"))
+    if not any(model_fit(m, ram) != "no" for m in MODELS):
+        # #977: every size says "does not fit", so the verdict says so too (and the exit code, for scripts)
+        say(f"\nThis PC cannot run GLM-5.3-Flash yet: neither size fits {ram:.0f} GB of RAM. --model NAME --yes "
+            "installs one anyway, slowly.")
+        return 1
+    say(f"\nThis PC can run GLM-5.3-Flash ({recommended_model(ram)} recommended). Run it again without --check to "
+        "install.")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", choices=list(MODELS),
@@ -1523,6 +1579,8 @@ def main() -> int:
     say("Strata - GLM-5.3-Flash on NVIDIA GPUs and system RAM")
     if not sys.platform.startswith("linux"):
         fail("Strata's GLM engine runs on Linux only", "run ./setup.sh on a Linux PC with an NVIDIA GPU")
+    if a.check:                                        # before the data folder: a check moves and writes nothing
+        return check_only(a)
     data, elsewhere = data_folder(a.data_dir)          # the model files: in the data folder, found from any copy
     roots = [data, *elsewhere]
     if a.models_dir is None:
@@ -1536,7 +1594,7 @@ def main() -> int:
     have = installed_configs()
     if a.update:                                       # #475: update.sh - never starts the model
         return update_install(have, a)
-    explicit = a.setup or a.model or a.check or a.no_start
+    explicit = a.setup or a.model or a.no_start
     adopted = None                                     # #629: the earlier install this copy is set up like
     if not have and not explicit:                      # a new copy of Strata (an update unzipped elsewhere): set it
         prev = previous_config(elsewhere, load_settings())   # up like the last one, from the files already there
@@ -1569,47 +1627,10 @@ def main() -> int:
             return start(have[pick - 1], a.port, run_gpu, keep=keep)
 
     # ---- 1. the PC
-    step(1, "checking your PC")
-    found = gpus()
-    if not found:
-        fail("no NVIDIA GPU found (nvidia-smi did not answer)",
-             f"install the NVIDIA driver ({MIN_DRIVER} or newer; Ubuntu: sudo ubuntu-drivers install) and restart")
-    gpu_table(found)
-    sel, name_gpus = choose_gpus(a, found)
+    found, sel, name_gpus, ram = check_pc(a)
     cards = [g for g in found if g["index"] in sel]
     usable = [g for g in found if gpu_problem(g) is None]
     vram = sum(g["vram_gb"] for g in cards)
-    ok("GPUs: " + " + ".join(gpu_name(g) for g in cards) + (" (the model's layers are shared across them)"
-                                                             if len(cards) > 1 else ""))
-    old = min(cards, key=driver_major)
-    if driver_major(old) < MIN_DRIVER:
-        fail(f"the NVIDIA driver is too old ({old['driver']}; {MIN_DRIVER} or newer is needed: the engine is built "
-             "with CUDA 13)", "update it (Ubuntu: sudo ubuntu-drivers install, or https://www.nvidia.com/drivers), "
-                              "restart, and run this again")
-    ok(f"driver {old['driver']}, compute capability " + ", ".join(sorted({cc(g) for g in cards})))
-    ram = ram_gb()
-    fits = [m for m in MODELS if model_fit(m, ram) != "no"]
-    (ok if fits else warn)(f"RAM: {ram:.0f} GB" + ("" if fits else " - less than either size's experts need beside "
-                                                                    "Linux and the server"))
-    cpu, avx2 = cpu_info()
-    if avx2:
-        ok(f"CPU: {cpu} (AVX2)")
-    else:
-        warn(f"CPU: {cpu} has no AVX2: the experts the GPUs do not hold are computed on the CPU, several times slower "
-             "than on a CPU with AVX2")
-    if a.check:
-        say()
-        for m, d in MODELS.items():
-            verdict = {"fits": "fits", "tight": "fits, with little RAM to spare", "no": "does not fit"}
-            say(f"  {m:10s} {d['bits']}: ~{d['experts_gb']} GB of experts in RAM - "
-                f"{verdict[model_fit(m, ram)]} ({fit_text(m, ram)})")
-        if not fits:
-            # #977: every size says "does not fit", so the verdict says so too (and the exit code, for scripts)
-            say(f"\nThis PC cannot run GLM-5.3-Flash yet: neither size fits {ram:.0f} GB of RAM. --model NAME --yes "
-                "installs one anyway, slowly.")
-            return 1
-        say("\nThis PC can run GLM-5.3-Flash. Run it again without --check to install.")
-        return 0
 
     # ---- 2. the questions
     step(2, "your choices")
