@@ -2199,7 +2199,8 @@ class SharedSettings(unittest.TestCase):
         self.assertEqual((code, b["shared"]), (200, False))
         self.assertFalse(os.path.exists(self.svc.shared_path))
         self.chat()
-        self.assertEqual(self.engine.last_sampling["temperature"], 1.0)    # GLM's default again, not the Chat's 0.3
+        got = self.engine.last_sampling                              # GLM's defaults again, not the Chat's 0.3
+        self.assertEqual((got["temperature"], got["top_p"]), (1.0, 0.95))
 
     def test_a_body_without_the_defaults_wrapper_is_rejected(self):
         """A body with no "defaults" key is a mistake, not the documented "clear them" ({"defaults": null})."""
@@ -2937,7 +2938,8 @@ class ReasoningCloseRetry(unittest.TestCase):
         self.svc.reasoning_close_retry = True
         c = self.chat()
         self.assertEqual(len(self.engine.prompts), 2)
-        self.assertTrue(self.tok.decode(self.engine.prompts[1]).endswith(self.engine.THOUGHT + "</think>"))
+        first, second = self.engine.prompts           # the prompt, the reasoning and </think>: no end-of-turn token
+        self.assertEqual(second, first + self.tok.encode(self.engine.THOUGHT) + self.tok.encode("</think>"))
         self.assertEqual(c["message"]["content"], EndsInsideThinkingEngine.ANSWER)
         self.assertIn("two plus two is four", c["message"]["reasoning_content"])
         self.assertEqual(c["finish_reason"], "stop")
@@ -2949,8 +2951,9 @@ class ReasoningCloseRetry(unittest.TestCase):
         self.assertEqual(len(self.engine.prompts), 1)
         self.assertEqual(c["message"]["content"], "Fine.")
 
-    def test_a_reply_that_closed_its_thinking_right_after_a_quote_is_not_touched(self):
-        # a </think> with nothing after it but the end of the turn is the end of the thinking: no answer, no retry
+    def test_a_reply_that_closed_its_thinking_without_an_answer_is_not_touched(self):
+        # a </think> with nothing after it but the end of the turn (here right after a quote) is the end of the
+        # thinking: the reply ends outside it, so there is nothing to close
         self.svc.reasoning_close_retry = True
         self.engine.THOUGHT = 'two plus two is "4"</think>'
         c = self.chat()
@@ -3120,6 +3123,8 @@ class ThinkingBudget(unittest.TestCase):
         code, b = self.openai(reasoning_budget_tokens=5, reasoning_effort="none")
         self.assertEqual(code, 200, b)
         self.assertEqual(len(self.engine.prompts), 1)
+        self.assertTrue(self.tok.decode(self.engine.prompts[0]).endswith("<|assistant|></think>"))  # thinking off
+        self.assertEqual(b["choices"][0]["message"]["content"], ThinkingEngine.ANSWER)
 
     def test_no_room_left_to_answer(self):
         code, b = self.openai(reasoning_budget_tokens=20, max_tokens=40)    # 20 thought + the wrap-up > 40
