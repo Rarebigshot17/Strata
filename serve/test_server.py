@@ -1497,13 +1497,14 @@ class ExpertCacheHits(unittest.TestCase):
         engine = DoneLineEngine(tok, "ok", max_context=CTX, done_lines=[
             "DONE 4 20 40.0 30.0 stop 0 0 0 60 100 0 0 0.0 20 0",
             "DONE 4 20 40.0 30.0 stop 0 0 0 30 40 0 0 0.0 20 0",
+            "DONE 0 20 40.0 0.0 stop 0 0 0 0 0 0 0 0.0 20 0",       # nothing decoded: no lookups
             "DONE 4 20 40.0 30.0 stop 0 0 0"])
         svc = Service(engine, tok, glm_template())
         with contextlib.redirect_stdout(io.StringIO()) as out:
-            for _ in range(3):
+            for _ in range(4):
                 list(svc.run(tok.encode("hi"), False, None, 10, {}, threading.Event()))
         rows = list(svc.history)
-        self.assertEqual([r["hit_rate"] for r in rows], [0.6, 0.75, None])
+        self.assertEqual([r["hit_rate"] for r in rows], [0.6, 0.75, None, None])
         self.assertEqual((svc.totals["hits"], svc.totals["lookups"]), (90, 140))
         self.assertIn("expert cache 60.0% hit", out.getvalue())
         self.assertIn("expert cache 75.0% hit", out.getvalue())
@@ -1811,6 +1812,8 @@ class CancelledRead(unittest.TestCase):
         last = {"finish": "cancel", "reused": 1000, "prompt_read": 2000}
         self.assertEqual(prompt_tokens_seen(98179, last), 3000)
         self.assertEqual(prompt_tokens_seen(98179, {**last, "finish": "stop"}), 98179)   # read in full: all of it
+        # stopped while it waited in the engine: its DONE reads and reuses nothing
+        self.assertEqual(prompt_tokens_seen(98179, {"finish": "cancel", "reused": 0, "prompt_read": 0}), 0)
         self.assertEqual(prompt_tokens_seen(98179, {"finish": "cancel", "reused": 0}), 98179)   # no read count
         self.assertEqual(prompt_tokens_seen(98179, {}), 98179)                          # no DONE at all
         self.assertEqual(prompt_tokens_seen(10, {**last, "prompt_read": 50}), 10)       # never past the prompt
