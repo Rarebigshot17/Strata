@@ -1473,7 +1473,10 @@ class Service:
             code = self.engine.exit_code() if hasattr(self.engine, "exit_code") else None
             print(f"[strata] the engine had stopped (exit code {code}); starting it again "
                   "(a minute or two) ...", flush=True)
-        self.engine.restart()
+        try:
+            self.engine.restart()
+        except OSError as e:                            # the executable is missing or cannot run (a rebuild, a typo):
+            raise EngineDied(f"the engine could not be started: {e}") from e   # a 503, not a dropped request
         print("[strata] the engine is running again", flush=True)
 
     def _say_died(self, e: Exception) -> None:
@@ -3250,7 +3253,7 @@ def make_handler(svc: Service):
                 try:
                     svc.load()
                     self._json(200, {"status": "loaded"})
-                except GpuBusy as e:
+                except (GpuBusy, EngineDied, EngineStuck) as e:   # refused, or the start failed: say why
                     ra = getattr(e, "retry_after", None)
                     self._json(503, {"error": {"type": "server_error", "message": str(e)}},
                                headers={"Retry-After": int(ra)} if ra else None)

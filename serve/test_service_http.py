@@ -13,7 +13,7 @@ import urllib.request
 from unittest import mock
 
 from serve.glm_fixtures import GlmTokenizer, glm_template
-from serve.server import ConvCacheLog, MockEngine, Service, serve
+from serve.server import ConvCacheLog, EngineDied, EngineStuck, MockEngine, Service, serve
 
 
 class RestartableEngine(MockEngine):
@@ -124,6 +124,30 @@ class ConvCacheLogThreads(unittest.TestCase):
             self.assertEqual((log.state["parks"], log.state["restores"]), (200, 200))
             later = log.poll(path, start)            # and a later poll reads nothing again
             self.assertEqual((later["parks"], later["restores"]), (200, 200))
+
+
+class LoadButton(Http):
+    def test_a_failed_start_is_answered_503(self):
+        """POST /load (the Monitor's Load button) when the engine cannot start: a 503 that says why, as /v1/load,
+        not a connection closed with no answer."""
+        self.engine.running = False
+        for err in (EngineDied("the engine exited before it was ready (exit code 1)"),
+                    EngineStuck("the engine did not end"), FileNotFoundError(2, "No such file", "strata-glm")):
+            with self.subTest(err=type(err).__name__):
+                with mock.patch.object(self.engine, "restart", side_effect=err), mock.patch("builtins.print"):
+                    code, _, body = self.call("/load", {})
+                self.assertEqual(code, 503, body)
+                self.assertIn(str(err).split(" (")[0], json.loads(body)["error"]["message"])
+
+    def test_a_missing_engine_executable_is_a_503_for_a_request(self):
+        """The engine's executable is gone (update.sh rebuilding it) when a request restarts it: a 503, not a
+        connection closed without an answer."""
+        self.engine.running = False
+        with mock.patch.object(self.engine, "restart", side_effect=FileNotFoundError(2, "No such file", "strata-glm")), \
+                mock.patch("builtins.print"):
+            code, _, body = self.call("/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(code, 503, body)
+        self.assertIn("could not be started", json.loads(body)["error"]["message"])
 
 
 if __name__ == "__main__":
