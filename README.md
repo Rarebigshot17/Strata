@@ -23,8 +23,9 @@ its design, its server and its web app, replaces the engine, and runs GLM-5.3-Fl
 | **System** | **Linux** only: setup stops on any other system. A CPU with **AVX2**: without it setup warns, because the experts the cards do not hold run on the CPU. |
 
 The cards hold everything except the routed experts, plus the attention cache and a cache of the most used experts.
-How much VRAM the part they must hold takes is not measured yet. Setup installs everything else: Python, the C++
-compiler and the CUDA toolkit when they are missing (the toolkit by itself on Ubuntu 22.04 and 24.04 only).
+How much VRAM the part they must hold takes is not measured yet. Setup installs everything else when it is missing:
+Python (through apt, dnf or pacman), the C++ compiler (through apt) and the CUDA toolkit (by itself on Ubuntu 22.04
+and 24.04 only).
 
 **The reference machine** is the owner's PC, napster-ai: a Xeon E5-2699 v4 (AVX2, no AVX-512), 192 GB of DDR4, an
 RTX 3090 Ti 24 GB + RTX 3080 Ti 12 GB + RTX 3080 10 GB (all compute capability 8.6), a SATA SSD, Linux. Strata is
@@ -155,7 +156,8 @@ installing anything. On napster-ai (192 GB) setup recommends the 3-bit size.
   the sampling settings and choose Thinking **Off** or **On**. In the API, `reasoning_effort: "none"` turns it off,
   and low, medium and high all mean on. `"chat_template_kwargs": {"enable_thinking": false}` and
   `"thinking": {"type": "disabled"}` (Anthropic's, and Z.ai's on the OpenAI route) turn it off too. A request that
-  says nothing gets thinking on.
+  says nothing gets thinking on, unless the run config sets `reasoning_effort` (or `"anthropic_thinking":
+  "on_request"` for Anthropic requests).
 - **Tool calls** are read from the model's own special tokens only. A call that the model copies as plain text, from
   a tool result, a web page or the user's message, stays text and is never run. A request that declares no tools,
   or sets `tool_choice` to `"none"`, gets no calls at all. This matters for an agent that runs shell commands. MCP
@@ -163,7 +165,7 @@ installing anything. On napster-ai (192 GB) setup recommends the 3-bit size.
 - **Several clients:** Strata answers one request at a time. The others wait, in the order they arrived. When a
   request belongs to another conversation, the engine parks the current conversation's state in RAM. A later turn
   of a parked conversation reads only the new tokens, not the whole conversation again. Parked conversations get
-  8 GB of RAM by default (`--park-mib`), and the one used least recently goes first. A parked 100K-token
+  8192 MiB of RAM by default (`--park-mib`), and the one used least recently goes first. A parked 100K-token
   conversation takes about 1.3 GB (calculated). How fast a parked turn resumes is not measured yet.
 - **Context:** the longest conversation the engine accepts. Setup offers 32K, 128K (recommended when the cards
   have 16 GB or more together), 256K, 512K and 1M tokens (the model's full context). Each token takes 11 KB of VRAM
@@ -173,12 +175,13 @@ installing anything. On napster-ai (192 GB) setup recommends the 3-bit size.
   | --- | ---: | ---: | ---: | ---: | ---: |
   | VRAM for the attention cache (calculated) | 0.4 GB | 1.5 GB | 3.0 GB | 5.9 GB | 11.8 GB |
 
-  On napster-ai's 46 GB of VRAM, 1M tokens leaves about 34 GB for the rest. Fewer cached experts means more of them
-  run on the CPU; how much slower that is has not been measured. Setup warns when the attention cache would take
-  more than half of the cards' VRAM. A request whose prompt plus `max_tokens` does not fit the context gets a 400;
-  it is never cut. To change the context later: `./setup.sh --setup`, or `--ctx` in the
-  [run config](docs/INSTALL.md#the-run-config).
-- **Pictures:** GLM-5.3-Flash reads text only. A request with a picture gets a 400.
+  On napster-ai's 46 GB of VRAM, 1M tokens leaves about 34 GB for the rest (calculated). Fewer cached experts means
+  more of them run on the CPU; how much slower that is has not been measured. Setup warns when the attention cache
+  would take more than half of the cards' VRAM. A request whose prompt plus `max_tokens` does not fit the context
+  gets a 400; it is never cut (`"fit_max_tokens": true` in the run config lowers `max_tokens` instead). To change the
+  context later: `./setup.sh --setup`, or `--ctx` in the [run config](docs/INSTALL.md#the-run-config).
+- **Pictures:** GLM-5.3-Flash reads text only. A request with a picture gets a 400. A picture in a tool's result is
+  replaced by a short note instead, so an agent's history keeps working.
 - **Speed on your PC:** `./bench.sh` measures your install (chat, 4K and 16K prompts, an agent-style session) and
   writes a report. No results are published yet.
 
@@ -200,8 +203,8 @@ model servers under llama-swap: [docs/LLAMA_SWAP.md](docs/LLAMA_SWAP.md).
 - **"port 8101 is already in use".** Strata (or another server) is already running. Stop it, or start with
   `--port <another port>`.
 - **Another machine or a container gets 403 "Host ... is not allowed".** Without an API key Strata answers only
-  names it knows. Set an API key (see [Using it](#using-it)), or add the name to `"allowed_hosts"` in the run
-  config.
+  host names it knows (an IP address always passes). Set an API key (see [Using it](#using-it)), or add the name to
+  `"allowed_hosts"` in the run config.
 
 More problems and their fixes: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). Still stuck? Open an
 [issue](https://github.com/Rarebigshot17/Strata/issues) and attach the engine's log, `strata-glm-<size>.log` in the
@@ -256,8 +259,9 @@ napster-ai"). The server port's decisions, the engine protocol and the plan's st
 - Strata comes from [Niko1221/Strata](https://github.com/Niko1221/Strata) by its author and contributors. This fork
   keeps its design (experts in RAM, the most used cached in VRAM, the rest on the CPU), its server, its web app and
   its installer, and replaces the Qwen engine with a GLM-5.3-Flash one.
-- Strata uses parts of [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp) (MIT), and every part of the engine
-  is checked against llama.cpp.
+- Strata uses parts of [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp) (MIT). llama.cpp is also the
+  reference the engine is checked against: so far the CPU reference, on small random models (see [Status](#status)).
 
-Strata is open source under the [MIT License](LICENSE). A few parts and the model have their own licenses
-([which ones](docs/HOW_IT_WORKS.md)).
+Strata is open source under the [MIT License](LICENSE). A few parts have their own licenses: `third_party/ggml`
+(MIT, llama.cpp / ggml) and the web app's font (SIL Open Font License 1.1, `serve/web/fonts/OFL.txt`). The model is
+not part of this repository; its own license applies to its files.
