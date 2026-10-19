@@ -33,8 +33,9 @@ Behaviour the port and its review (D1) settled:
 - **`stream_options.include_usage`**: with it, one more chunk with empty `choices` carries the usage, and no other
   chunk does.
 - **Sampling values out of range** (NaN, Infinity, a repetition penalty <= 0, temperature < 0, top_p or min_p
-  outside 0..1, integers too large for the engine) are a 400 that names the field; the shared settings and the run
-  config's `"sampling"` block are checked the same way.
+  outside 0..1, integers too large for the engine) are a 400 that names the field; the shared settings (a 400) and
+  the run config's `"sampling"` block (the server does not start) are checked too, each with its own wording (a
+  shared temperature may go up to 2).
 - **The start**: strata-glm reads the routed experts into the page cache before READY, with progress on stderr
   (`--no-warm` skips it). The server's start watchdog (`STRATA_ENGINE_READY_S`, 900 s) counts from the warm-up's
   last progress, so a slow disk that keeps reading is not ended.
