@@ -123,17 +123,16 @@ The server gives up on a start when the engine has not said it is ready within 9
 progress, the 900 seconds count again from its last progress line; other lines of the engine do not reset them. On a
 disk so slow that one step takes longer, set `STRATA_ENGINE_READY_S` (seconds, 0 = no limit) before you start it.
 
-To stop the model, press Ctrl+C or close the terminal. On Ctrl+C (and on SIGTERM) the server stops the engine itself:
-`STOP` and `QUIT`, then, 20 seconds apart, a terminate and a kill. The engine writes its expert profile only when it
-ends after `QUIT` or when its input closes. Read from the code (not tried on a GPU), these end it sooner, and that
-run's profile is not written:
+To stop the model, press Ctrl+C or close the terminal. Every ordinary stop takes the same path: Ctrl+C, closing the
+terminal (SIGHUP), `kill <the server's PID>`, `docker stop` and `systemctl stop` (SIGTERM). The server sends the
+engine `STOP` and `QUIT`, then, 20 seconds apart, a terminate and a kill; the engine writes its expert profile when
+it ends after `QUIT`. The engine runs in a session of its own, so the terminal's signals reach only the server, and
+strata-glm ignores a stop signal that still reaches it while the server runs (a systemd stop signals every process of
+the service): the server's `QUIT` follows. A stop while the engine still starts ends it at once (it has nothing to
+save yet). This is read from the code and tested with a fake engine, not tried on a GPU.
 
-- **Ctrl+C** also reaches the engine, which runs in the server's process group and has no signal handler, so it ends
-  at once.
-- **Closing the terminal** sends SIGHUP, which neither the server nor the engine handles: both end at once.
-
-To keep the profile, stop the server process alone: `kill <the server's PID>` (SIGTERM takes the server's Ctrl+C path,
-but only the server gets it), `systemctl stop` with the unit [below](#running-it-as-a-service), or `docker stop`.
+When the server ends without stopping the engine (`kill -9`, a crash), the engine ends too: at the end of its input
+when it is idle (the profile is written), at its next output line during a request, and at once while it starts.
 
 ### Setup's options
 
@@ -521,7 +520,7 @@ ExecStart=/home/<user>/Strata/run-glm-ud-iq3_xxs.sh
 Restart=on-failure
 RestartSec=30
 # SIGTERM to the server only: the server sends the engine STOP and QUIT, and the engine writes its expert profile.
-# The default (control-group) also sends SIGTERM to the engine, which then ends at once without writing it.
+# (The default, control-group, also sends it to the engine, which ignores it while the server runs.)
 KillMode=mixed
 # the server gives the engine 20 s after QUIT, 20 s after a terminate and 20 s after a kill
 TimeoutStopSec=120

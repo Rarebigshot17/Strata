@@ -157,9 +157,9 @@ then `warming the experts: X of Y GB` about every 20 seconds). The server gives 
 is ready within 900 seconds; each step of the warm-up's progress starts those 900 seconds again. The start is done
 when the output has a line `ready: http://127.0.0.1:8101/v1 ...`.
 
-To stop it: `kill $(cat strata-server.pid)`. That sends SIGTERM to the server alone; it stops the engine, and the
-engine saves its expert profile. Do not `kill -9` it and do not kill `strata-glm` itself: the profile of that run is
-then lost.
+To stop it: `kill $(cat strata-server.pid)`. That sends SIGTERM to the server; it stops the engine, and the engine
+saves its expert profile. Do not `kill -9` the server or `strata-glm`: the profile of that run can then be lost. A
+plain `kill` of `strata-glm` is ignored while the server runs.
 
 ## 6. Verify
 
@@ -238,8 +238,7 @@ When you are done, tell the user:
 - **What is installed:** the size, the context, the GPUs (in their order), the Strata folder, the data folder with the
   model files, the run config (`strata-glm-<size>.json`) and the log.
 - **How to start and stop it:** `./setup.sh` or `./run-glm-<size>.sh` in a terminal (Ctrl+C or closing it stops the
-  model; both also end the engine at once, so that run's expert profile is not saved; `kill <the server's PID>` keeps
-  it), or the service if you set one up.
+  model, and the engine saves its expert profile), or the service if you set one up.
 - **The addresses:** the chat page, the OpenAI base URL, the Anthropic base URL. If you set an API key: the key, and
   that it is stored in plain text in the run config.
 - **What you checked:** the `/health` answer and the test answer.

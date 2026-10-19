@@ -76,7 +76,15 @@ control -> STOP                          ends the last GEN's request, even a que
                                          its expert profile (--expert-profile) and exits
         -> anything else                 <- ERR unsupported command: <word>  (the server's PING probe after an
                                          ERR internal: an engine that still answers is in step)
+        (end of input)                   as QUIT: the server is gone
 ```
+
+The server starts the engine in a session of its own: Ctrl+C and a closed terminal's SIGHUP reach only the server,
+which ends the engine with STOP and QUIT (main(), StrataEngine.shutdown). strata-glm in --serve mode
+(include/strata/glm/serve_signals.hpp) ignores SIGINT, SIGHUP and SIGTERM while the server that started it runs
+(a systemd stop signals every process of the service), ends on them once that server is gone, ends at once when
+the server goes while it still starts (before READY: the parent-death signal), and ends at a broken stdout (SIGPIPE,
+restored even when the launcher ignored it).
 
 Engine options (strata-glm --serve): `-m <first shard> --ctx N --eos-ids a,b,c [--devices 0,1,2]
 [--split w,w,w] [--threads N] [--vram-reserve GB] [--expert-profile FILE] [--max-swaps N] [--no-expert-cache]

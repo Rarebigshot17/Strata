@@ -5,15 +5,21 @@
 // (with or without progress) or fail, so the cases cover INFO/READY, generation, end of turn, end=, logit_bias,
 // refusals, ERR internal, HB heartbeats (only while the engine progresses) and STOP of a queued request. A second
 // fake keeps snapshots (Conv) for the conversations: parking, checkpoints, --park-mib and the state after end=.
+// The last cases are strata-glm's signals in --serve mode (serve_signals.hpp) and how an engine ends when its server
+// is gone: idle, during a request, and while it starts.
 #include "strata/glm/serve_loop.hpp"
+#include "strata/glm/serve_signals.hpp"
 
 #include <fcntl.h>
+#include <poll.h>
+#include <sys/prctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <functional>
@@ -22,6 +28,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace strata::glm;
@@ -31,7 +38,7 @@ namespace {
 constexpr int V = 32;
 
 struct Fake : Evaluator {
-    std::string mode;                 // plain | slow-progress | slow-hung | throw
+    std::string mode;                 // plain | slow-progress | slow-hung | slow-decode | throw
     std::vector<float> logits = std::vector<float>(V, 0.0f);
     int64_t pos_ = 0;
     std::atomic<uint64_t> t{0};
@@ -39,6 +46,7 @@ struct Fake : Evaluator {
     void reset() override { pos_ = 0; }
     const std::vector<float>& eval(int32_t tok) override {
         if (mode == "throw") throw std::runtime_error("boom");
+        if (mode == "slow-decode") std::this_thread::sleep_for(std::chrono::milliseconds(5));
         ++pos_;
         ++t;
         logits.assign(V, 0.0f);
@@ -244,6 +252,114 @@ int count(const std::vector<std::string>& lines, const std::string& s) {
     return n;
 }
 
+using Clock = std::chrono::steady_clock;
+
+/// An engine in a forked child for the signal cases: this process holds the other ends of its stdin and stdout.
+struct Proc {
+    pid_t pid = -1;
+    int in = -1, out = -1;
+    std::string got;          ///< what it printed so far
+};
+
+Proc spawn(const std::function<int()>& body) {
+    int in[2], out[2];
+    if (pipe(in) || pipe(out)) throw std::runtime_error("pipe");
+    std::fflush(stdout);
+    Proc p;
+    p.pid = fork();
+    if (p.pid == 0) {
+        dup2(in[0], 0);
+        dup2(out[1], 1);
+        dup2(open("/dev/null", O_WRONLY), 2);          // the notes of the ignored signals
+        close(in[0]); close(in[1]); close(out[0]); close(out[1]);
+        _exit(body());
+    }
+    close(in[0]);
+    close(out[1]);
+    p.in = in[1];
+    p.out = out[0];
+    return p;
+}
+
+/// Reads the child's stdout until a line starts with `prefix` (true), its output ends or `secs` pass (false).
+bool read_until(Proc& p, const std::string& prefix, double secs) {
+    const auto end = Clock::now() + std::chrono::duration<double>(secs);
+    for (;;) {
+        for (size_t at = 0; at < p.got.size();) {
+            const size_t nl = p.got.find('\n', at);
+            if (nl == std::string::npos) break;
+            if (p.got.compare(at, prefix.size(), prefix) == 0) return true;
+            at = nl + 1;
+        }
+        const int ms = (int) std::chrono::duration_cast<std::chrono::milliseconds>(end - Clock::now()).count();
+        if (ms <= 0) return false;
+        pollfd fd{p.out, POLLIN, 0};
+        if (poll(&fd, 1, ms) <= 0) continue;
+        char buf[4096];
+        const ssize_t n = read(p.out, buf, sizeof buf);
+        if (n <= 0) return false;
+        p.got.append(buf, (size_t) n);
+    }
+}
+
+/// waitpid within `secs`: the status, or -1 while it still runs.
+int wait_for(pid_t pid, double secs) {
+    const auto end = Clock::now() + std::chrono::duration<double>(secs);
+    for (;;) {
+        int st = 0;
+        if (waitpid(pid, &st, WNOHANG) == pid) return st;
+        if (Clock::now() >= end) return -1;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+}
+
+/// Ends a child a case left running.
+void reap(pid_t pid) {
+    kill(pid, SIGKILL);
+    waitpid(pid, nullptr, 0);
+}
+
+/// Whether a process that is not this one's child (yet) still runs: a zombie has ended.
+bool running(pid_t pid) {
+    char path[64];
+    std::snprintf(path, sizeof path, "/proc/%d/stat", (int) pid);
+    FILE* f = std::fopen(path, "r");
+    if (!f) return false;
+    char buf[512] = {0};
+    const size_t n = std::fread(buf, 1, sizeof buf - 1, f);
+    std::fclose(f);
+    const char* close_paren = std::strrchr(buf, ')');
+    return n > 0 && close_paren && close_paren[1] == ' ' && close_paren[2] != 'Z';
+}
+
+/// A "server" child that starts an engine child running `engine` once it has called serve_signals_starting()
+/// (and, with `serving`, serve_signals_serving()), then waits to be killed. Returns {server, engine}.
+std::pair<pid_t, pid_t> server_with_engine(bool serving) {
+    int e2s[2], s2t[2];
+    if (pipe(e2s) || pipe(s2t)) throw std::runtime_error("pipe");
+    std::fflush(stdout);
+    const pid_t server = fork();
+    if (server == 0) {
+        const pid_t engine = fork();
+        if (engine == 0) {
+            serve_signals_starting();
+            if (serving) serve_signals_serving();
+            dup2(open("/dev/null", O_WRONLY), 2);
+            const char c = 's';
+            if (write(e2s[1], &c, 1) != 1) _exit(3);
+            for (;;) pause();                          // starting (the warm-up), or serving with nothing to do
+        }
+        char c = 0;
+        if (read(e2s[0], &c, 1) != 1 || write(s2t[1], &engine, sizeof engine) != (ssize_t) sizeof engine) _exit(3);
+        for (;;) pause();
+    }
+    close(e2s[0]); close(e2s[1]); close(s2t[1]);
+    pid_t engine = -1;
+    if (read(s2t[0], &engine, sizeof engine) != (ssize_t) sizeof engine) engine = -1;
+    close(s2t[0]);
+    return {server, engine};
+}
+
 }  // namespace
 
 int main() {
@@ -430,6 +546,101 @@ int main() {
         }
         expect(bad == 0 && resumed > 0, "conversations taking turns: every answer is a fresh engine's (" +
                                             std::to_string(resumed) + " resumed)", shown);
+    }
+    // strata-glm in --serve mode: serve_signals_starting() first, serve_signals_serving() before the loop. This
+    // process writes to engines that may have ended (EPIPE, not the end of the test); its children inherit SIGPIPE
+    // ignored, as from a launcher that ignores it, and serve_signals_starting() must restore it.
+    std::signal(SIGPIPE, SIG_IGN);
+    // (exit code 40: the loop returned, where strata-glm saves its expert profile; nothing is printed after it)
+    auto engine = [](const std::string& mode, int64_t max_ctx, std::vector<int32_t> eos) {
+        return [=] {
+            serve_signals_starting();
+            Fake ev;
+            ev.mode = mode;
+            ServeOptions opt;
+            opt.max_ctx = max_ctx;
+            opt.n_vocab = V;
+            opt.eos_ids = eos;
+            serve_signals_serving();
+            return 40 + serve_loop(ev, opt);
+        };
+    };
+    {
+        Proc p = spawn(engine("plain", 64, {31}));
+        const bool ready = read_until(p, "READY", 10);
+        for (int sig : {SIGINT, SIGHUP, SIGTERM}) kill(p.pid, sig);
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        const std::string in = "GEN 2 1,2\nQUIT\n";
+        const bool sent = write(p.in, in.data(), in.size()) == (ssize_t) in.size();
+        const bool done = read_until(p, "DONE 2 2 ", 10);
+        const int st = wait_for(p.pid, 10);
+        close(p.in);
+        close(p.out);
+        if (st == -1) reap(p.pid);
+        expect(ready && sent && done && st != -1 && WIFEXITED(st) && WEXITSTATUS(st) == 40,
+               "serving: SIGINT, SIGHUP and SIGTERM are ignored while the server runs; QUIT ends the engine, which "
+               "saves its profile", {p.got});
+    }
+    {
+        Proc p = spawn(engine("plain", 64, {31}));
+        const bool ready = read_until(p, "READY", 10);
+        close(p.in);                                     // the server is gone: both its ends close
+        close(p.out);
+        const int st = wait_for(p.pid, 10);
+        if (st == -1) reap(p.pid);
+        expect(ready && st != -1 && WIFEXITED(st) && WEXITSTATUS(st) == 40,
+               "idle when its server goes: the engine leaves its loop at the end of its input (the profile is saved)",
+               {p.got});
+    }
+    {
+        // no end of turn and a context of a million: without the broken pipe it would run for hours
+        Proc p = spawn(engine("slow-decode", 1 << 20, {}));
+        const std::string in = "GEN 1000000 1,2\n";
+        const bool sent = write(p.in, in.data(), in.size()) == (ssize_t) in.size();
+        const bool decoding = read_until(p, "T ", 10);
+        close(p.in);
+        close(p.out);
+        const int st = wait_for(p.pid, 5);
+        if (st == -1) reap(p.pid);
+        expect(sent && decoding && st != -1 && WIFSIGNALED(st) && WTERMSIG(st) == SIGPIPE,
+               "a request running when its server goes: the engine ends at its next output line (SIGPIPE)", {});
+    }
+    {
+        // a prompt chunk of 4.5 s: the next HB or PP line meets the broken pipe
+        Proc p = spawn(engine("slow-progress", 1 << 20, {}));
+        const std::string in = "GEN 1000000 1,2\n";
+        const bool sent = write(p.in, in.data(), in.size()) == (ssize_t) in.size();
+        const bool ready = read_until(p, "READY", 10);
+        close(p.in);
+        close(p.out);
+        const int st = wait_for(p.pid, 10);
+        if (st == -1) reap(p.pid);
+        expect(sent && ready && st != -1 && WIFSIGNALED(st) && WTERMSIG(st) == SIGPIPE,
+               "a prompt being read when its server goes: the engine ends at its next heartbeat (SIGPIPE)", {});
+    }
+    // the orphaned engines below become this process's children, so their end can be waited for
+    const bool reaper = prctl(PR_SET_CHILD_SUBREAPER, 1) == 0;
+    {
+        const auto [server, eng] = server_with_engine(false);
+        kill(server, SIGKILL);
+        waitpid(server, nullptr, 0);
+        const int st = eng > 0 ? wait_for(eng, 5) : -1;
+        if (st == -1 && eng > 0) reap(eng);
+        expect(reaper && st != -1 && WIFSIGNALED(st) && WTERMSIG(st) == SIGKILL,
+               "while it starts (the warm-up), the engine ends at once when its server is gone", {});
+    }
+    {
+        const auto [server, eng] = server_with_engine(true);
+        kill(eng, SIGTERM);                              // a systemd stop signals every process of the service
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        const bool ignored = eng > 0 && running(eng);
+        kill(server, SIGKILL);
+        waitpid(server, nullptr, 0);
+        kill(eng, SIGTERM);
+        const int st = eng > 0 ? wait_for(eng, 5) : -1;
+        if (st == -1 && eng > 0) reap(eng);
+        expect(reaper && ignored && st != -1 && WIFSIGNALED(st) && WTERMSIG(st) == SIGTERM,
+               "serving: SIGTERM is ignored while the server runs, and ends the engine once the server is gone", {});
     }
     std::printf(failures ? "%d FAILED\n" : "all passed\n", failures);
     return failures != 0;

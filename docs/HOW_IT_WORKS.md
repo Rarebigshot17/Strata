@@ -30,9 +30,9 @@ The same in technical terms:
   free slot, or replaces a cached one whose score is clearly lower. At most 8 experts are copied in per token
   (`--max-swaps`), so a change of topic moves the cache over a few dozen tokens instead of stalling one.
   `--expert-profile FILE` saves the scores when the engine leaves its request loop (the server's `QUIT`, or the
-  server's end of the pipe closing) and loads them at the next start, so the cache starts full. A signal that
-  reaches the engine itself, such as Ctrl+C in the server's terminal, ends it without saving them
-  ([TROUBLESHOOTING.md](TROUBLESHOOTING.md) has the details). Setup puts one in the run config.
+  server's end of the pipe closing) and loads them at the next start, so the cache starts full. Every ordinary stop
+  of the server (Ctrl+C, closing its terminal, SIGTERM) ends the engine with `QUIT`; an engine that is killed ends
+  without saving them ([TROUBLESHOOTING.md](TROUBLESHOOTING.md) has the details). Setup puts one in the run config.
 - **RAM:** every routed expert stays in the GGUF file, mapped into memory. At 3-bit that is about 117 GB, at 4-bit
   about 162 GB (calculated from the model's shapes). The CPU computes the experts the cache doesn't hold, in place,
   while the GPU computes the shared expert. Before the server says it is ready, the engine reads the experts once
