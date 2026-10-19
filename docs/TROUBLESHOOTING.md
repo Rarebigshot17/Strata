@@ -281,8 +281,9 @@ The server turns the model's output into a tool call only when:
   a web page or the user stays text and is never run. That matters for the automation agent: a command inside a
   fetched page is not run because the model repeated it.
 
-A call written inside the thinking is run only when the turn shows it was meant (it ends right after the call). The
-window then says `tool calls inside the thinking: N read as calls, M kept as reasoning`. `"tool_call_recovery": true`
+A call written inside the thinking is run only when the turn shows it was meant: nothing but more calls follows it
+before the thinking or the turn ends. The window then says `tool calls inside the thinking: N read as calls, M kept
+as reasoning`. `"tool_call_recovery": true`
 in the run config also accepts a declared tool's call written as JSON inside `<tool_call>`.
 
 ## Open WebUI cannot connect
@@ -309,8 +310,8 @@ Open WebUI runs in Docker, so `127.0.0.1` inside its container is the container 
    on the PC (ufw, for example) may drop traffic from the Docker network to port 8101. Allow the port from that
    network.
 
-From inside the container, `curl -s http://172.17.0.1:8101/health` (or the address you use) answers when the
-address and the firewall are right.
+A request from inside the container answers when the address and the firewall are right, for example
+`docker exec <container> curl -s http://172.17.0.1:8101/health` (if its image has `curl`).
 
 ## Opening an issue
 
