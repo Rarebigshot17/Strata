@@ -19,6 +19,7 @@ breaking.
 from __future__ import annotations
 
 import collections
+import http.client
 import json
 import os
 import re
@@ -29,6 +30,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from serve.winjob import contain
@@ -76,6 +78,16 @@ def _wait(slot: _Slot, timeout: float, cancel: threading.Event | None, what: str
 
 
 # ------------------------------------------------------------------------------------------------ transports
+def shown_url(url: str) -> str:
+    """An address as Strata shows and logs it: without the user name and password, the query string and the fragment,
+    which can hold the server's secret (a token)."""
+    try:
+        u = urllib.parse.urlsplit(url)
+    except ValueError:                                   # not even an address (a broken IPv6 host)
+        return "(the address in the config)"
+    return urllib.parse.urlunsplit((u.scheme, u.netloc.rpartition("@")[2], u.path, "", ""))
+
+
 class StdioTransport:
     """A server Strata starts: JSON-RPC messages one per line on its stdin and stdout; its stderr is its log."""
     kind = "stdio"
@@ -311,8 +323,14 @@ class HttpTransport:
             if slot is None:
                 raise err from None
             slot.error = err
-        except (OSError, ValueError, McpError) as e:
-            err = e if isinstance(e, McpError) else McpError(f"could not reach {self.url}: {e}")
+        except (OSError, ValueError, http.client.HTTPException, McpError) as e:
+            if isinstance(e, McpError):
+                err = e
+            else:          # urllib and http.client quote an address or header they cannot use, secrets and all
+                quoted = isinstance(e, (http.client.InvalidURL, ValueError)) and \
+                    not isinstance(e, (json.JSONDecodeError, UnicodeError))      # the answer's text, not ours
+                why = "not a usable address or header" if quoted else str(e)
+                err = McpError(f"could not reach {shown_url(self.url)}: {why}")
             if slot is None:
                 raise err from None
             slot.error = err

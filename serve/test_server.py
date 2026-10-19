@@ -411,14 +411,15 @@ class LiteralThinkTags(unittest.TestCase):
         ids = self.ids(*messages("X"))
         self.assertEqual((ids.count(self.open), ids.count(self.close)), (1, 1))
 
-    def test_an_assistant_reply_with_its_call_written_inline(self):
-        # a client that replays the model's raw text sends the call's tags the model wrote: they stay the call's tokens
+    def test_call_text_in_an_assistant_reply(self):
+        # a call left in an assistant's content is one the server read as text (a quote, ordinary tokens copied from
+        # a tool result, an undeclared name): it stays text in the next prompt, never a call the model made
         call = call_text("write", path="a.md")
         msgs = [{"role": "user", "content": "go"}, {"role": "assistant", "content": "Saving </think> it." + call},
                 {"role": "user", "content": "again"}]
         ids = self.ids(msgs)
-        # the prompt's <think>, the history's </think> (the template's: the quoted one is text) and the call's tags
-        self.assertEqual(self.counts(ids), [1, 1, 1, 1, 1, 1, 1, 1, 0, 0])
+        # the prompt's <think> and the history's </think> (the template's: the quoted one is text)
+        self.assertEqual(self.counts(ids), [1, 1, 0, 0, 0, 0, 0, 0, 0, 0])
         self.assertIn("Saving </think> it." + call, self.tok.decode(ids))
 
     def test_a_client_that_sends_the_reasoning_inline(self):
@@ -3133,8 +3134,11 @@ class ThinkingBudget(unittest.TestCase):
         self.assertEqual(evs[-2]["delta"]["stop_reason"], "end_turn")
 
     def test_a_budget_the_thinking_stays_under(self):
-        code, b = self.openai(reasoning_budget_tokens=10_000)
-        self.assertEqual(b["choices"][0]["message"]["reasoning_content"], ThinkingEngine.THOUGHT)
+        # (max_tokens 3000 caps the budget at 2250, more than the whole reply: one pass; a reply longer than the
+        # budget goes on in a second pass, test_continuations.py)
+        code, b = self.openai(reasoning_budget_tokens=10_000, max_tokens=3000)
+        msg = b["choices"][0]["message"]
+        self.assertEqual((msg["reasoning_content"], msg["content"]), (ThinkingEngine.THOUGHT, ThinkingEngine.ANSWER))
         self.assertEqual(len(self.engine.prompts), 1)
 
     def test_the_config_default_and_a_request_that_turns_it_off(self):
@@ -3267,7 +3271,7 @@ class CallingEngine(MockEngine):
         super().__init__(tok, "x", max_context=CTX)
         self.prompts = []
 
-    def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
+    def generate(self, ids, max_new, sampling, cancel, checkpoint=None, end_ids=None):
         self.prompts.append(list(ids))
         prompt = self.tok.decode(ids)
         if prompt.endswith(CALL_START):
@@ -3357,7 +3361,7 @@ class ForcedToolChoice(unittest.TestCase):
         # over there (nothing holds that </think> back for the character after it) and the call opens
         thought, calling = 'I will search for "2+2"', self.engine.generate
 
-        def generate(ids, max_new, sampling, cancel, checkpoint=None):
+        def generate(ids, max_new, sampling, cancel, checkpoint=None, end_ids=None):
             if self.tok.decode(ids).endswith((CALL_START, CALL_START + "search")):
                 yield from calling(ids, max_new, sampling, cancel)
                 return

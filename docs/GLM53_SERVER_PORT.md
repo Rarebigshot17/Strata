@@ -25,8 +25,11 @@ levels, so low/medium/high mean "on" and none/off mean "off".
 start   <- INFO engine=<version> backend=cuda|cpu-reference eos=<n> park_mib=<int> logit_bias=1
                [expert_slots=<n> expert_cache_mib=<int>] ...
         <- READY <ctx> stop
-request -> GEN <max_new> [cp=<n>] [logit_bias=id:bias,...] [temperature= top_p= top_k= min_p= penalty_repeat=
-               penalty_freq= penalty_present= penalty_last_n= seed=] <id,id,...>      (unknown keys ignored)
+request -> GEN <max_new> [cp=<n>] [end=<id,...>] [logit_bias=id:bias,...] [temperature= top_p= top_k= min_p=
+               penalty_repeat= penalty_freq= penalty_present= penalty_last_n= seed=] <id,id,...>
+                                         (unknown keys ignored; end=: more ids that end the request as an end of
+                                         turn does.  The last printed token is never taken into the state, so the
+                                         prompt plus every printed token continues it)
         <- RESUME <n>                    n prompt tokens came from a kept state (only when n > 0)
         <- PP <done> <total> <ms> <tok/s>   at most 4 a second, always once at done == total
         <- HB                            the engine is working (a long prompt chunk); at most every few seconds,
@@ -69,13 +72,15 @@ glm53-flash once reviewed: `glm53-flash-wip-frontend` (B1), `glm53-flash-wip-ser
 `glm53-flash-wip-web` (B4 and the small serve modules), `glm53-flash-wip-setup` (C1), `glm53-flash-wip-tools`
 (C2). The tests (B3), the docs (C3) and the review (D1) follow the merge.
 
-State of the branches (October 18, evening): B1, B2, B4 and most of B3 are merged into glm53-flash: the test
-port's parts a-e, each reviewed by a second agent. Part f (the engine-process tests, the removed features' tests,
-retiring serve/glm_server.py) and C1/C2 (`glm53-flash-wip-setup`, `glm53-flash-wip-tools`) are in their reviews.
-Bugs the port's tests found and fixed on glm53-flash: a call cut off by the end of a reply was still returned as a
-call to run in non-streamed OpenAI and Anthropic answers (#211); a namespace tool written as `ns__tool` came back as
-text on /v1/responses; a call quoted on a "> " line inside the reasoning could be run. Added: OpenAI's
-`stream_options.include_usage`. D1 (the review) has started on a snapshot of 334ad57.
+State of the branches (October 19): A, B, C1, C2 and D1 are merged into glm53-flash; C3 (the docs) is what is
+left. Bugs the port's tests found and fixed: a call cut off by the end of a reply was still returned as a call to
+run in non-streamed OpenAI and Anthropic answers (#211); a namespace tool written as `ns__tool` came back as text on
+/v1/responses; a call quoted on a "> " line inside the reasoning could be run. Added: OpenAI's
+`stream_options.include_usage`. The review (D1) found 44 issues in the server and its modules, and a fifth group
+reviewed the engine's serve loop and sampler itself; the real ones were reproduced by a test first, fixed and
+reviewed again (groups g1-g5, merged in 7b44860 ... 7f69bc9), and the last one after them: a thinking
+budget's wrap-up or a forced call's opening made the engine read the whole thinking again when the server read its
+tokens more slowly than the engine wrote them (now each pass ends where the server goes on from it: `end=`).
 
 - [x] B1 (merged in fd94fb6) `serve/frontend.py`: a GLM `OutputParser` with the same interface (events reasoning / content /
   tool_start / tool_args / tool_call; `finish`, `state`, `buf`, `pending`, `rescued`, `refused`), GLM call grammar
@@ -89,25 +94,27 @@ text on /v1/responses; a call quoted on a "> " line inside the reasoning could b
   `prepare` (also for MCP rounds); engine args for strata-glm; STOP before QUIT; `ERR internal:` as a server
   error (5xx); `HB`; Monitor figures from GLM's INFO and its `conversations:` log lines; ordered FIFO;
   `/v1/completions`; removals listed under Decisions; GLM ByteTokenizer / MockEngine for tests.
-- [~] B3 (parts a-e merged and reviewed; part f in review) Tests: GLM fixture kit (template = GLM, GLM ByteTokenizer, MockEngine ending in `<|user|>`, a GLM
-  fake engine process); port the fixture-swap tests, rewrite the format tests, delete the Qwen-only ones;
-  fold `test_glm_server.py` into them and retire `serve/glm_server.py`; `tools/glm53_server_check.sh` drives
-  `serve/server.py`.
+- [x] B3 (parts a-e merged and reviewed; part f in f067bc1) Tests: GLM fixture kit (template = GLM, GLM
+  ByteTokenizer, MockEngine ending in `<|user|>`, a GLM fake engine process); port the fixture-swap tests, rewrite
+  the format tests, delete the Qwen-only ones; fold `test_glm_server.py` into them and retire
+  `serve/glm_server.py`; `tools/glm53_server_check.sh` drives `serve/server.py`.
 - [x] B4 (merged in aa7d1bd) `serve/runconfig.py` and the web app: GLM keys (`--vram-reserve` GB, `--park-mib`), no top_k cap,
   thinking on/off, no speed projection / MTP / vision text, GLM facts in the Monitor.
 
 ### C. Install and launch
 
-- [ ] C1 `setup.py` as a GLM installer for Linux + NVIDIA: checks, 3-bit or 4-bit, a local build of
-  strata-glm, the shards from `unsloth/GLM-5.3-Flash-GGUF` (file names listed from the repository at run time),
-  the run config, the run script, start on 8101. `setup.sh`, `update.sh`, Docker, `chat.py`, requirements.
-- [ ] C2 `tools/`: keep the GLM tools and generic HTTP tools; delete Qwen and HIP tooling with its tests.
+- [x] C1 (merged in 52bb36a) `setup.py` as a GLM installer for Linux + NVIDIA: checks, 3-bit or 4-bit, a local
+  build of strata-glm, the shards from `unsloth/GLM-5.3-Flash-GGUF` (file names listed from the repository at run
+  time), the run config, the run script, start on 8101. `setup.sh`, `update.sh`, Docker, `chat.py`, requirements.
+- [x] C2 (merged in c4d97d0) `tools/`: keep the GLM tools and generic HTTP tools; delete Qwen and HIP tooling with
+  its tests.
 - [~] C3 (Qwen/AMD pages and translated READMEs removed, HOW_IT_WORKS and LOGIT_BIAS rewritten) Docs: README for GLM, delete Qwen/HIP docs and the translated READMEs, AGENTS.md.
 
 ### D. Review
 
-- [ ] D1 A review pass over the whole diff (correctness first), fixes, all Python tests and the GLM checks
-  (`glm53_selftest.sh`, `glm53_park_check.py`, `glm53_server_check.sh`) green on the CPU engine.
+- [x] D1 (merged in 7b44860 ... 7f69bc9, and the passes' `end=` after them) A review pass over the whole diff
+  (correctness first), fixes, all Python tests and the GLM checks (`glm53_selftest.sh`, `glm53_park_check.py`,
+  `glm53_server_check.sh`) green on the CPU engine.
 
 ## Known risks to check on napster-ai
 

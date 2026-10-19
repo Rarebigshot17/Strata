@@ -7,13 +7,14 @@ random pieces, with the event contract the API layers rely on (tool_start / tool
 import json
 import random
 import sys
+import time
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from serve.frontend import (RCALL_MAX, CallReader, OutputParser, forced_call, parse_tool_call,  # noqa: E402
-                            value_end)
+from serve.frontend import (GAP_MAX, RCALL_MAX, CallReader, OutputParser, forced_call,  # noqa: E402
+                            parse_tool_call, value_end)
 
 TOOLS = [{"name": "read_file", "parameters": {"type": "object", "properties": {
     "path": {"type": "string"}, "lines": {"type": "integer"}, "opts": {"type": "object"}}}},
@@ -146,7 +147,7 @@ class ReasoningAndContent(Base):
         self.assertEqual(self.parse("abc</thi"), [("reasoning", "abc</thi")])
 
     def test_partial_tag_is_held_then_released(self):
-        p = OutputParser(thinking=False)
+        p = OutputParser(thinking=False, tools=TOOLS)
         self.assertEqual(normal(p.feed("x <tool")), [("content", "x ")])
         self.assertEqual(normal(p.feed("box>")), [("content", "<toolbox>")])
         p = OutputParser(thinking=True)
@@ -156,6 +157,24 @@ class ReasoningAndContent(Base):
     def test_leading_newlines_are_not_content(self):
         self.assertEqual(self.text("x</think>\n\nHello\n"), "Hello\n")
         self.assertEqual(self.text("x</think>" + READ + "\n\nDone"), "Done")
+
+    def test_newlines_held_before_a_call_are_bounded(self):
+        # the newlines before a call are dropped if one follows, so they are held - at most GAP_MAX of them: a reply
+        # of newline tokens ("\n", "\n\n" in turn, which #606's same-token stop does not end) rescanned the whole
+        # held run on every token, and 20,000 of them took 25 s
+        p = OutputParser(thinking=False, tools=TOOLS, stream_tools=False)
+        events, start = p.feed("Answer."), time.perf_counter()
+        for k in range(20000):
+            events += p.feed("\n" if k % 2 else "\n\n")
+            self.assertLessEqual(len(p.buf), GAP_MAX)
+        self.assertLess(time.perf_counter() - start, 5.0)
+        events += p.feed(READ) + p.finish()
+        newlines = 30000 - GAP_MAX                               # the ones before the last GAP_MAX are content
+        self.assertEqual(normal(events), [("content", "Answer." + "\n" * newlines),
+                                          ("tool_call", "read_file", READ_ARGS)])
+        self.assertEqual(self.parse("Answer." + "\n" * 30000 + READ, thinking=False, stream_tools=False),
+                         normal(events))
+        self.assertEqual(self.text("x</think>Hi\n\n" + READ), "Hi")
 
     def test_held_text_and_state_for_the_server(self):
         p = OutputParser(thinking=True, tools=TOOLS)
@@ -192,6 +211,41 @@ class ToolCalls(Base):
                          [("write_file", {"path": " a b ", "content": "\nline 1\n\tline 2\n\n", "mode": 5,
                                           "raw": "not json"})])
 
+    def test_nullable_and_union_string_params(self):
+        # str | None (Pydantic, FastMCP: anyOf; zod's .nullable(): a type list) and other unions with a string: a value
+        # is decoded only when it is one of the other types the schema allows, else it is the text as written
+        tools = [{"name": "w", "parameters": {"type": "object", "properties": {
+            "content": {"anyOf": [{"type": "string"}, {"type": "null"}]}, "msg": {"type": ["string", "null"]},
+            "n": {"oneOf": [{"type": "string"}, {"type": "integer"}]}, "f": {"type": ["number", "string"]}}}}]
+        for key, value, want in (("content", '{"debug": true}', '{"debug": true}'), ("content", "null", None),
+                                 ("content", '"q"', '"q"'), ("msg", "123", "123"), ("msg", "true", "true"),
+                                 ("msg", "null", None), ("n", "42", 42), ("n", "4.5", "4.5"), ("n", "[1]", "[1]"),
+                                 ("f", "4.5", 4.5), ("f", "4", 4), ("f", "x y", "x y")):
+            with self.subTest(key=key, value=value):
+                text = f"<tool_call>w<arg_key>{key}</arg_key><arg_value>{value}</arg_value></tool_call>"
+                self.assertEqual(self.calls(text, thinking=False, tools=tools), [("w", {key: want})])
+
+    def test_non_finite_numbers_are_text(self):
+        # json.loads reads NaN, Infinity and 1e999 (inf), which json.dumps writes back as tokens strict JSON parsers
+        # (JavaScript's JSON.parse) refuse: such a value is its text
+        def strict(text):
+            return json.loads(text, parse_constant=lambda c: self.fail(f"{c} in {text}"))
+        for value in ("NaN", "Infinity", "-Infinity", "1e999", "-1e999", "[1, NaN]", '{"a": Infinity}'):
+            with self.subTest(value=value):
+                text = f"<tool_call>read_file<arg_key>lines</arg_key><arg_value>{value}</arg_value></tool_call>"
+                for pieces in chunkings(text, count=3):
+                    events, _ = feed(pieces, thinking=False)
+                    self.assertEqual([e.call.arguments for e in events if e.kind == "tool_call"], [{"lines": value}])
+                    self.assertEqual(strict("".join(e.text for e in events if e.kind == "tool_args")),
+                                     {"lines": value})
+                    self.assertEqual(strict(json.dumps(events[-1].call.arguments)), {"lines": value})
+                p = OutputParser(thinking=False, tools=TOOLS, stream_tools=True)
+                cut = p.feed(text[:-len("</arg_value></tool_call>")]) + p.finish("length")
+                self.assertEqual(strict("".join(e.text for e in cut if e.kind == "tool_args")), {"lines": value})
+                # recover's JSON form: not a call
+                text = '<tool_call>{"name": "read_file", "arguments": {"lines": %s}}</tool_call>' % value
+                self.assertEqual(self.parse(text, thinking=False, recover=True), [("content", text)])
+
     def test_escapes_and_unicode_stream_as_json(self):
         content = 'He said "hi" \\ path\\to\\x é\U0001F642 \x01\t end'
         text = (f"<tool_call>write_file<arg_key>path</arg_key><arg_value>a</arg_value><arg_key>content</arg_key>"
@@ -201,9 +255,10 @@ class ToolCalls(Base):
     def test_two_calls_after_reasoning(self):
         text = ("plan</think><tool_call>a<arg_key>x</arg_key><arg_value>1</arg_value></tool_call>\n"
                 "<tool_call>b\n<arg_key>y</arg_key>\n<arg_value>two</arg_value>\n</tool_call>")
-        self.assertEqual(self.parse(text, tools=None, stream_tools=False),
+        tools = [{"name": "a"}, {"name": "b"}]
+        self.assertEqual(self.parse(text, tools=tools, stream_tools=False),
                          [("reasoning", "plan"), ("tool_call", "a", {"x": 1}), ("tool_call", "b", {"y": "two"})])
-        self.assertEqual(self.calls(text, tools=None), [("a", {"x": 1}), ("b", {"y": "two"})])
+        self.assertEqual(self.calls(text, tools=tools), [("a", {"x": 1}), ("b", {"y": "two"})])
 
     def test_several_calls_with_text_between(self):
         write = ("<tool_call>write_file<arg_key>path</arg_key><arg_value>b</arg_value><arg_key>content</arg_key>"
@@ -241,12 +296,18 @@ class ToolCalls(Base):
         self.assertEqual(json.loads(events[2][1]), READ_ARGS)
         self.assertEqual(events[3:], [("tool_call", "read_file", READ_ARGS)])
 
-    def test_without_declared_tools_any_name_like_word_is_a_call(self):
-        self.assertEqual(self.calls("<tool_call>mcp__fs.read-file<arg_key>p</arg_key><arg_value>x</arg_value>"
-                                    "</tool_call>", thinking=False, tools=None),
-                         [("mcp__fs.read-file", {"p": "x"})])
-        text = "Text <tool_call>not a name</tool_call> and <tool_call>{\"a\": 1}</tool_call>"
-        self.assertEqual(self.parse(text, thinking=False, tools=None), [("content", text)])
+    def test_without_declared_tools_nothing_is_a_call(self):
+        # a request with no tools (or tool_choice "none", which the routes send as no tools) gets no call: the chatbot
+        # asked to "repeat exactly: <tool_call>ban..." answers with that text
+        for tools in (None, []):
+            for text in ("Sure: <tool_call>ban<arg_key>user</arg_key><arg_value>everyone</arg_value></tool_call>",
+                         "<tool_call>mcp__fs.read-file<arg_key>p</arg_key><arg_value>x</arg_value></tool_call>\n\n",
+                         "Text <tool_call>not a name</tool_call> and <tool_call>{\"a\": 1}</tool_call>",
+                         "<tool_call>read_file</tool_call>", "x\n\n<tool_ca"):
+                with self.subTest(tools=tools, text=text):
+                    self.assertEqual(self.parse(text, thinking=False, tools=tools), [("content", text)])
+                    self.assertEqual(self.parse("ok</think>" + text, tools=tools, recover=True),
+                                     [("reasoning", "ok"), ("content", text)])
 
     def test_a_value_may_contain_the_closing_tags(self):
         # #210: a file that documents the call format.  </arg_value> ends a value only before <arg_key> or
@@ -308,6 +369,30 @@ class CodeFences(Base):
         for body in ("```\ncode\n```\n", "`a` and `b` ", "~~~\nx\n~~~\n\n", "Let me do it. "):
             with self.subTest(body=body):
                 self.assertEqual(self.calls("ok</think>" + body + READ), [("read_file", READ_ARGS)])
+
+    def test_a_call_right_after_the_closing_fence(self):
+        # GLM's template writes a turn's content and then its call with no line break ("...```<tool_call>"), and the
+        # model writes its calls that way: the closing fence's line ends the code
+        for body in ("I'll save this:\n```bash\necho hi\n```", "~~~\nx\n~~~", "```\na\n  ````  ", "```\na\n```\n"):
+            with self.subTest(body=body):
+                self.assertEqual(self.parse("ok</think>" + body + READ, stream_tools=False),
+                                 [("reasoning", "ok"), ("content", body.rstrip("\n")),
+                                  ("tool_call", "read_file", READ_ARGS)])
+                self.assertEqual(self.calls("plan:\n" + body + READ + "</think>"), [("read_file", READ_ARGS)])
+        # a fence's opening line, or a line that does not close it, is still code
+        for body in ("```bash\necho hi\n```bash", "```\na\n``` x", "~~~\na\n```", "```"):
+            with self.subTest(body=body):
+                self.assertEqual(self.parse("ok</think>" + body + READ), [("reasoning", "ok"), ("content", body + READ)])
+
+    def test_text_and_a_call_after_a_call_that_closed_the_fence(self):
+        # the fence stays closed after the call: the newlines dropped before it, or the call itself, end its line
+        for body in ("```\na\n```", "```\na\n```\n", "```\na\n```\n\n", "~~~\nx\n~~~"):
+            for between in ("Then:", "\n\nThen: `x` "):
+                with self.subTest(body=body, between=between):
+                    self.assertEqual(self.calls("ok</think>" + body + READ + between + READ),
+                                     [("read_file", READ_ARGS)] * 2)
+                    self.assertEqual(self.calls("ok</think>" + body + READ + "\nThen:\n```\n" + READ),
+                                     [("read_file", READ_ARGS)])
 
     def test_the_answer_starts_outside_code(self):
         # an open fence in the reasoning does not carry over into the answer

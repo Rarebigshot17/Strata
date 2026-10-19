@@ -95,7 +95,7 @@ bool parse_ids(const std::string& s, std::vector<int32_t>& out) {
         if (item.empty()) return false;
         char* end = nullptr;
         const long v = std::strtol(item.c_str(), &end, 10);
-        if (*end != '\0') return false;
+        if (*end != '\0' || v != (int32_t) v) return false;   // beyond 32 bits it would wrap to another id
         out.push_back((int32_t) v);
     }
     return !out.empty();
@@ -154,7 +154,7 @@ public:
 
         if (best.pos == 0) {                          // nothing to continue: a new conversation
             if (!sessions_[cur_].tokens.empty()) {
-                park_live("a new conversation");
+                park_live("a new conversation", 0);
                 sessions_.emplace_back();
                 cur_ = sessions_.size() - 1;
             }
@@ -166,7 +166,10 @@ public:
         }
         const auto t0 = Clock::now();
         if (best.sess != cur_) {                      // another conversation: park this one, bring that one back
-            park_live("another conversation");
+            size_t keep = 0;                          // the checkpoints that one keeps
+            for (const auto& cp : sessions_[best.sess].cps)
+                if ((size_t) cp->pos <= best.pos) keep += cp->bytes;
+            park_live("another conversation", keep);
             cur_ = best.sess;
             const std::shared_ptr<Snapshot> p = std::move(sessions_[cur_].park);   // the engine holds it now
             ev_.restore(*p);
@@ -196,7 +199,7 @@ public:
         if (!enabled_ || opt_.max_checkpoints <= 0) return;
         Session& lv = sessions_[cur_];
         if (!lv.cps.empty() && (size_t) lv.cps.back()->pos >= lv.tokens.size()) return;
-        auto cp = save(false);
+        auto cp = save(false, 0);                      // the newest checkpoint: evict() drops everything else first
         if (!cp) return;
         lv.cps.push_back(std::move(cp));
         while ((int) lv.cps.size() > opt_.max_checkpoints) lv.cps.erase(lv.cps.begin());
@@ -236,14 +239,16 @@ private:
         }
     };
 
-    /// A snapshot of the live state with its logits; nullptr when it alone would not fit park_bytes (it would be
-    /// dropped at once, after a copy that takes seconds for a long conversation).
-    std::shared_ptr<Snapshot> save(bool full) {
+    /// A snapshot of the live state with its logits; nullptr when it would not fit park_bytes next to the `with`
+    /// bytes that evict() keeps as long as it keeps the snapshot (it would be dropped at once, after a copy that
+    /// takes seconds for a long conversation).
+    std::shared_ptr<Snapshot> save(bool full, size_t with) {
         const size_t est = ev_.snapshot_bytes(full);
         const size_t need = est + logits.size() * sizeof(float);
-        if (est > 0 && need > opt_.park_bytes) {
-            std::fprintf(stderr, "conversations: %s of %zu tokens would take %.1f MiB, more than --park-mib; not kept\n",
-                         full ? "a conversation" : "a checkpoint", sessions_[cur_].tokens.size(), mib(need));
+        if (est > 0 && need + with > opt_.park_bytes) {
+            std::fprintf(stderr, "conversations: %s of %zu tokens would take %.1f MiB (%.1f MiB with the checkpoints "
+                         "kept along), more than --park-mib; not kept\n", full ? "a conversation" : "a checkpoint",
+                         sessions_[cur_].tokens.size(), mib(need), mib(need + with));
             return nullptr;
         }
         auto s = ev_.snapshot(full);
@@ -255,12 +260,14 @@ private:
         return s;
     }
 
-    /// The live conversation becomes a parked one (or is dropped by evict() when it cannot be).
-    void park_live(const char* why) {
+    /// The live conversation becomes a parked one (or is dropped by evict() when it cannot be). It is the most
+    /// recently used parked one, so evict() keeps it as long as it fits with its own checkpoints and the `keep`
+    /// bytes of checkpoints the next live conversation holds.
+    void park_live(const char* why, size_t keep) {
         Session& lv = sessions_[cur_];
         if (!enabled_ || lv.tokens.empty() || logits.empty()) return;
         const auto t0 = Clock::now();
-        lv.park = save(true);
+        lv.park = save(true, lv.bytes() + keep);
         if (lv.park)
             std::fprintf(stderr, "conversations: parked %zu tokens (%.3f MiB, %.0f ms) for %s\n", lv.tokens.size(),
                          mib(lv.park->bytes), ms_since(t0), why);
@@ -403,7 +410,7 @@ int serve_loop(Evaluator& ev, const ServeOptions& opt) {
             std::string w;
             while (ss >> w) f.push_back(w);
         }
-        std::vector<int32_t> ids;
+        std::vector<int32_t> ids, ends;               // ends: end=, ids that end this request as an end of turn
         SamplingParams sp;
         int64_t cp_at = -1;
         bool bad = f.size() < 3 || !parse_ids(f.back(), ids);
@@ -413,6 +420,7 @@ int serve_loop(Evaluator& ev, const ServeOptions& opt) {
             if (eq == std::string::npos) continue;
             const std::string key = f[i].substr(0, eq), value = f[i].substr(eq + 1);
             if (key == "cp") cp_at = std::atoll(value.c_str());
+            else if (key == "end") bad = !parse_ids(value, ends);
             else sp.set(key, value);                  // unknown keys: ignored
         }
         if (bad || max_new < 0) {
@@ -500,7 +508,8 @@ int serve_loop(Evaluator& ev, const ServeOptions& opt) {
                     out.line("T %d", y);
                     ++produced;
                     hist.push_back(y);
-                    if (std::find(opt.eos_ids.begin(), opt.eos_ids.end(), y) != opt.eos_ids.end()) { finish = "stop"; break; }
+                    if (std::find(opt.eos_ids.begin(), opt.eos_ids.end(), y) != opt.eos_ids.end() ||
+                        std::find(ends.begin(), ends.end(), y) != ends.end()) { finish = "stop"; break; }
                     if (in.stopped(gen_no)) { finish = "cancel"; break; }
                     if (produced >= max_new || (int64_t) conv.tokens().size() + 1 >= opt.max_ctx) { finish = "length"; break; }
                     conv.logits = ev.eval(y);
