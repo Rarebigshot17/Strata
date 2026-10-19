@@ -8,7 +8,8 @@ POST /v1/messages (Anthropic, stream and non-stream), POST /v1/responses (OpenAI
 GET /models, GET /props, GET /slots, GET /health, GET /metrics, GET /mcp.  One request at a time; the others wait their
 turn in the order they arrived.  Tools from MCP servers (serve/mcp.py, `"mcp_servers"` in the config or --mcp-config)
 are offered only to requests that ask for them with `"strata_mcp": true` - the web app does; other clients see exactly
-the API they always saw.  GLM-5.3-Flash reads text only: a request with a picture is a 400.
+the API they always saw (and get a 403 for `strata_mcp` unless the config's `"mcp_for_api": true` lets them).
+GLM-5.3-Flash reads text only: a request with a picture is a 400.
 Requests whose prompt plus max tokens exceed the engine's context are REJECTED with 400, never truncated.
 An unset (or 0, or -1) max tokens means "unlimited": whatever the prompt leaves of the context (on /v1/completions an
 unset one is 256 tokens: a plain prompt has no end of turn to stop at).
@@ -443,6 +444,7 @@ class ConvCacheLog:
 
     def __init__(self):
         self.key, self.pos = None, 0
+        self.lock = threading.Lock()                    # /metrics polls on every request thread: one read at a time
         self.reset()
 
     def reset(self):
@@ -451,6 +453,10 @@ class ConvCacheLog:
 
     def poll(self, path, start) -> dict:
         """The state after the log's new lines; `start` is where the engine's current run began in it."""
+        with self.lock:                                 # two at once counted the same lines twice
+            return self._poll(path, start)
+
+    def _poll(self, path, start) -> dict:
         if not path or start is None:
             return dict(self.state)
         if self.key != (path, start):                   # another start of the engine: it keeps nothing from before
@@ -1425,6 +1431,8 @@ class Service:
         self.started_at = time.time()
         self.status_lock = threading.Lock()
         self.mcp = None                                  # serve/mcp.py's McpHub when MCP servers are configured
+        self.mcp_for_api = False                         # the config's "mcp_for_api": API clients may use its tools too
+        self.large_bodies = threading.BoundedSemaphore(LARGE_BODIES_AT_ONCE)   # requests holding a LARGE_BODY
         # sharing the GPU with other programs (all off by default): unload the engine after this many idle seconds,
         # only start it again when this much VRAM is free, and run this command first (e.g. to unload another
         # server's model); the next request after an unload starts the engine again
@@ -1556,7 +1564,10 @@ class Service:
             code = self.engine.exit_code() if hasattr(self.engine, "exit_code") else None
             print(f"[strata] the engine had stopped (exit code {code}); starting it again "
                   "(a minute or two) ...", flush=True)
-        self.engine.restart()
+        try:
+            self.engine.restart()
+        except OSError as e:                            # the executable is missing or cannot run (a rebuild, a typo):
+            raise EngineDied(f"the engine could not be started: {e}") from e   # a 503, not a dropped request
         print("[strata] the engine is running again", flush=True)
 
     def _say_died(self, e: Exception) -> None:
@@ -1578,7 +1589,21 @@ class Service:
             self.status["queued"] += 1
         counted = True
         try:
-            with self.fifo:
+            ticket, got = self.fifo.join(), False
+            try:
+                # the turn ahead may be starting the engine (Service._run restarts one that died): once it runs, this
+                # request waits for its own turn in run() - in arrival order, with keep-alives - and not here, behind
+                # that request's whole answer, while later requests overtake it
+                while not (got := self.fifo.wait(ticket, 0.5)):
+                    if self.loaded():
+                        if trace is not None:
+                            with self.status_lock:
+                                trace["queue_s"] += round(time.perf_counter() - waiting, 3)
+                        return
+            finally:
+                if not got:
+                    self.fifo.leave(ticket)
+            try:
                 with self.status_lock:
                     self.status["queued"] -= 1
                 counted = False
@@ -1594,6 +1619,8 @@ class Service:
                         with self.status_lock:
                             trace["load_s"] += round(time.perf_counter() - loading, 3)
                             trace["state"] = "queued"
+            finally:
+                self.fifo.release()
         finally:
             if counted:
                 with self.status_lock:
@@ -2652,8 +2679,9 @@ def completion_chunks(svc: Service, req: dict, ids, max_new, cancel):
 
 
 def usage_chunk(req: dict, last: dict | None) -> dict | None:
-    """OpenAI's stream_options.include_usage: one more chunk after the last, with no choices and the request's usage,
-    for clients that read it there (the last chunk carries the usage too, as llama.cpp's server sends it)."""
+    """OpenAI's stream_options.include_usage: one more chunk after the last, with no choices and the request's usage.
+    The last chunk then goes without it, as OpenAI and llama.cpp send it: a client that adds up every chunk's usage
+    (LangChain's stream_usage) counted it twice.  Without the option the last chunk carries it, as before."""
     opts = req.get("stream_options")
     if not isinstance(opts, dict) or not opts.get("include_usage") or not last or "usage" not in last:
         return None
@@ -2861,6 +2889,15 @@ def anthropic_collect(events, unfinished: set | frozenset = frozenset()) -> dict
 
 # ------------------------------------------------------------------------------------------------ HTTP
 CHUNKED_BODY_MAX = 256 << 20                # #893: the most a Transfer-Encoding: chunked body may hold (read into memory)
+# A body read and parsed takes many times its size in memory (measured: 25x for a JSON array of empty objects) and is
+# held while its request waits for its turn.  A body larger than LARGE_BODY (a million-token conversation is a few MiB)
+# takes one of LARGE_BODIES_AT_ONCE places for its request's whole time; one more is answered 503 with Retry-After.
+LARGE_BODY = 16 << 20
+LARGE_BODIES_AT_ONCE = 2
+LARGE_BODY_RETRY_S = 30
+# A request's line, headers and body must keep arriving: this long without data ends it (a client that stops sending
+# held its thread forever).  The answer has no such limit: a stream may run for an hour.
+REQUEST_READ_S = 120.0
 
 
 def body_limit() -> int:
@@ -2874,12 +2911,17 @@ def body_limit() -> int:
     return mib << 20 if mib > 0 else CHUNKED_BODY_MAX
 
 
+# raised at a request's turn, once its stream may have begun: Service._run's start of an engine that died
+# (refused, or it could not be ended) and an MCP round's prepare() while it starts; the stream's error event then
+TURN_REFUSALS = (GpuBusy, EngineStarting, EngineStuck)
+
+
 class BadBody(Exception):
     """A request body that cannot be read (a malformed or oversized chunked body): the status and the sentence."""
 
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, retry_after: int | None = None):
         super().__init__(message)
-        self.status = status
+        self.status, self.retry_after = status, retry_after
 
 
 # OpenAI clients given the server's root as their base URL (no /v1) post to these
@@ -2897,9 +2939,12 @@ def make_handler(svc: Service):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.0"                       # SSE ends by closing the connection
 
+        timeout = REQUEST_READ_S                            # StreamRequestHandler sets it on the socket (reading)
         record = None                                       # #332: this request's monitor record, if kept
         watch_done = None                                   # #430 #431: stops this request's disconnect watcher
         body_read = False                                   # whether a handler took this request's body
+        answer_started = False                              # send_response() ran: an answer (or a stream) began
+        large_body = False                                  # this request holds one of svc.large_bodies
         DRAIN_SECONDS = 5                                   # the longest an unread body is read and dropped
 
         def log_message(self, fmt, *args):
@@ -2926,6 +2971,8 @@ def make_handler(svc: Service):
             and drops it (the drain); `deadline` (monotonic) ends the read early."""
             parts, total = [], 0
             while True:
+                if keep and total > LARGE_BODY:
+                    self._take_large_body()
                 if deadline is not None:
                     wait = deadline - time.monotonic()
                     if wait <= 0:
@@ -2952,8 +2999,13 @@ def make_handler(svc: Service):
                 if total > limit:
                     self.close_connection = True
                     raise BadBody(413, f"the request body is larger than {limit >> 20} MiB")
-                left = size
+                left, refused = size, None
                 while left > 0:
+                    if keep and total - left > LARGE_BODY:    # one huge chunk: refused before it is all kept
+                        try:
+                            self._take_large_body()
+                        except BadBody as e:                  # the rest of the chunk is read and dropped, so the
+                            parts, keep, refused = [], False, e   # drain goes on at the next chunk
                     piece = self.rfile.read(min(left, 1 << 20))
                     if not piece:
                         raise BadBody(400, "the chunked request body ended early")
@@ -2962,9 +3014,20 @@ def make_handler(svc: Service):
                         parts.append(piece)
                 if self.rfile.read(2) != b"\r\n":
                     raise BadBody(400, "malformed chunked request body")
+                if refused is not None:
+                    raise refused
 
         def _body(self) -> bytes:
             self.body_read = True
+            try:
+                body = self._read_body()
+            except TimeoutError:
+                self.close_connection = True
+                raise BadBody(408, f"the request body stopped arriving ({self.timeout:g} s without data)") from None
+            self.connection.settimeout(None)               # read: the answer, a stream of any length, has no limit
+            return body
+
+        def _read_body(self) -> bytes:
             limit = body_limit()
             if self._chunked():
                 return self._read_chunked(limit)
@@ -2978,7 +3041,22 @@ def make_handler(svc: Service):
                 self.close_connection = True               # the body is not read: the connection ends with the answer
                 raise BadBody(413, f"the request body is larger than {limit >> 20} MiB "
                                    "(STRATA_MAX_BODY_MIB raises the limit)")
+            if length > LARGE_BODY:
+                self._take_large_body()
             return self.rfile.read(length)
+
+        def _take_large_body(self):
+            """A place for this request's large body (see LARGE_BODY), held until the request ends; BadBody 503 when
+            they are all taken.  The body is then read and dropped after the answer (_drain_body), not held."""
+            if self.large_body:
+                return
+            if not svc.large_bodies.acquire(blocking=False):
+                self.body_read = False
+                print(f"[strata] 503: {LARGE_BODIES_AT_ONCE} requests with bodies over {LARGE_BODY >> 20} MiB are "
+                      "already in the server", flush=True)
+                raise BadBody(503, f"too many large requests at once (over {LARGE_BODY >> 20} MiB each); try again "
+                                   "shortly", retry_after=LARGE_BODY_RETRY_S)
+            self.large_body = True
 
         def _drain_body(self):
             """An answer sent before the body was read (a 401, a 403, /load, a method with no handler) must not close
@@ -3121,6 +3199,12 @@ def make_handler(svc: Service):
             self.end_headers()
 
         def _json(self, code, obj, headers=None):
+            if self.answer_started:
+                # the answer has begun (a stream): a second status line and body would be written into it
+                print(f"[strata] not sent, the answer had begun: {code} {json.dumps(obj, ensure_ascii=False)}",
+                      flush=True)
+                self._note(error=obj.get("error") if isinstance(obj, dict) else obj)
+                return
             if self.record is not None:
                 with svc.status_lock:
                     self.record["http_status"] = code
@@ -3261,8 +3345,11 @@ def make_handler(svc: Service):
                     model = {"id": svc.model, "object": "model", "status": {"value": "loaded"},
                              "meta": {"n_ctx": svc.reported_ctx()},
                              "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]}}
-                    if not loaded and (svc.idle_unload_s or getattr(svc.engine, "unloaded", False)):
-                        model["status"] = {"value": "unloaded"}   # like llama-server's router: listed, loads on use
+                    # an engine that died (OOM, a CUDA fault) is started again by the next request too (auto_load)
+                    if not loaded and (svc.idle_unload_s or getattr(svc.engine, "unloaded", False)
+                                       or hasattr(svc.engine, "restart")):
+                        # like llama-server's router: listed, loads on use
+                        model["status"] = {"value": "loading" if getattr(svc.engine, "starting", False) else "unloaded"}
                         loaded = True
                     if svc.aliases:                       # #297: the aliases, and each one listed under its own id
                         model["aliases"] = list(svc.aliases)
@@ -3292,7 +3379,13 @@ def make_handler(svc: Service):
             try:
                 self._post()
             except BadBody as e:                              # #893: a malformed or oversized chunked body
-                self._json(e.status, {"error": {"type": "invalid_request_error", "message": str(e)}})
+                self._json(e.status, {"error": {"type": "server_error" if e.status >= 500 else "invalid_request_error",
+                                                "message": str(e)}},
+                           headers={"Retry-After": e.retry_after} if e.retry_after else None)
+            finally:
+                if self.large_body:                           # the request and its parsed body are done
+                    self.large_body = False
+                    svc.large_bodies.release()
 
         def _post(self):
             if not self._authorized():
@@ -3330,7 +3423,7 @@ def make_handler(svc: Service):
                 try:
                     svc.load()
                     self._json(200, {"status": "loaded"})
-                except GpuBusy as e:
+                except (GpuBusy, EngineDied, EngineStuck) as e:   # refused, or the start failed: say why
                     ra = getattr(e, "retry_after", None)
                     self._json(503, {"error": {"type": "server_error", "message": str(e)}},
                                headers={"Retry-After": int(ra)} if ra else None)
@@ -3387,8 +3480,8 @@ def make_handler(svc: Service):
                 print(f"[strata] 503: {e}", flush=True)
                 self._json(503, responses_error_body(str(e), "server_error") if path == "/v1/responses"
                            else {"error": {"type": "server_error", "message": str(e)}})
-            except ValueError as e:
-                print(f"[strata] 400 invalid request: {e}", flush=True)
+            except (ValueError, OverflowError, RecursionError) as e:   # also valid JSON Python cannot take: 1e999
+                print(f"[strata] 400 invalid request: {e}", flush=True)  # (infinity) as a whole number, deep nesting
                 if path == "/v1/responses":
                     self._json(400, responses_error_body(str(e)))
                 else:
@@ -3534,7 +3627,7 @@ def make_handler(svc: Service):
                     new, changed = runconfig.apply(cfg, req.get("set") if isinstance(req, dict) else None)
                     if changed:
                         bak = runconfig.save(svc.config_path, new)
-            except ValueError as e:
+            except (ValueError, OverflowError, RecursionError) as e:   # as in _post: 1e999, deep nesting
                 self._json(400, {"error": {"type": "invalid_request_error", "message": str(e)}})
                 return
             except OSError as e:
@@ -3566,7 +3659,7 @@ def make_handler(svc: Service):
                                                          'or {"defaults": null} to clear them'}})
                     return
                 shared = svc.set_shared(req["defaults"])
-            except ValueError as e:
+            except (ValueError, OverflowError, RecursionError) as e:   # as in _post: 1e999, deep nesting
                 self._json(400, {"error": {"type": "invalid_request_error", "message": str(e)}})
                 return
             print("[strata] other apps now use the Chat settings: " + ", ".join(f"{k}={v}" for k, v in shared.items())
@@ -3635,13 +3728,21 @@ def make_handler(svc: Service):
             messages, validator = prepare_format(req.get("response_format"), messages)
             if validator is not None and (tools or req.get("strata_mcp")):
                 raise ValueError("structured response_format with tools/MCP is not supported")
-            svc.load()
             max_req = max_new = int(req.get("max_completion_tokens") or req.get("max_tokens") or 0)   # 0/-1: the rest
-            bias_api.validate_request(req, svc.engine, len(getattr(svc.tok, "tokens", ())) or None)
+            svc.reasoning_budget(req)                         # a bad value is a 400 before anything is sent
+            stop_strings(req)                                 # ... and so is a bad stop / stop_sequences
+            check_request_sampling(req)                       # ... and a sampling field of the wrong type
             use_mcp = req.get("strata_mcp") is True and svc.mcp is not None      # the web app's opt-in (serve/mcp.py)
             own = {t.get("name") for t in tools or [] if isinstance(t, dict)}   # #592: a second line of defence
             if use_mcp:
                 if not self._own_page("MCP tools can be used"):   # tools run with the user's rights on this PC
+                    return
+                if not self.headers.get("Origin") and not svc.mcp_for_api:
+                    # no Origin: no browser page, an API client (an SDK, a bot, curl, any key holder) - the tools are
+                    # the page's (its fetch names it in Origin; _own_page refused any other page's)
+                    self._json(403, {"error": {"type": "forbidden", "message":
+                                     "MCP tools (strata_mcp) run only for Strata's own page; set \"mcp_for_api\": "
+                                     "true in the run config to let API clients use them"}})
                     return
                 svc.mcp.wait(10)                                  # servers still starting (only right after start)
                 extra = svc.mcp.template_tools(exclude=own)       # the request's own tools win a name clash
@@ -3649,9 +3750,8 @@ def make_handler(svc: Service):
                 tools = (tools or []) + extra or None
             if force and use_mcp:
                 raise ValueError("a forced tool_choice with MCP tools is not supported")
-            svc.reasoning_budget(req)                         # a bad value is a 400 before anything is sent
-            stop_strings(req)                                 # ... and so is a bad stop / stop_sequences
-            check_request_sampling(req)                       # ... and a sampling field of the wrong type
+            svc.load()                                        # only now: a refused request does not load the model
+            bias_api.validate_request(req, svc.engine, len(getattr(svc.tok, "tokens", ())) or None)
             ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new, force=force)
             cancel = threading.Event()
             self._watch_client(cancel)                       # #430 #431
@@ -3668,22 +3768,23 @@ def make_handler(svc: Service):
                 return self._json(200, openai_collect(chunks, unfinished))
             self._sse()
             try:
-                last = None
+                tail = None
                 for c in chunks:
                     if c is None:
                         self.wfile.write(b": keep-alive\n\n")      # an SSE comment: clients ignore it
                     else:
+                        if "usage" in c and (tail := usage_chunk(req, c)) is not None:
+                            c = {k: v for k, v in c.items() if k != "usage"}   # include_usage: in its own chunk only
                         self.wfile.write(b"data: " + json.dumps(c, ensure_ascii=False).encode() + b"\n\n")
-                        last = c
                     self.wfile.flush()
-                if (tail := usage_chunk(req, last)) is not None:
+                if tail is not None:
                     self.wfile.write(b"data: " + json.dumps(tail, ensure_ascii=False).encode() + b"\n\n")
                 self.wfile.write(b"data: [DONE]\n\n")
             except OSError:
                 self._note(outcome="disconnected")
                 cancel.set()                                 # client went away: stop the engine
                 chunks.close()
-            except (EngineDied, EngineError, StructuredOutputError, ValueError) as e:
+            except (EngineDied, EngineError, StructuredOutputError, ValueError, *TURN_REFUSALS) as e:
                 self._stream_error(e)
 
         def _completions(self, req):
@@ -3701,10 +3802,11 @@ def make_handler(svc: Service):
             bias_api.normalize(req.get("logit_bias"), len(getattr(svc.tok, "tokens", ())) or None)
             stop_strings(req)                                 # a bad stop is a 400 before anything is sent
             check_request_sampling(req)                       # ... and a sampling field of the wrong type
+            asked = int(req.get("max_tokens") or COMPLETION_MAX_TOKENS)   # ... and a max_tokens of 1e999
             svc.load()
             bias_api.validate_request(req, svc.engine, len(getattr(svc.tok, "tokens", ())) or None)
             ids = svc.tok.encode(prompt, parse_special=True)
-            max_new = svc.room(len(ids), int(req.get("max_tokens") or COMPLETION_MAX_TOKENS))   # -1: the rest
+            max_new = svc.room(len(ids), asked)               # -1: the rest
             svc.checkpoint.at = None                          # no conversation in it: the engine keeps its own end
             cancel = threading.Event()
             self._watch_client(cancel)                       # #430 #431
@@ -3714,22 +3816,23 @@ def make_handler(svc: Service):
                 return self._json(200, completion_collect(chunks))
             self._sse()
             try:
-                last = None
+                tail = None
                 for c in chunks:
                     if c is None:
                         self.wfile.write(b": keep-alive\n\n")
                     else:
+                        if "usage" in c and (tail := usage_chunk(req, c)) is not None:
+                            c = {k: v for k, v in c.items() if k != "usage"}   # include_usage: in its own chunk only
                         self.wfile.write(b"data: " + json.dumps(c, ensure_ascii=False).encode() + b"\n\n")
-                        last = c
                     self.wfile.flush()
-                if (tail := usage_chunk(req, last)) is not None:
+                if tail is not None:
                     self.wfile.write(b"data: " + json.dumps(tail, ensure_ascii=False).encode() + b"\n\n")
                 self.wfile.write(b"data: [DONE]\n\n")
             except OSError:
                 self._note(outcome="disconnected")
                 cancel.set()                                 # client went away: stop the engine
                 chunks.close()
-            except (EngineDied, EngineError, ValueError) as e:
+            except (EngineDied, EngineError, ValueError, *TURN_REFUSALS) as e:
                 self._stream_error(e)
 
         def _stream_error(self, e: Exception):
@@ -3772,7 +3875,7 @@ def make_handler(svc: Service):
             if title is not None:
                 return self._responses_ready(req, title)
             try:
-                ids, thinking, tools, max_new, asm, validator, req = self._responses_prepare(req)
+                ids, thinking, tools, max_new, asm, validator, req, force = self._responses_prepare(req)
             except ResponsesError as e:
                 return self._json(e.status, e.body())
             except ModelBusy as e:
@@ -3788,7 +3891,7 @@ def make_handler(svc: Service):
             def events():
                 yield from asm.start()
                 done = None
-                for kind, x in svc.run(ids, thinking, tools, max_new, req, cancel):
+                for kind, x in svc.run(ids, thinking, tools, max_new, req, cancel, force):
                     if kind == "ping":
                         yield None
                     elif kind == "event":
@@ -3801,6 +3904,10 @@ def make_handler(svc: Service):
             if not req.get("stream"):
                 try:
                     result = responses_api.collect(items)
+                except KeyError:                             # no response.completed: the client hung up (the run
+                    if cancel.is_set():                      # was cancelled; the watcher noted it) - nobody to
+                        return                               # answer, and not a malformed request
+                    raise
                 except StructuredOutputError as e:
                     return self._json(502, responses_error_body(str(e), "server_error",
                                                                 code="structured_output_failed"))
@@ -3843,8 +3950,8 @@ def make_handler(svc: Service):
                 self._responses_failed(asm, f"{e}; the next request restarts it", "server_error", send)
             except StructuredOutputError as e:
                 self._responses_failed(asm, str(e), "structured_output_failed", send)
-            except (EngineError, ValueError) as e:           # the engine failed, or refused it, after the start
-                self._responses_failed(asm, str(e), "server_error", send)
+            except (EngineError, ValueError, *TURN_REFUSALS) as e:   # the engine failed, refused it, or could not
+                self._responses_failed(asm, str(e), "server_error", send)   # be started at its turn
 
         def _responses_failed(self, asm, message, code, send):
             e = asm.failed(message, code)
@@ -3859,7 +3966,9 @@ def make_handler(svc: Service):
             responses_api.check_request(req)
             messages = responses_api.input_messages(req)
             tools, names, skipped = responses_api.request_tools(req)
-            kw = responses_api.template_kwargs(req, svc.shared)
+            # the Chat settings' thinking level, then the config's, as with_shared gives the other routes
+            kw = responses_api.template_kwargs(req, {**svc.shared, "reasoning_effort":
+                                                     svc.shared.get("reasoning_effort") or svc.config_effort})
             try:
                 refuse_images(messages)                      # as on the chat route
             except ValueError as e:
@@ -3875,6 +3984,15 @@ def make_handler(svc: Service):
                 noted.update(skipped)
             if req.get("max_output_tokens") is None and "max_tokens" in svc.shared:   # the shared Chat settings
                 req = {**req, "max_output_tokens": svc.shared["max_tokens"]}
+            choice = req.get("tool_choice")              # "required" or a named tool: the reply opens with the call,
+            if isinstance(choice, dict) and choice.get("type") in ("function", "custom") and tools:   # as on chat
+                name = choice.get("name")               # a namespace's or custom tool: the name the template shows
+                shows = {t["name"] for t in tools}
+                if name not in shows:
+                    name = next((flat for flat, (_ns, own, _kind) in names.items()
+                                 if own == name and flat in shows), name)
+                choice = {"type": "function", "name": name}
+            force = forced_call(choice, tools)
             try:
                 svc.reasoning_budget(req)                    # a bad value is a 400 before anything is sent
             except ValueError as e:
@@ -3893,12 +4011,14 @@ def make_handler(svc: Service):
             shown = responses_api.prompt_tools(req, tools) if svc.codex_compaction_cache else tools
             try:
                 try:
-                    ids, thinking, max_new = svc.prepare(messages, shown, kw, req.get("max_output_tokens") or 0)
+                    ids, thinking, max_new = svc.prepare(messages, shown, kw, req.get("max_output_tokens") or 0,
+                                                         force=force)
                 except ValueError:
                     if shown is tools:
                         raise
                     shown = tools                            # too long with the kept tools: the request as sent
-                    ids, thinking, max_new = svc.prepare(messages, shown, kw, req.get("max_output_tokens") or 0)
+                    ids, thinking, max_new = svc.prepare(messages, shown, kw, req.get("max_output_tokens") or 0,
+                                                         force=force)
             except ResponsesError:
                 raise
             except ValueError as e:                          # too long for the context, a picture
@@ -3911,7 +4031,7 @@ def make_handler(svc: Service):
             asm = responses_api.Assembler(req, svc.model_for(req), len(ids), names,
                                           "reasoning.encrypted_content" in include, validator is not None)
             # the request is also the sampling dict, as on the chat path (temperature, top_p, top_k, seed, ...)
-            return ids, thinking, responses_api.parser_tools(tools, names), max_new, asm, validator, req
+            return ids, thinking, responses_api.parser_tools(tools, names), max_new, asm, validator, req, force
 
         def _count_tokens(self, req):
             """Anthropic's token count, which Claude Code asks for its context figures: the prompt this server would
@@ -3923,7 +4043,6 @@ def make_handler(svc: Service):
             self._json(200, {"input_tokens": len(svc.encode_prompt(messages, tools, kw))})
 
         def _anthropic(self, req):
-            svc.load()
             req = svc.with_shared(req, "anthropic")
             messages, tools, kw = anthropic_to_messages(req, svc.anthropic_think_unasked)
             refuse_images(messages)
@@ -3934,6 +4053,7 @@ def make_handler(svc: Service):
             svc.reasoning_budget(req)                         # a bad value is a 400 before anything is sent
             stop_strings(req)                                 # ... and so is a bad stop / stop_sequences
             check_request_sampling(req)                       # ... and a sampling field of the wrong type
+            svc.load()                                        # only now: a refused request does not load the model
             ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new, force=force)
             cancel = threading.Event()
             self._watch_client(cancel)                       # #430 #431
@@ -3962,8 +4082,8 @@ def make_handler(svc: Service):
                 err = {"type": "error", "error": {"type": "api_error", "message": f"{e}; the next request restarts it"}}
                 self._note(error=err["error"])
                 self.wfile.write(b"event: error\ndata: " + json.dumps(err).encode() + b"\n\n")
-            except (EngineError, ValueError) as e:           # the engine failed, or refused it, after the start
-                err = {"type": "error", "error": {"type": "api_error", "message": str(e)}}
+            except (EngineError, ValueError, *TURN_REFUSALS) as e:   # the engine failed, refused it, or could not
+                err = {"type": "error", "error": {"type": "api_error", "message": str(e)}}   # be started at its turn
                 self._note(error=err["error"])
                 self.wfile.write(b"event: error\ndata: " + json.dumps(err).encode() + b"\n\n")
 
@@ -4423,7 +4543,7 @@ def main() -> int:
                          "Several keys: separate them with commas (key1,key2), as llama.cpp does")
     ap.add_argument("--mcp-config", help="a JSON file with MCP servers in Claude Desktop's format ({\"mcpServers\": "
                                          "{...}}); the web app's chat can use their tools (also \"mcp_servers\" in "
-                                         "the config)")
+                                         "the config; API clients too with \"mcp_for_api\": true there)")
     ap.add_argument("--lazy", action="store_true", help="start the API unloaded (the engine starts with the first request)")
     ap.add_argument("--api-monitor", action="store_true",
                     help="the API request monitor at /api-monitor: keeps the last 100 requests' prompts and answers in "
@@ -4613,8 +4733,14 @@ def main() -> int:
     if hub is not None:
         import atexit
         svc.mcp = hub
+        # "mcp_for_api" (true/false, default false): API clients' requests with "strata_mcp": true may run the MCP
+        # tools too; without it only Strata's own page can (its requests name it in Origin)
+        mcp_for_api = cfg.get("mcp_for_api", False)
+        if not isinstance(mcp_for_api, bool):
+            raise SystemExit(f"[strata] config \"mcp_for_api\" must be true or false, not {mcp_for_api!r}")
+        svc.mcp_for_api = mcp_for_api
         print(f"[strata] starting {len(hub.servers)} MCP server{'s' * (len(hub.servers) != 1)} for the web app's "
-              f"chat: {', '.join(hub.servers)}", flush=True)
+              f"chat{' and API clients (mcp_for_api)' if mcp_for_api else ''}: {', '.join(hub.servers)}", flush=True)
         hub.start()
         atexit.register(hub.close)                      # the servers Strata started end with it
     httpd = serve(svc, host=a.host, port=a.port)

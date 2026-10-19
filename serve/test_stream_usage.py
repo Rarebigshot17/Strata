@@ -43,17 +43,20 @@ class IncludeUsage(unittest.TestCase):
         self.assertEqual(tail["choices"], [])
         self.assertEqual(tail["object"], "chat.completion.chunk")
         self.assertEqual(tail["id"], last["id"])
-        self.assertEqual(tail["usage"], last["usage"])           # the finish chunk keeps its usage too
         self.assertEqual(last["choices"][0]["finish_reason"], "stop")
         self.assertEqual(tail["usage"]["completion_tokens"], len("Hello there") + 1)   # and the end-of-turn token
+        # only the usage chunk carries it, as OpenAI sends it: a client that adds up the usage of every chunk
+        # (LangChain's stream_usage) counted it twice when the finish chunk had it too
+        self.assertEqual([c for c in chunks if c.get("usage")], [tail])
 
     def test_completion_stream_ends_with_a_usage_chunk(self):
         chunks = self.stream("/v1/completions", {**self.COMPLETION, "stream_options": {"include_usage": True}})
         tail, last = chunks[-1], chunks[-2]
         self.assertEqual(tail["choices"], [])
         self.assertEqual(tail["object"], "text_completion")
-        self.assertEqual(tail["usage"], last["usage"])
+        self.assertEqual(last["choices"][0]["finish_reason"], "length")
         self.assertEqual(tail["usage"]["completion_tokens"], 4)
+        self.assertEqual([c for c in chunks if c.get("usage")], [tail])
 
     def test_without_the_option_nothing_changes(self):
         for path, body in (("/v1/chat/completions", self.CHAT), ("/v1/completions", self.COMPLETION)):
