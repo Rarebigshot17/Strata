@@ -212,6 +212,17 @@ class Continuations(unittest.TestCase):
         self.assertEqual(len(replies[0][1]), 40)
         self.assertEqual(replies[1], replies[0])
 
+    def test_the_mock_engine_goes_on_where_a_pass_ended(self):
+        # serve.server --engine mock: the pass capped at a budget the thinking stays under goes on in its own script,
+        # not from the script's start (the answer written twice) or in the next request's script
+        tok = GlmTokenizer()
+        self.start("", engine=S.MockEngine(tok, [reply_text("Thinking about it.", "Hello from the mock engine."),
+                                                 reply_text("", "The next request.")]))
+        c = self.chat(reasoning_budget_tokens=30)
+        self.assertEqual((c["message"]["reasoning_content"], c["message"]["content"], c["finish_reason"]),
+                         ("Thinking about it.", "Hello from the mock engine.", "stop"))
+        self.assertEqual(self.chat()["message"]["content"], "The next request.")
+
     def test_a_reader_that_keeps_up_changes_nothing(self):
         for lag in (0, 1):
             with self.subTest(lag=lag):

@@ -242,7 +242,9 @@ class Engine(Protocol):
 class MockEngine:
     """Replays a scripted completion (text) as token ids, one per step, then GLM's end-of-turn token (<|user|>).  Given
     a list of scripts, each request gets the next one and the last one repeats (a tool call, then the answer after
-    it).  Every pass replays from the start, so `end_ids` is taken and not acted on."""
+    it).  A pass whose prompt is the last one's and every token it gave (a reply's next pass, as Service._run sends
+    after a pass capped at the thinking budget or ended at an `end_ids` id) goes on in the same script, as the engine
+    goes on from its state; any other prompt is a request of its own and starts a script from the beginning."""
 
     def __init__(self, tokenizer, script: str | list[str], max_context: int = 32768, delay_s: float = 0.0):
         self.tok, self.max_context, self.delay = tokenizer, max_context, delay_s
@@ -252,19 +254,29 @@ class MockEngine:
         self.script, self.turns = self.scripts[0], 0
         self.last_prompt: list[int] = []
         self.last_checkpoint = None
+        self.at, self.given = 0, []        # where in the script the last pass started, and the tokens it gave
 
     def generate(self, ids, max_new, sampling, cancel, checkpoint=None, end_ids=None, drawn=0):
+        goes_on = bool(self.given) and list(ids) == self.last_prompt + self.given     # the last pass, gone on
         self.last_prompt = list(ids)
         self.last_checkpoint = checkpoint
-        if len(self.scripts) > 1:
-            self.script = self.scripts[min(self.turns, len(self.scripts) - 1)]
-            self.turns += 1
-        for t in self.script[:max_new]:
+        if goes_on:
+            self.at += len(self.given)
+        else:
+            self.at = 0
+            if len(self.scripts) > 1:
+                self.script = self.scripts[min(self.turns, len(self.scripts) - 1)]
+                self.turns += 1
+        self.given = []
+        for t in self.script[self.at:self.at + max_new]:
             if cancel.is_set():
                 return
             if self.delay:
                 time.sleep(self.delay)
+            self.given.append(t)
             yield t
+            if t in (end_ids or ()):
+                return
 
 
 class EngineDied(RuntimeError):
