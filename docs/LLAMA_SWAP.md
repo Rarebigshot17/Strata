@@ -58,14 +58,15 @@ into the page cache (the warm-up), so the first request does not wait for the di
 warming the experts: <read> of <total> GB (<seconds> s, <rate> GB/s)
 ```
 
-After a reboot the warm-up reads the experts from disk. No
-start on the real model has been timed yet. For scale only: a SATA link carries at most about 0.55 GB/s, so reading
-117 GB takes at least about 3.5 minutes and 162 GB about 5 minutes (calculated; a real drive can be slower). When the
-files are still in the page cache from an earlier run, the warm-up reads them from RAM instead.
+After a reboot the warm-up reads the experts from disk. No start on the real model has been timed yet. For scale
+only: a SATA III link carries at most 0.6 GB/s, so reading 117 GB takes at least about 3.3 minutes and 162 GB about
+4.5 minutes (calculated; a real drive is slower). When the files are still in the page cache from an earlier run, the
+warm-up reads them from RAM instead.
 
 So set `healthCheckTimeout` well above that until you have timed a start of your own: the last warm-up line gives the
-time and the rate. The server has its own limit as well: the engine must say `READY` within 900 s of its last
-warm-up progress, or the server ends it (`STRATA_ENGINE_READY_S` changes the 900; 0 waits for ever).
+time and the rate. The server has its own limit as well: the engine must say `READY` within 900 s, counted from its
+start or, while the warm-up moves on, from its latest progress line; otherwise the server ends it
+(`STRATA_ENGINE_READY_S` changes the 900; 0 waits for ever).
 
 `STRATA_DROP_CACHE_ON_EXIT=1` gives the model files' page cache back when the server stops (off by default). It helps
 when llama-swap then starts another large model, and it makes Strata's next start read the experts from disk again.
