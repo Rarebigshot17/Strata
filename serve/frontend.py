@@ -1325,6 +1325,7 @@ class OutputParser:
                     out.append(Event("content", self._track(self.gap + CALL_START + self.buf[:i + len(CALL_END)])))
                 else:
                     out.append(Event("tool_call", call=call))
+                    self._track(self.gap or "\n")    # the call ends its line (see the call state)
                 self.buf = self.buf[i + len(CALL_END):]
                 self.state, self.lead = "content", call is not None
             else:                                    # call
@@ -1345,6 +1346,9 @@ class OutputParser:
                 if r.stage != "done":
                     return out
                 out.append(Event("tool_call", call=ToolCall(name=r.name, arguments=r.args, id=self.scall.id)))
+                # the newlines dropped before it, or the call itself, end the line it follows: a fence closed by that
+                # line ("```<tool_call>") stays closed for the text after it
+                self._track(self.gap or "\n")
                 self.buf, self.reader, self.scall = r.text, None, None
                 self.state, self.lead = "content", True
 

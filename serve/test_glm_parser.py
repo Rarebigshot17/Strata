@@ -384,6 +384,16 @@ class CodeFences(Base):
             with self.subTest(body=body):
                 self.assertEqual(self.parse("ok</think>" + body + READ), [("reasoning", "ok"), ("content", body + READ)])
 
+    def test_text_and_a_call_after_a_call_that_closed_the_fence(self):
+        # the fence stays closed after the call: the newlines dropped before it, or the call itself, end its line
+        for body in ("```\na\n```", "```\na\n```\n", "```\na\n```\n\n", "~~~\nx\n~~~"):
+            for between in ("Then:", "\n\nThen: `x` "):
+                with self.subTest(body=body, between=between):
+                    self.assertEqual(self.calls("ok</think>" + body + READ + between + READ),
+                                     [("read_file", READ_ARGS)] * 2)
+                    self.assertEqual(self.calls("ok</think>" + body + READ + "\nThen:\n```\n" + READ),
+                                     [("read_file", READ_ARGS)])
+
     def test_the_answer_starts_outside_code(self):
         # an open fence in the reasoning does not carry over into the answer
         self.assertEqual(self.calls("```\nnot closed</think>" + READ), [("read_file", READ_ARGS)])
