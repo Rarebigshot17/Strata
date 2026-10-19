@@ -166,6 +166,22 @@ class Http(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), before)                 # nothing was written
         self.assertFalse((self.path.parent / "strata-q2_0.json.bak").exists())
 
+    def test_a_file_with_nan(self):
+        # an earlier version took "idle_unload_s": NaN and wrote it; only standard JSON is written now, and a save
+        # that cannot be written touches nothing (not the .bak either) until that key is set again
+        self.path.write_text(json.dumps({**CFG, "idle_unload_s": float("nan")}, indent=1), encoding="utf-8")
+        before = self.path.read_bytes()
+        origin = {"Origin": f"http://{self.host}"}
+        status, b = self.call("POST", {"set": {"fit_max_tokens": True}}, origin)
+        self.assertEqual(status, 400, b)
+        self.assertIn("NaN or Infinity", b["error"]["message"])
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertFalse((self.path.parent / "strata-q2_0.json.bak").exists())
+        with contextlib.redirect_stdout(io.StringIO()):
+            status, b = self.call("POST", {"set": {"idle_unload_s": 600, "fit_max_tokens": True}}, origin)
+        self.assertEqual(status, 200, b)
+        self.assertEqual(self.saved(), {**CFG, "idle_unload_s": 600, "fit_max_tokens": True})
+
     def test_the_api_key(self):
         self.svc.api_key = "secret"
         self.assertEqual(self.call("GET")[0], 401)

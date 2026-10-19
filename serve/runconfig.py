@@ -171,10 +171,15 @@ def apply(cfg: dict, changes: dict) -> tuple[dict, list[str]]:
 def save(path: str | Path, cfg: dict) -> Path:
     """The config written whole (a temporary file moved over the old one), the earlier one kept as <name>.bak."""
     path = Path(path)
+    try:
+        text = json.dumps(cfg, indent=1, allow_nan=False)                # standard JSON only
+    except ValueError:
+        raise ValueError(f"{path.name} holds NaN or Infinity, which JSON does not allow: set that key again here, "
+                         "or correct the file by hand") from None
     bak = path.with_name(path.name + ".bak")
     shutil.copyfile(path, bak)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(cfg, indent=1, allow_nan=False), encoding="utf-8")   # standard JSON: no NaN
+    tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
     return bak
 
