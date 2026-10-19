@@ -34,4 +34,4 @@ body:
     value: |
       A couple of extras that help a lot:
 
-      - Check the [README](https://github.com/Rarebigshot17/Strata#readme) first: what GLM-5.3-Flash needs (NVIDIA GPUs, 120-170 GB of RAM) and how to start it are there.
+      - Check the [README](https://github.com/Rarebigshot17/Strata#readme) first: what GLM-5.3-Flash needs (NVIDIA GPUs; RAM for every expert plus 12 GiB, so at least about 121 GiB as `free -g` reports it for the 3-bit size and 163 GiB for the 4-bit) and how to start it are there.

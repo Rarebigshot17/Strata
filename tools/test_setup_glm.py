@@ -1043,6 +1043,13 @@ class Check(unittest.TestCase):
         _, _, _, _, rec = install(["--check", "--models-dir", "{base}/elsewhere/models"])
         self.assertEqual(rec["disks"], [Path(rec["base"])])                  # the drive a new folder would be on
 
+    def test_the_bug_report_form_names_setups_minimum(self):
+        form = (ROOT / ".github" / "ISSUE_TEMPLATE" / "bug_report.yml").read_text(encoding="utf-8")
+        least = {m: f"{setup.experts_gib(m) + setup.RAM_LEFT_MIN_GIB:.0f} GiB" for m in setup.MODELS}
+        self.assertEqual(least, {"UD-IQ3_XXS": "121 GiB", "IQ4_XS": "163 GiB"})
+        for m in setup.MODELS:
+            self.assertIn(least[m], form)
+
     def test_check_on_too_little_ram(self):
         code, out, _, _, _ = install(["--check"], ram=60.0)
         self.assertEqual(code, 1)
