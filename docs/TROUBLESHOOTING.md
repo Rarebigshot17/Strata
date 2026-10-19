@@ -264,9 +264,9 @@ A sampling value is out of range or of the wrong type: NaN and Infinity, a repet
 temperature below 0, top_p or min_p outside 0 to 1, or an integer too large for the engine. The message names the
 field. The shared Chat settings (`POST /settings`, a 400 that names the field) and the run config's `"sampling"`
 block (a `[strata] config sampling.<field>=...` line, and the server stops) are checked the same way, each with
-its own wording; a shared temperature goes up to 2. "unknown reasoning effort ...: use none, low, medium or high"
-is the same for `reasoning_effort`. The server window prints each refused request as
-`[strata] 400 invalid request: ...`.
+its own wording; a shared temperature goes up to 2. "unknown reasoning effort ...: none, off, minimal, ... (thinking
+off) or low, medium, high, ... (on)" is the same for `reasoning_effort`. The server window prints each refused
+request as `[strata] 400 invalid request: ...`.
 
 ### A 503 or a 413 about the request's size
 

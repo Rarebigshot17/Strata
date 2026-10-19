@@ -167,7 +167,9 @@ def effort_kwargs(value) -> dict:
         return {"enable_thinking": False}
     key = str(value).strip().lower()
     if key not in EFFORT:
-        raise ValueError(f"unknown reasoning effort {value!r}: use none, low, medium or high")
+        raise ValueError(f"unknown reasoning effort {value!r}: "
+                         f"{', '.join(k for k, v in EFFORT.items() if v is None)} (thinking off) or "
+                         f"{', '.join(k for k, v in EFFORT.items() if v is not None)} (on)")
     level = EFFORT[key]
     return {"enable_thinking": False} if level is None else {"reasoning_effort": level}
 

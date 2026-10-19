@@ -306,8 +306,10 @@ class ThinkingKwargs(unittest.TestCase):
                 self.assertEqual(effort_kwargs(value), {"reasoning_effort": level})
         self.assertEqual(effort_kwargs(None), {})
         self.assertEqual(effort_kwargs(""), {})
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ValueError) as c:
             effort_kwargs("extreme")
+        for word in ("none", "off", "minimal", "disabled", "false", "low", "medium", "high", "xhigh", "max", "maximum"):
+            self.assertIn(word, str(c.exception))      # the 400 lists every word that is taken, not four of them
 
     def test_budget(self):
         self.assertEqual(budget_effort(1024), {"reasoning_effort": "low"})
