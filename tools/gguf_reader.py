@@ -1,11 +1,8 @@
 """Minimal GGUF v3 header reader - no ggml, no gguf-py.
 
-Written because the `gguf` PyPI package cannot open this artifact: its `GGMLQuantizationType`
-enum has no member for type 42 (`Q2_0`), which is newer than the library. That is itself a P0.S6
-finding - the format this engine is specialized for is ahead of the standard tooling.
-
-This is the reference implementation for `src/artifact/` (architecture §15: "GGUF v3 reader (mmap,
-no ggml dependency)"). It parses the header only; tensor data is never read.
+The server, setup and the GLM tools read a model's metadata with it (the tokenizer, the chat template, the
+architecture's hyperparameters) and its tensor directory.  It parses the header only: tensor data is never read,
+whatever the shard's size.
 """
 from __future__ import annotations
 
@@ -16,7 +13,7 @@ from typing import Any
 
 GGUF_MAGIC = 0x46554747  # "GGUF" little-endian
 
-# ggml_type values. 42 = Q2_0, the GSQ-RCO routed-expert encoding, absent from gguf-py as of 0.19.
+# ggml_type values (names only: the reader never decodes tensor data).
 GGML_TYPES: dict[int, str] = {
     0: "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1", 4: "Q4_2", 5: "Q4_3", 6: "Q5_0", 7: "Q5_1",
     8: "Q8_0", 9: "Q8_1", 10: "Q2_K", 11: "Q3_K", 12: "Q4_K", 13: "Q5_K", 14: "Q6_K",

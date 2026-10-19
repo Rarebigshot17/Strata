@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """One command that measures this Strata install the way it is used, and writes a report you can share.
 
-    BENCH.bat                      (Windows)        ./bench.sh        (Linux)        python tools/strata_bench.py
+    ./bench.sh        or        python tools/strata_bench.py
 
-It starts the server with your existing settings (the newest strata-*.json of this folder, or --config FILE), or uses
+It starts the server with your existing settings (the newest strata-glm-*.json of this folder, or --config FILE), or uses
 the one already running (it checks the config's port, or --url http://host:port), and sends a fixed suite through the
 real HTTP API, three runs each, medians reported:
 
@@ -13,16 +13,17 @@ real HTTP API, three runs each, medians reported:
   4. agent      a coding-agent style session: system prompt + four tools, then five turns, each adding about 1,500 words
                 of a file to the conversation and continuing from the model's own earlier replies - how many prompt
                 tokens the conversation cache reused, how many had to be read again, time to first token per turn
-  5. --clients N   N requests at once (the server needs --batch for them to run together): total tok/s, p50/p95 latency
+  5. --clients N   N requests at once (the server answers one at a time, the others wait their turn): total tok/s,
+                   p50/p95 latency
   6. --long 32K    the same prompt test at about 32,768 tokens
 
 Speeds are the engine's own timings (the `timings` of the answer: prompt_per_second, predicted_per_second); time to first
 token and latency are measured by this client.  Thinking is off for the suite (--think turns it on), so the answers are
 short and the runs comparable.  The default run takes about 3-10 minutes after the model has loaded (the slower the card, the longer).
 
-The result goes to bench/results/<date>-community-<gpu>-<model>/ : README.md in the format of
-docs/COMMUNITY_BENCHMARKS.md, results.json (every request) and an engine log excerpt.  Home folders, user and host names,
-IP addresses and API keys are replaced by placeholders before anything is written; read it once before you share it.
+The result goes to bench/results/<date>-community-<gpu>-<model>/ : README.md (the machine, the settings and the
+results), results.json (every request) and an engine log excerpt.  Home folders, user and host names, IP addresses and
+API keys are replaced by placeholders before anything is written; read it once before you share it.
 `--compare <older results folder>` prints the two side by side.  Standard library only.
 """
 from __future__ import annotations
@@ -33,8 +34,8 @@ import getpass
 import json
 import os
 import platform
+import random
 import re
-import shutil
 import socket
 import statistics
 import subprocess
@@ -48,11 +49,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ab_engine import PROMPTS, long_prompt          # noqa: E402  the same three short questions and word list
-from agent_turns_bench import SYSTEM, TOOLS         # noqa: E402  the same agent system prompt and tool list
 import serve_load                                   # noqa: E402  the burst client for --clients
 
 SCHEMA = 1
+DEFAULT_PORT = 8101            # the server's own default (serve/server.py)
 CHAT_MAX_TOKENS = 100
 LONG_MAX_TOKENS = 24
 AGENT_MAX_TOKENS = 64
@@ -60,6 +60,44 @@ AGENT_TURNS = 5
 AGENT_WORDS = 1500
 AGENT_MIN_CONTEXT = 10240      # the last turn of the session holds about 10K tokens
 BURST_MAX_TOKENS = 128
+
+PROMPTS = (
+    "Write a Python function that merges two sorted lists into one sorted list, with a docstring and two tests.",
+    "Explain in two paragraphs how a refrigerator moves heat from inside to outside.",
+    "List ten practical tips for learning a new language as an adult, one sentence each.",
+)
+
+SYSTEM = ("You are an autonomous coding agent working in the user's repository. You can read files, search the code, "
+          "edit files and run commands with the tools below. Work step by step: read the code you need before changing "
+          "it, make small and correct edits, keep the existing style, and explain briefly what you did. Never invent "
+          "file contents: read them. When the task is done, give a short summary of the changes and how to test them.")
+
+TOOLS = [
+    {"type": "function", "function": {
+        "name": "read_file", "description": "Read a file of the repository (UTF-8 text).",
+        "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "path from the repository root"}},
+                       "required": ["path"]}}},
+    {"type": "function", "function": {
+        "name": "grep", "description": "Search the repository for a regular expression; returns matching lines.",
+        "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}},
+                       "required": ["pattern"]}}},
+    {"type": "function", "function": {
+        "name": "edit_file", "description": "Replace an exact string in a file with a new one.",
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "old": {"type": "string"},
+                                                        "new": {"type": "string"}}, "required": ["path", "old", "new"]}}},
+    {"type": "function", "function": {
+        "name": "run", "description": "Run a shell command in the repository and return its output.",
+        "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}},
+]
+
+
+def long_prompt(words: int) -> str:
+    """A fixed list of `words` words (seeded), and a short task about it."""
+    rng = random.Random(7)
+    vocab = ("river stone market lantern copper winter garden signal harbor needle orbit velvet canyon ember "
+             "ledger quartz meadow anchor violet thunder").split()
+    body = " ".join(rng.choice(vocab) for _ in range(words))
+    return f"Here is a list of words:\n{body}\n\nSummarize what kinds of words appear in the list, in five sentences."
 
 
 # --------------------------------------------------------------------------------------------------------- redaction
@@ -197,8 +235,7 @@ def digest(r: dict) -> dict:
             "total_s": round(r["total"], 3), "prompt_tokens": prompt_tokens, "reused_tokens": cached,
             "read_tokens": read, "generated_tokens": gen, "prompt_tps": pp, "prompt_tps_source": psrc,
             "decode_tps": dec, "decode_tps_source": dsrc if dec is not None else None,
-            "prompt_ms": t.get("prompt_ms"), "decode_ms": t.get("predicted_ms"),
-            "drafts_offered": t.get("draft_n"), "drafts_accepted": t.get("draft_n_accepted")}
+            "prompt_ms": t.get("prompt_ms"), "decode_ms": t.get("predicted_ms")}
 
 
 # ----------------------------------------------------------------------------------------------------- statistics
@@ -305,7 +342,7 @@ class Suite:
         """Five pieces of text a coding agent would read: this folder's own documents when they exist (nothing personal),
         else generated filler of the same size."""
         names = []
-        for rel in ("README.md", "docs/HOW_IT_WORKS.md", "docs/DETAILS.md", "docs/INSTALL.md", "docs/MODELS.md", "docs/COMMUNITY_BENCHMARKS.md"):
+        for rel in ("README.md", "docs/HOW_IT_WORKS.md", "docs/DETAILS.md", "docs/INSTALL.md", "docs/TROUBLESHOOTING.md", "docs/AI_SETUP.md"):
             p = ROOT / rel
             if p.is_file():
                 words = p.read_text(encoding="utf-8", errors="replace").split()
@@ -450,19 +487,6 @@ def total_ram_gib() -> float | None:
                 return round(int(line.split()[1]) / 2 ** 20, 1)
     except OSError:
         pass
-    if os.name == "nt":
-        try:
-            import ctypes
-
-            class MS(ctypes.Structure):
-                _fields_ = [("l", ctypes.c_ulong), ("load", ctypes.c_ulong), ("total", ctypes.c_ulonglong)] + [
-                    (n, ctypes.c_ulonglong) for n in ("a", "b", "c", "d", "e")]
-            ms = MS()
-            ms.l = ctypes.sizeof(MS)
-            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms))
-            return round(ms.total / 2 ** 30, 1)
-        except Exception:                               # noqa: BLE001
-            pass
     return None
 
 
@@ -473,10 +497,6 @@ def cpu_name() -> str | None:
                 return line.split(":", 1)[1].strip()
     except OSError:
         pass
-    if os.name == "nt":
-        out = run_cmd(["powershell", "-NoProfile", "-Command", "(Get-CimInstance Win32_Processor | Select-Object -First 1).Name"])
-        if out.strip():
-            return out.strip()
     return platform.processor() or None
 
 
@@ -492,14 +512,6 @@ def gpu_info_local() -> dict:
     m = re.search(r"CUDA Version:\s*([\d.]+)", head)
     if m:
         info["cuda"] = m.group(1)
-    if not gpus:
-        rocm = run_cmd(["rocm-smi", "--showproductname"])
-        names = re.findall(r"Card [Ss]eries:\s*(.+)", rocm) or re.findall(r"Card [Mm]odel:\s*(.+)", rocm)
-        info["gpus"] = [{"name": n.strip(), "vram_mib": None, "driver": None} for n in names]
-        v = run_cmd(["rocm-smi", "--showdriverversion"])
-        m2 = re.search(r"Driver version:\s*(\S+)", v)
-        if m2:
-            info["rocm_driver"] = m2.group(1)
     return info
 
 
@@ -508,7 +520,7 @@ SECRET_KEY = re.compile(r"(?i)key|token|secret|password|auth")
 
 
 def base_if_path(v):
-    if isinstance(v, str) and (("/" in v or "\\" in v) or re.search(r"\.(gguf|bin|json|pack|txt|jinja|so|dll|exe)$", v, re.I)):
+    if isinstance(v, str) and (("/" in v or "\\" in v) or re.search(r"\.(gguf|bin|json|txt|jinja|so)$", v, re.I)):
         return re.split(r"[\\/]", v.rstrip("\\/"))[-1]
     return v
 
@@ -529,7 +541,7 @@ def config_view(cfg: dict) -> dict:
             out[k] = json.loads(json.dumps(v))
     env = cfg.get("env")
     if isinstance(env, dict):
-        out["env"] = {k: base_if_path(str(v)) for k, v in env.items() if k.startswith(("STRATA_", "HIP_", "CUDA_", "ROCR_", "ONEAPI_", "SYCL_")) and not SECRET_KEY.search(k)}
+        out["env"] = {k: base_if_path(str(v)) for k, v in env.items() if k.startswith(("STRATA_", "CUDA_")) and not SECRET_KEY.search(k)}
     return out
 
 
@@ -539,7 +551,7 @@ def launch_line(view: dict) -> str:
 
 
 def detect_quant(view: dict) -> str | None:
-    names = [a for a in view.get("args", []) if isinstance(a, str) and re.search(r"\.(gguf|pack)$|^[\w.-]+$", a)]
+    names = [a for a in view.get("args", []) if isinstance(a, str) and re.search(r"\.gguf$|^[\w.-]+$", a)]
     names += [str(view.get("model_name") or "")]
     for n in names:
         m = QUANT.search(n)
@@ -606,40 +618,34 @@ def collect_machine(base: str, key: str, cfg: dict | None, gpu_arg: str | None =
     gpu_names = [g["name"] for g in used] or ([static["gpu_name"]] if static.get("gpu_name") else [])
     m = status.get("machine") or {}
     vram_mib = (m.get("gpu") or {}).get("total_mib") or None
-    # #2001: the server names the cards it reads (" + " between them).  A name nvidia-smi does not list means the
-    # engine runs on another vendor's card (an Intel Arc beside a GeForce): the server's names are the right ones, and
-    # so is its VRAM total - the PC's NVIDIA cards were not used.
-    served = [n for n in (static.get("gpu_name") or "").split(" + ") if n and n != "?"]
-    if served and not all(n in {g["name"] for g in local["gpus"]} for n in served):
-        gpu_names, used = served, []
-        local = {**local, "cuda": None}            # the PC's CUDA belongs to cards the engine did not use
-    elif used and used[0].get("vram_mib"):
+    if used and used[0].get("vram_mib"):
         vram_mib = sum(g.get("vram_mib") or 0 for g in used)
     n_ctx = None
     for d in models.get("data") or []:
         n_ctx = (d.get("meta") or {}).get("n_ctx") or n_ctx
     n_ctx = n_ctx or (props.get("default_generation_settings") or {}).get("n_ctx")
     return {
-        "gpu": gpu_names, "gpu_vram_mib": vram_mib, "gpu_driver": (used[0].get("driver") if used else local.get("rocm_driver")),
+        "gpu": gpu_names, "gpu_vram_mib": vram_mib, "gpu_driver": used[0].get("driver") if used else None,
         "cuda": local.get("cuda"), "cpu": static.get("cpu_name") or cpu_name(), "cpu_cores": static.get("cores"),
         "cpu_threads": static.get("threads") or os.cpu_count(), "ram_gib": total_ram_gib(),
-        "os": f"{platform.system()} {platform.release()} ({platform.version()})" if os.name == "nt" else f"{platform.system()} {platform.release()}",
+        "os": f"{platform.system()} {platform.release()}",
         "python": platform.python_version(),
         "strata_version": project_version(), "strata_commit": git_commit(),
         "engine_version": (eng.get("version") or status.get("engine") or str(props.get("build_info", "")).replace("Strata ", "") or None),
         "model": view.get("model_name") or status.get("model") or props.get("model_alias"),
         "quant": detect_quant(view) if view else None,
-        "context": n_ctx or eng.get("max_context"), "parallel_slots": props.get("total_slots"),
+        "context": n_ctx or eng.get("max_context"),
         "config": view, "launch": launch_line(view) if view else None,
         "engine_info": {k: v for k, v in eng.items() if isinstance(v, (str, int, float, bool, dict)) and k not in ("model_path",)},
-        "vram_after": (status.get("vram") or {}),
     }
 
 
 # --------------------------------------------------------------------------------------------------- the server
 def find_configs(folder: Path = ROOT) -> list[Path]:
+    """The model configs setup wrote (strata-glm-<size>.json), the newest first.  The server keeps a config's Chat
+    settings beside it as strata-glm-<size>.shared-settings.json: no config."""
     out = []
-    for p in folder.glob("strata-*.json"):
+    for p in folder.glob("strata-glm-*.json"):
         if p.name.endswith(".shared-settings.json"):
             continue
         try:
@@ -656,35 +662,7 @@ def is_strata(base: str, key: str) -> bool:
     return bool(h and h.get("service") == "strata")
 
 
-def without_profile_save(cfg: dict) -> tuple[dict, bool]:
-    """#2088: the config without `--expert-profile-save FILE` (and its value) - the engine writes that profile when the
-    server quits, and a benchmark's short prompts must not replace the user's calibrated one.  -> (config, removed)."""
-    args = list(cfg.get("args") or [])
-    out, i, removed = [], 0, False
-    while i < len(args):
-        if args[i] == "--expert-profile-save":
-            i, removed = i + 2, True
-        elif isinstance(args[i], str) and args[i].startswith("--expert-profile-save="):
-            i, removed = i + 1, True
-        else:
-            out.append(args[i])
-            i += 1
-    return ({**cfg, "args": out} if removed else cfg), removed
-
-
 def start_server(cfg_path: Path, port: int, gpu: str | None, log_path: Path):
-    try:
-        cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
-        cfg = None
-    if isinstance(cfg, dict):
-        safe, removed = without_profile_save(cfg)
-        if removed:                       # a copy beside the log: the user's config file is not touched
-            print("Note: the bench starts this model without --expert-profile-save, so its short prompts do not "
-                  "overwrite your saved expert profile.", file=sys.stderr)
-            tmp = log_path.with_suffix(".config.json")
-            tmp.write_text(json.dumps(safe), encoding="utf-8")
-            cfg_path = tmp
     cmd = [sys.executable, str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config", str(cfg_path), "--port", str(port)]
     if gpu:
         cmd += ["--gpu", gpu]
@@ -722,7 +700,7 @@ def log_excerpt(path: Path, limit: int = 80) -> list[str]:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return []
-    keep = re.compile(r"(?i)expert cache|slots|vram|ready|resident|kv |context|backend|gpu|prefill|mtp|spec|batch|version|hit")
+    keep = re.compile(r"(?i)model:|loaded in|warming|expert|vram|ready|resident|context|backend|gpu|version|hit")
     out = [x for x in lines if keep.search(x) and "[strata] done:" not in x]
     return out[:limit]
 
@@ -812,8 +790,8 @@ def render_readme(res: dict) -> str:
          "- Background workloads and power limits: not recorded", "",
          "## Model and configuration", "",
          f"- Model and quantization: {model}",
-         f"- Context: {mc.get('context') or 'not read'} tokens; parallel slots: {mc.get('parallel_slots') or 1}",
-         f"- Settings: the install's own configuration, unchanged{' (' + mc['config']['backend'] + ' backend)' if mc.get('config', {}).get('backend') else ''}; thinking "
+         f"- Context: {mc.get('context') or 'not read'} tokens",
+         f"- Settings: the install's own configuration, unchanged; thinking "
          f"{'on' if p['think'] else 'off'} for the suite; temperature 0", ""]
     if mc.get("launch"):
         L += ["```text", mc["launch"], "```", ""]
@@ -825,14 +803,14 @@ def render_readme(res: dict) -> str:
           f"({'started by the benchmark from the install configuration' if p['started_server'] else 'already running'}); model loading is not "
           f"timed. One warm-up chat and a 1K prompt are discarded first. Every prompt starts with a unique tag, so the conversation "
           f"cache cannot help the fresh-prompt tests.", "",
-          f"- short chat: the three questions of `tools/ab_engine.py`, up to {CHAT_MAX_TOKENS} new tokens, {p['runs']} runs",
+          f"- short chat: three fixed questions, up to {CHAT_MAX_TOKENS} new tokens, {p['runs']} runs",
           f"- 4K / 16K{' / 32K' if 'prompt' in res['results'] and '32K' in res['results']['prompts'] else ''} prompts: generated word lists sized by a calibration request, "
           f"{LONG_MAX_TOKENS} new tokens, {p['runs']} fresh prompts each",
           f"- agent session: system prompt and four tools, then {AGENT_TURNS} turns that each add about {AGENT_WORDS} words of a project file "
           f"and continue from the model's own earlier answers (the way agent clients resend a conversation), {AGENT_MAX_TOKENS} new tokens per turn, "
           f"{p['runs']} sessions; the cache numbers come from the answer's usage (`cached_tokens`) and timings (`prompt_n`)",
           "- concurrency (when run): N requests sent at the same moment, total tokens over the wall time of the burst, "
-          "latency over all requests", "",
+          "latency over all requests (the server answers one request at a time; the others wait their turn)", "",
           "## Results", ""]
     L += results_table(out)
     L += ["", "Ranges are the lowest and highest of the runs; `Runs` counts requests that returned a token."]
@@ -850,7 +828,7 @@ def render_readme(res: dict) -> str:
         L += ["", f"### Concurrency: {cl['clients']} clients", "",
               f"Total {fmt(cl.get('total_tps'), 1, ' tok/s')}; first token p50 {cl.get('ttft_p50_s')} s, p95 {cl.get('ttft_p95_s')} s; "
               f"request latency p50 {cl.get('latency_p50_s')} s, p95 {cl.get('latency_p95_s')} s; errors {cl.get('errors')}. "
-              f"Server parallel slots: {mc.get('parallel_slots') or 1} (requests beyond that wait their turn)."]
+              f"The server answers one request at a time; the others wait their turn."]
     if out["skipped"] or out["failures"]:
         L += ["", "### Skipped and failed", ""]
         L += [f"- skipped {k}: {v}" for k, v in out["skipped"].items()]
@@ -858,7 +836,7 @@ def render_readme(res: dict) -> str:
     L += ["", "Per-request data: `results.json`. Engine log lines from the start: `engine-log-excerpt.txt` (when this run started the server).", "",
           "## Correctness and limitations", "",
           "Not measured: this is a speed suite. The conversation uses the model's own replies, so token counts differ a little between runs. "
-          "Machine details come from the server, `nvidia-smi`/`rocm-smi` and the OS; background load and power limits are not recorded. "
+          "Machine details come from the server, `nvidia-smi` and the OS; background load and power limits are not recorded. "
           f"Total time of the suite: {res['elapsed_s']:.0f} s.", ""]
     return "\n".join(L)
 
@@ -908,11 +886,12 @@ def write_results(res: dict, parent: Path, red, log_lines: list[str]) -> Path:
 # --------------------------------------------------------------------------------------------------------- main
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Measure this Strata install and write a shareable report (see the top of this file).")
-    ap.add_argument("--config", help="the model config to run (default: the newest strata-*.json of this folder)")
-    ap.add_argument("--url", help="use the server already running at this address (http://127.0.0.1:8080) instead of starting one")
-    ap.add_argument("--port", type=int, help="the port to start the server on (default: the config's)")
+    ap.add_argument("--config", help="the model config to run (default: the newest strata-glm-*.json of this folder)")
+    ap.add_argument("--url", help="use the server already running at this address (http://127.0.0.1:8101) instead of starting one")
+    ap.add_argument("--port", type=int, help=f"the port to start the server on (default: the config's, else {DEFAULT_PORT})")
     ap.add_argument("--gpu", help="start the server on this GPU only (as the server's --gpu)")
-    ap.add_argument("--api-key", default=os.environ.get("STRATA_KEY", ""), help="the server's API key, if it has one (or STRATA_KEY)")
+    ap.add_argument("--api-key", default=os.environ.get("STRATA_API_KEY") or os.environ.get("STRATA_KEY", ""),
+                    help="the server's API key, if it has one (or STRATA_API_KEY, the server's own variable, or STRATA_KEY)")
     ap.add_argument("--runs", type=int, default=3, help="runs per test (default 3)")
     ap.add_argument("--clients", type=int, default=0, metavar="N", help="also send N requests at once")
     ap.add_argument("--long", action="store_true", help="also a prompt of about 32,768 tokens")
@@ -944,15 +923,15 @@ def main(argv=None) -> int:
                 if len(found) > 1:
                     say(f"Several models are installed; using {cfg_path.name} (the one used last). Pick another with --config FILE.")
         if cfg_path is None or not cfg_path.is_file():
-            print("No Strata model is set up in this folder: run START-HERE.bat (Windows) or ./setup.sh (Linux) first, "
-                  "or give --url of a running server.", file=sys.stderr)
+            print("No Strata model is set up in this folder: run ./setup.sh first, or give --url of a running server.",
+                  file=sys.stderr)
             return 2
         cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
     key = a.api_key or ((cfg or {}).get("api_key") or "")
     if a.url:
         base = a.url.rstrip("/")
     else:
-        port = a.port or int(cfg.get("port", 8080))
+        port = a.port or int(cfg.get("port") or DEFAULT_PORT)
         base = f"http://127.0.0.1:{port}"
     red = redactor(key=key)
     started = False
@@ -977,9 +956,8 @@ def main(argv=None) -> int:
         t0 = time.time()
         pre = collect_machine(base, key, cfg, a.gpu)
         suite = Suite(base, key, pre.get("context"), max(1, a.runs), a.think, log=say, want_clients=a.clients, want_long=a.long)
-        slots = pre.get("parallel_slots") or 1
-        if a.clients and a.clients > slots:
-            say(f"Note: the server runs {slots} request(s) at a time (--batch), so {a.clients} clients will partly wait their turn.")
+        if a.clients > 1:
+            say(f"Note: the server answers one request at a time, so the {a.clients} clients partly wait their turn.")
         say("Running the suite (about 3-10 minutes) ...")
         out = suite.run()
         machine = collect_machine(base, key, cfg, a.gpu)      # again: VRAM and the cache after the work
@@ -1004,9 +982,8 @@ def main(argv=None) -> int:
             shown = d.relative_to(ROOT)
         except ValueError:
             shown = d
-        say(f"\nReport: {shown / 'README.md'}\nShare it: open a pull request that adds the folder {shown} (see docs/COMMUNITY_BENCHMARKS.md), "
-            f"or paste README.md into a GitHub issue. Home folders, user and host names and IP addresses are already replaced; "
-            f"read it once before you share it.")
+        say(f"\nReport: {shown / 'README.md'}\nShare it: paste README.md into a GitHub issue. Home folders, user and host "
+            f"names and IP addresses are already replaced; read it once before you share it.")
         return 1 if out["failures"] and not any(out[k] for k in ("chat", "prompts", "agent")) else 0
     finally:
         if started:

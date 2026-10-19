@@ -34,14 +34,14 @@ def tokenizer(cls=ST.Tokenizer, specials=True, merges=False):
         tokens.append(left + right)
         types.append(1)
     if specials:
-        tokens += ["<think>", "</think>", "<|im_start|>", "<|im_end|>"]
+        tokens += ["<think>", "</think>", "<|user|>", "<|assistant|>"]
         types += [4, 4, 3, 3]
     return cls(tokens, rules, types)
 
 
 class PlainSpans(unittest.TestCase):
     def test_boundaries_overlaps_order_and_no_input_mutation(self):
-        text = "🙂 a<think>literal</think> b<|im_start|>x<|im_end|><think>z"
+        text = "🙂 a<think>literal</think> b<|user|>x<|assistant|><think>z"
         first = text.index("<think>")
         spans_cases = [[], [(first, first + 1)], [(first + 1, first + 7)],
                        [(0, first)], [(0, first + 1)], [(0, len(text))],
@@ -60,7 +60,7 @@ class PlainSpans(unittest.TestCase):
 
     def test_whole_protected_text_is_literal_bytes(self):
         t = tokenizer()
-        text = "<think>日本語🙂</think><|im_start|>"
+        text = "<think>日本語🙂</think><|user|>"
         expected = [t.ids[ST.BYTE_TO_UNICODE[b]] for b in text.encode("utf-8")]
         for parse_special in (False, True):
             self.assertEqual(t.encode(text, parse_special, plain=[(0, len(text))]), expected)
@@ -69,7 +69,7 @@ class PlainSpans(unittest.TestCase):
     def test_randomized_spans_match_reference(self):
         rng = random.Random(1031)
         actual, reference = tokenizer(merges=True), tokenizer(ReferenceTokenizer, merges=True)
-        pieces = ["<think>", "</think>", "<|im_start|>", "<|im_end|>", "plain", " café🙂 ", "\n"]
+        pieces = ["<think>", "</think>", "<|user|>", "<|assistant|>", "plain", " café🙂 ", "\n"]
         for _ in range(200):
             text = "".join(rng.choice(pieces) for _ in range(30))
             spans = [(rng.randrange(-5, len(text) + 5), rng.randrange(-5, len(text) + 5))
@@ -79,7 +79,7 @@ class PlainSpans(unittest.TestCase):
                                  reference.encode(text, parse_special, plain=spans))
 
     def test_one_shot_iterables_preserve_consumption_behavior(self):
-        text = "<think>a</think><|im_start|>b<|im_end|>"
+        text = "<think>a</think><|user|>b<|assistant|>"
         spans = [(10, 30), (0, 7), (8, 12)]
         actual, reference = tokenizer(), tokenizer(ReferenceTokenizer)
         for parse_special in (False, True):

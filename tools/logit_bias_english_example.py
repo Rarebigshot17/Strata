@@ -1,81 +1,87 @@
-"""Record the same English greeting request before and after a token ban."""
+#!/usr/bin/env python3
+"""Ban one token through the HTTP API of a running Strata server and check that the ban works and ends with its request.
+
+    python tools/logit_bias_english_example.py --gguf /path/to/the/first/shard.gguf [--url http://127.0.0.1:8101]
+
+The same greedy request ("one English greeting, one word only", thinking off) is sent four times: as it is, with
+`logit_bias` banning the word's token as an object ({"<id>": -100}), the same ban as a pair list ([[<id>, false]]),
+and as it is again.  The token id comes from the model's own tokenizer (tools/strata_tokenizer.py reads it from the
+GGUF; docs/LOGIT_BIAS.md).  It passes when the first answer has the word, both bans give one and the same other
+answer, and the last answer is the first one again (the ban belongs to its request only).  A ban removes one token,
+not the word: the model may still spell it with other tokens, which is reported but not a failure.
+--output DIR writes every request and answer to DIR/rows.json.
+"""
+from __future__ import annotations
+
 import argparse
 import json
-from pathlib import Path
+import os
 import sys
+import urllib.error
 import urllib.request
+from pathlib import Path
 
-ap = argparse.ArgumentParser(description=__doc__)
-for name in ['source', 'config', 'candidate', 'output']:
-    ap.add_argument('--' + name, type=Path, required=True)
-a = ap.parse_args()
-source = a.source.resolve()
-sys.path[:0] = [str(source), str(source / 'tools')]
-from serve.server import StrataEngine, Service, engine_args, child_env, serve
-from serve.frontend import ChatTemplate
-import strata_tokenizer as ST
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from strata_tokenizer import Tokenizer  # noqa: E402
 
-cfg = json.loads(a.config.read_text())
-cfg = {k: v for k, v in cfg.items() if k in ['args', 'tokenizer', 'gpu', 'lib_dirs', 'env']}
-args = list(cfg['args'])
-for flag in ['--conversation-cache-spill-dir', '--conversation-cache-disk-mib', '--mtp']:
-    if flag in args:
-        i = args.index(flag)
-        del args[i:i+2]
-args = [x for x in args if x != '--conversation-cache-disk-only']
-cfg['args'] = args
-tp = Path(cfg['tokenizer'])
-vocab = json.loads((tp / 'vocab.json').read_text())
-tokens = [None] * len(vocab)
-for token, index in vocab.items():
-    tokens[index] = token
-tok = ST.Tokenizer(tokens, (tp / 'merges.txt').read_text().split('\n'),
-                   json.loads((tp / 'token_type.json').read_text()))
-a.output.mkdir(parents=True, exist_ok=True)
 
-class AuditEngine(StrataEngine):
-    def generate(self, *args, **kwargs):
-        self.emitted = []
-        for token in super().generate(*args, **kwargs):
-            if token is not None:
-                self.emitted.append(token)
-            yield token
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--gguf", required=True, help="the model's GGUF (its first shard): the tokenizer")
+    ap.add_argument("--url", default="http://127.0.0.1:8101")
+    ap.add_argument("--api-key", default=os.environ.get("STRATA_API_KEY") or os.environ.get("STRATA_KEY", ""),
+                    help="the server's API key (default $STRATA_API_KEY, or $STRATA_KEY)")
+    ap.add_argument("--word", default="Hello", help="the word to ban: it must be one token of the model")
+    ap.add_argument("--output", type=Path, help="write every request and answer here (rows.json)")
+    a = ap.parse_args(argv)
 
-engine = AuditEngine(str(a.candidate.resolve()), engine_args(cfg), cwd=str(source),
-                     log=str(a.output / 'engine.txt'), env=child_env(cfg))
-server = serve(Service(engine, tok, ChatTemplate(tp / 'chat_template.jinja'),
-                       model_name='bias-validation'), port=0)
-base = dict(model='bias-validation', messages=[dict(role='user', content=
-    'Reply with one English greeting, one word only.')], max_tokens=8,
-    temperature=0, reasoning_effort='none')
-rows = []
-def call(label, **extra):
-    request = dict(base, **extra)
-    req = urllib.request.Request(f'http://127.0.0.1:{server.server_address[1]}/v1/chat/completions',
-        data=json.dumps(request).encode(), headers={'Content-Type': 'application/json'})
-    with urllib.request.urlopen(req, timeout=180) as response:
-        result = json.loads(response.read())
-    row = dict(label=label, request=request, response=result, token_ids=list(engine.emitted))
-    rows.append(row)
-    (a.output / 'rows.json').write_text(json.dumps(rows, indent=2, ensure_ascii=False))
-    print(label, row['token_ids'], result['choices'][0]['message']['content'], flush=True)
-    return row
+    tok = Tokenizer.from_gguf(a.gguf)
+    ids = tok.encode(a.word)
+    print(f"{a.word!r} is token(s) {ids}", flush=True)
+    if len(ids) != 1:
+        print(f"{a.word!r} is not one token of this model: pick another word with --word", file=sys.stderr)
+        return 2
+    banned = ids[0]
+    base = {"model": "strata", "max_tokens": 8, "temperature": 0, "reasoning_effort": "none",
+            "messages": [{"role": "user", "content": "Reply with one English greeting, one word only."}]}
+    headers = {"Content-Type": "application/json", **({"Authorization": "Bearer " + a.api_key} if a.api_key else {})}
+    rows = []
 
-try:
-    hello = tok.encode('Hello', parse_special=False)
-    print('Hello tokenizer IDs:', hello, flush=True)
-    before = call('before')
-    assert len(hello) == 1 and hello[0] in before['token_ids'], 'Choose a prompt whose baseline emits Hello'
-    banned = hello[0]
-    after = call('after-object', logit_bias={str(banned): -100})
-    pairs = call('after-pairs', logit_bias=[[banned, False]])
-    cleared = call('cleared')
-    assert banned not in after['token_ids'] and banned not in pairs['token_ids']
-    assert after['token_ids'] == pairs['token_ids']
-    assert cleared['token_ids'] == before['token_ids']
-    (a.output / 'complete.json').write_text(json.dumps(dict(status='passed', requests=len(rows),
-        token_id=banned, token_text=tok.decode([banned])), indent=2))
-finally:
-    server.shutdown()
-    server.server_close()
-    engine.close()
+    def call(label, **extra):
+        body = dict(base, **extra)
+        req = urllib.request.Request(a.url.rstrip("/") + "/v1/chat/completions", data=json.dumps(body).encode(),
+                                     headers=headers)
+        with urllib.request.urlopen(req, timeout=600) as r:
+            out = json.loads(r.read())
+        text = out["choices"][0]["message"].get("content") or ""
+        rows.append({"label": label, "request": body, "response": out})
+        print(f"{label:12s} {text!r}", flush=True)
+        return text
+
+    try:
+        before = call("before")
+        obj = call("ban-object", logit_bias={str(banned): -100})
+        pairs = call("ban-pairs", logit_bias=[[banned, False]])
+        cleared = call("cleared")
+    except urllib.error.HTTPError as e:
+        print(f"the server refused request {len(rows) + 1}: HTTP {e.code} {e.read()[:300].decode('utf-8', 'replace')}",
+              file=sys.stderr)
+        return 1
+    if a.output:
+        a.output.mkdir(parents=True, exist_ok=True)
+        (a.output / "rows.json").write_text(json.dumps(rows, indent=1, ensure_ascii=False), encoding="utf-8")
+    if a.word not in before:
+        print(f"the answer without a ban does not have {a.word!r}: pick a word the model answers with", file=sys.stderr)
+        return 2
+    checks = {"the ban changes the answer": obj != before,
+              "the object and the pair list ban the same": obj == pairs,
+              "the next request is not biased": cleared == before}
+    for what, ok in checks.items():
+        print(f"{'ok ' if ok else 'BAD'} {what}")
+    if a.word in obj:
+        print(f"note: the banned answer still spells {a.word!r} with other tokens")
+    return 0 if all(checks.values()) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

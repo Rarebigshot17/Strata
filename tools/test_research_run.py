@@ -1,4 +1,4 @@
-"""Offline test of tools/research_run.py against the server's mock engine (no GPU, no pack)."""
+"""Offline test of tools/research_run.py against the server's mock engine (no GPU, no model)."""
 import contextlib
 import io
 import json
@@ -20,9 +20,9 @@ class Recorder(MockEngine):
         super().__init__(*a, **k)
         self.samplings = []
 
-    def generate(self, ids, max_new, sampling, cancel, embeddings=None):
+    def generate(self, ids, max_new, sampling, cancel, *rest, **kw):
         self.samplings.append(dict(sampling))
-        yield from super().generate(ids, max_new, sampling, cancel, embeddings)
+        yield from super().generate(ids, max_new, sampling, cancel, *rest, **kw)
 
 
 class ResearchRun(unittest.TestCase):
@@ -53,25 +53,33 @@ class ResearchRun(unittest.TestCase):
                                       "--json", str(out), *extra])
         return code, json.loads(out.read_text(encoding="utf-8")), buf.getvalue()
 
-    def test_split_run_names_the_prefix_and_reports_every_question(self):
+    def test_split_run_reports_every_question(self):
         self.engine.samplings.clear()
-        code, out, text = self.go("--prefix", "on")
+        code, out, text = self.go()
         self.assertEqual(code, 0, text)
+        self.assertEqual(out["prefix"], "off")
         self.assertEqual([q["q"] for q in out["questions"]], [0, 1, 2])          # the blank line is skipped
         self.assertTrue(all(q["text"] for q in out["questions"]))
         self.assertEqual(len(self.engine.samplings), 3)
-        for s in self.engine.samplings:
-            self.assertEqual(s["strata_prefix"]["tokens"] > 0, True)               # resolved by the server
         self.assertIn("median first token", text)
 
-    def test_prefix_off_and_the_joined_layout(self):
+    def test_request_bodies(self):
+        split = research_run.request_body("DOC", "Q?", "split", True, 64, None)
+        self.assertEqual(split["messages"], [{"role": "user", "content": "DOC"}, {"role": "user", "content": "Q?"}])
+        self.assertEqual(split["strata_prefix"], {"messages": 1})
+        self.assertEqual((split["temperature"], split["max_tokens"], split["stream"]), (0, 64, True))
+        self.assertNotIn("model", split)
+        joined = research_run.request_body("DOC", "Q?", "joined", True, 64, "m")
+        self.assertEqual(joined["messages"], [{"role": "user", "content": "DOC\n\nQuestion: Q?\nAnswer:"}])
+        self.assertEqual((joined["strata_prefix"], joined["model"]), ({"message": 0, "chars": 5}, "m"))
+        self.assertNotIn("strata_prefix", research_run.request_body("DOC", "Q?", "split", False, 64, None))
+
+    def test_the_server_accepts_the_prefix_field_and_the_joined_layout(self):
         self.engine.samplings.clear()
-        self.go("--prefix", "off")
-        self.assertTrue(all("strata_prefix" not in s for s in self.engine.samplings))
-        self.engine.samplings.clear()
-        code, out, _ = self.go("--prefix", "on", "--layout", "joined", "--parallel", "2")
-        self.assertEqual(code, 0)
-        self.assertTrue(all(s["strata_prefix"]["tokens"] > 0 for s in self.engine.samplings))
+        code, out, text = self.go("--prefix", "on", "--layout", "joined", "--parallel", "2")
+        self.assertEqual(code, 0, text)
+        self.assertTrue(all(q["text"] for q in out["questions"]))
+        self.assertEqual(len(self.engine.samplings), 3)
 
     def test_compare(self):
         d = Path(self.dir.name)

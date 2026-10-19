@@ -4,10 +4,10 @@
 The reports are an all-logits NaN (one token repeated, "!!!!") after a request was stopped and the next one, an edit
 or a resend of the same prompt, started while the engine was still winding the first down.  This drives that loop
 against a running server: stream an answer, read a few lines, close the connection (the client's Stop), wait 0 to
-~0.4 s (sometimes not at all, sometimes a second request already running), send the edited prompt, and check the
-answer.  Run the engine with STRATA_DBG_NAN=1 to get the first non-finite layer named in its log.
+~0.4 s (sometimes not at all, sometimes with a second request already sent), send the edited prompt, and check the
+answer.
 
-  STRATA_KEY=... python3 tools/stop_resend_test.py http://127.0.0.1:8090 [rounds=40] [seed=1]
+  STRATA_API_KEY=... python3 tools/stop_resend_test.py http://127.0.0.1:8101 [rounds=40] [seed=1]
 
 Exit 0 when every answer was real text, 1 otherwise.
 """
@@ -20,10 +20,10 @@ import threading
 import time
 import urllib.request
 
-BASE = sys.argv[1].rstrip("/") if len(sys.argv) > 1 else "http://127.0.0.1:8080"
+BASE = sys.argv[1].rstrip("/") if len(sys.argv) > 1 else "http://127.0.0.1:8101"
 ROUNDS = int(sys.argv[2]) if len(sys.argv) > 2 else 40
 SEED = int(sys.argv[3]) if len(sys.argv) > 3 else 1
-KEY = os.environ.get("STRATA_KEY", "")
+KEY = os.environ.get("STRATA_API_KEY") or os.environ.get("STRATA_KEY", "")     # the server's name, or the old one
 URL = BASE + "/v1/chat/completions"
 
 LONG = ["Describe the weather in Montpellier in great detail, at length.",
@@ -75,7 +75,7 @@ def main():
         mode = rnd.choice(("stop-resend", "stop-edit", "overlap"))
         bg = None
         try:
-            if mode == "overlap":                  # the next request is already running while the first one is stopped
+            if mode == "overlap":                  # another request is already sent while the first one is stopped
                 bg = threading.Thread(target=lambda: answer(rnd.choice(LONG), 60))
                 bg.start()
                 time.sleep(rnd.uniform(0, 0.3))

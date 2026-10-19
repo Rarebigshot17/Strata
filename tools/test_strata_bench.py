@@ -2,10 +2,8 @@
 writing and the comparison.  Light: no GPU, no Strata server, a few seconds."""
 from __future__ import annotations
 
-import contextlib
-import io
+import getpass
 import json
-import os
 import sys
 import tempfile
 import threading
@@ -61,10 +59,10 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/v1/models":
             self.send_json({"object": "list", "data": [{"id": "fake", "meta": {"n_ctx": s.ctx}}]})
         elif self.path == "/props":
-            self.send_json({"total_slots": 4, "model_alias": "fake-model", "build_info": "Strata 9.9.9"})
+            self.send_json({"total_slots": 1, "model_alias": "fake-model", "build_info": "Strata 9.9.9"})
         elif self.path == "/v1/status":
             self.send_json({"machine": {"gpu": {"name": "NVIDIA GeForce RTX 9999", "total_mib": 12288}, "ram": {"total_gib": 64.0}},
-                            "engine": "9.9.9", "vram": {"free_mib": 1000}})
+                            "engine": "9.9.9"})
         elif self.path == "/metrics":
             self.send_json({"engine": {"version": "9.9.9", "max_context": s.ctx, "model_path": r"C:\Users\Someone\models\x.gguf"},
                             "hardware_static": {"gpu_name": "NVIDIA GeForce RTX 9999", "cpu_name": "Fake CPU 9", "cores": 8, "threads": 16}})
@@ -169,7 +167,10 @@ class SuiteTests(unittest.TestCase):
 class RedactionTests(unittest.TestCase):
     def test_paths_names_ips_and_keys(self):
         red = B.redactor(extra=["Jane Roe Laptop"], key="sk-secret-123456")
-        user = os.environ.get("USERNAME") or os.environ.get("USER") or "tester"
+        try:
+            user = getpass.getuser()                     # the name the redactor reads; none in some sandboxes
+        except Exception:                               # noqa: BLE001
+            user = ""
         cases = [r"C:\Users\someone_else\models\a.gguf", "/home/bob/strata/x.json", "/Users/alice/Library",
                  "peer 192.168.1.20 and 10.0.0.7 and 100.101.102.103", "Authorization: Bearer abcdefghijkl12345",
                  "key sk-secret-123456 here", "name Jane Roe Laptop"]
@@ -179,7 +180,7 @@ class RedactionTests(unittest.TestCase):
             self.assertNotIn(s, text)
         self.assertIn("<user>", text)
         self.assertIn("<ip>", text)
-        self.assertEqual(red("127.0.0.1:8080 and version 0.1.40.3 and driver 32.0.15.7"), "127.0.0.1:8080 and version 0.1.40.3 and driver 32.0.15.7")
+        self.assertEqual(red("127.0.0.1:8101 and version 0.1.40.3 and driver 32.0.15.7"), "127.0.0.1:8101 and version 0.1.40.3 and driver 32.0.15.7")
         self.assertNotIn(str(B.ROOT), red(f"loading {B.ROOT / 'strata-x.json'}"))
         self.assertIn("<strata>", red(f"loading {B.ROOT / 'strata-x.json'}"))
         self.assertNotIn(str(Path.home()), red(f"in {Path.home() / 'data'}"))
@@ -193,16 +194,17 @@ class RedactionTests(unittest.TestCase):
         self.assertEqual(out["n"], 3)
 
     def test_config_view_drops_secrets_and_cuts_paths(self):
-        cfg = {"exe": r"C:\Users\me\Strata\engine\strata.exe", "args": ["--native", "/home/me/models/m-IQ3_XXS.gguf", "--ctx", "65536"],
-               "api_key": "hunter2", "model_name": "Fake Model", "log": "/tmp/x.log", "port": 8080,
+        cfg = {"exe": "/home/me/Strata/build/strata-glm", "args": ["-m", "/home/me/models/m-UD-IQ3_XXS-00001-of-00004.gguf",
+                                                                    "--ctx", "65536"],
+               "api_key": "hunter2", "model_name": "Fake Model", "log": "/tmp/x.log", "port": 8101,
                "env": {"STRATA_FOO": "/home/me/z", "PATH": "/usr/bin", "STRATA_TOKEN": "t"}}
         v = B.config_view(cfg)
-        self.assertEqual(v["exe"], "strata.exe")
-        self.assertEqual(v["args"], ["--native", "m-IQ3_XXS.gguf", "--ctx", "65536"])
+        self.assertEqual(v["exe"], "strata-glm")
+        self.assertEqual(v["args"], ["-m", "m-UD-IQ3_XXS-00001-of-00004.gguf", "--ctx", "65536"])
         self.assertNotIn("api_key", v)
         self.assertNotIn("log", v)
         self.assertEqual(v["env"], {"STRATA_FOO": "z"})
-        self.assertEqual(B.detect_quant(v), "IQ3_XXS")
+        self.assertEqual(B.detect_quant(v), "UD-IQ3_XXS")
         self.assertNotIn("hunter2", json.dumps(v))
 
 
@@ -287,36 +289,28 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(B.gpu_slug({"gpu": [b, b]}), "2x-rtx-a4000")
         self.assertEqual(B.gpu_slug({"gpu": [b, a, b]}), "2x-rtx-a4000-plus-rtx-5070-ti")
 
-    def test_a_card_the_pc_s_nvidia_smi_does_not_list_is_the_servers_own(self):
-        """#2001: the engine on an Intel Arc beside a GeForce: the report names the Arc (the name the server reads)."""
-        srv = FakeStrata()
-        self.addCleanup(srv.stop)
-        nv = {"gpus": [{"name": "NVIDIA GeForce RTX 3080 Ti", "vram_mib": 12288, "driver": "560.1"}], "cuda": "12.6"}
-        with mock.patch.object(B, "gpu_info_local", return_value=nv), mock.patch.object(
-                B, "try_json", side_effect=lambda base, path, *a, **k: (
-                    {"hardware_static": {"gpu_name": "Intel Arc Pro B70"}} if path == "/metrics" else {})):
-            m = B.collect_machine(srv.base, "", {"backend": "sycl"})
-        self.assertEqual((m["gpu"], m["cuda"]), (["Intel Arc Pro B70"], None))
+    def test_the_newest_glm_config_is_used_on_the_default_port(self):
+        """setup writes strata-glm-<size>.json; a config without "port" is started on the server's default."""
+        with tempfile.TemporaryDirectory() as d:
+            folder = Path(d)
+            cfg = {"exe": "build/strata-glm", "args": ["-m", "m.gguf", "--ctx", "65536"]}
+            (folder / "strata-glm-full.json").write_text(json.dumps(cfg))
+            (folder / "strata-glm-full.shared-settings.json").write_text(json.dumps(cfg))   # the server's, no config
+            (folder / "strata-iq2_xs.json").write_text(json.dumps(cfg))                     # an older engine's
+            (folder / "strata-glm-notes.json").write_text(json.dumps({"note": 1}))          # no "exe" and "args"
+            self.assertEqual([p.name for p in B.find_configs(folder)], ["strata-glm-full.json"])
+            started = {}
 
-    def test_a_bench_server_never_saves_over_the_users_profile(self):
-        """#2088: --expert-profile-save writes the profile at quit; the bench's own server runs without it."""
-        cfg = {"args": ["--expert-profile", "p.bin", "--expert-profile-save", "p.bin", "--spec", "4"]}
-        safe, removed = B.without_profile_save(cfg)
-        self.assertTrue(removed)
-        self.assertEqual(safe["args"], ["--expert-profile", "p.bin", "--spec", "4"])
-        self.assertEqual(cfg["args"][3], "p.bin")                       # the input is not changed
-        safe, removed = B.without_profile_save({"args": ["--expert-profile-save=p.bin", "--spec", "4"]})
-        self.assertEqual((safe["args"], removed), (["--spec", "4"], True))
-        same = {"args": ["--spec", "4"]}
-        self.assertEqual(B.without_profile_save(same), (same, False))
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
-            c = Path(d) / "strata-x.json"
-            c.write_text(json.dumps(cfg))
-            with mock.patch.object(B.subprocess, "Popen") as popen, contextlib.redirect_stderr(io.StringIO()):
-                B.start_server(c, 8080, None, Path(d) / "run.log")
-            used = Path(popen.call_args[0][0][popen.call_args[0][0].index("--config") + 1])
-            self.assertNotIn("--expert-profile-save", json.loads(used.read_text())["args"])
-            self.assertIn("--expert-profile-save", json.loads(c.read_text())["args"])   # the user's file is as it was
+            def start(cfg_path, port, gpu, log_path):
+                started.update(port=port, cfg=cfg_path)
+                return mock.Mock(poll=lambda: 1)
+            with mock.patch.object(B, "find_configs", return_value=[folder / "strata-glm-full.json"]), \
+                    mock.patch.object(B, "try_json", return_value=None), \
+                    mock.patch.object(B, "start_server", side_effect=start), \
+                    mock.patch.object(B, "stop_server"), mock.patch("sys.stderr"):
+                self.assertEqual(B.main(["--quiet", "--ready-timeout", "1"]), 1)     # the fake server never gets ready
+            self.assertEqual(started, {"port": B.DEFAULT_PORT, "cfg": folder / "strata-glm-full.json"})
+            self.assertEqual(B.DEFAULT_PORT, 8101)
 
     def test_an_attached_server_is_not_stopped(self):
         """#2088: with --url the bench only reads; the server it did not start keeps running."""
@@ -327,13 +321,11 @@ class ReportTests(unittest.TestCase):
         stop.assert_not_called()
 
     def test_names(self):
-        m = {"gpu": ["NVIDIA GeForce RTX 3060"], "model": "Qwen3.8 Flash-Next", "quant": "IQ3_XXS"}
-        self.assertEqual(B.results_dir_name(m, "2026-10-10"), "2026-10-10-community-rtx-3060-qwen3-8-flash-next-iq3-xxs")
-        m["model"] = "qwen-iq3_xxs"                                      # a quant already in the name is not added twice
-        self.assertEqual(B.results_dir_name(m, "2026-10-10"), "2026-10-10-community-rtx-3060-qwen-iq3-xxs")
+        m = {"gpu": ["NVIDIA GeForce RTX 3060"], "model": "GLM-5.3-Flash", "quant": "UD-IQ3_XXS"}
+        self.assertEqual(B.results_dir_name(m, "2026-10-10"), "2026-10-10-community-rtx-3060-glm-5-3-flash-ud-iq3-xxs")
+        m["model"] = "glm-ud-iq3_xxs"                                    # a quant already in the name is not added twice
+        self.assertEqual(B.results_dir_name(m, "2026-10-10"), "2026-10-10-community-rtx-3060-glm-ud-iq3-xxs")
         self.assertEqual(B.gpu_slug({"gpu": ["A B 4090", "A B 4090"]}), "2x-a-b-4090")
-        m["model"] = "qwen-iq3_xxs"                                      # a quant already in the name is not added twice
-        self.assertEqual(B.results_dir_name(m, "2026-10-10"), "2026-10-10-community-rtx-3060-qwen-iq3-xxs")
         self.assertEqual(B.gpu_slug({"gpu": []}), "cpu")
 
     def test_no_server_is_an_error_not_a_crash(self):

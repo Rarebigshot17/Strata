@@ -1,10 +1,10 @@
 """tools/strata_tokenizer.py - the tokenizer, as the reference implementation of record.
 
 WHY THIS EXISTS AND WHERE IT SITS.  The GGUF carries the whole tokenizer in metadata: `tokenizer.ggml.model`
-= `gpt2`, 248,320 `tokens`, 247,587 `merges`, `token_type`, `pre` = `qwen35`, and a Jinja `chat_template`.
-None of that needs the 35 GB of weights, so it is extracted into the pack's `tokenizer/` directory
-(docs/pack-format.md §6) and this module is what reads it back.  A C++ port follows and is tested against
-this one.
+= `gpt2`, the `tokens`, the `merges`, `token_type`, the pre-tokenizer's name `pre` (`glm5` for GLM-5.x), and a
+Jinja `chat_template`.  None of that needs the weights: the server reads it from the first shard's header
+(Tokenizer.from_gguf, or its own copy of that constructor) and this module tokenizes with it the way llama.cpp
+does (tools/glm53_tokcheck.py compares the two).
 
 THE DECISIVE PROPERTY IS THE ROUND TRIP.  Byte-level BPE maps each BYTE to a printable unicode character so
 that any UTF-8 input is representable with no UNK token.  Every failure mode of that mapping - the wrong
@@ -44,15 +44,15 @@ BYTE_TO_UNICODE = bytes_to_unicode()
 UNICODE_TO_BYTE = {v: k for k, v in BYTE_TO_UNICODE.items()}
 
 # The `qwen35` pre-tokenizer, transcribed from the ORACLE rather than from the family resemblance:
-# `.ref/llama.cpp/src/llama-vocab.cpp` L396, `case LLAMA_VOCAB_PRE_TYPE_QWEN35`.  The commented-out line
+# llama.cpp's `src/llama-vocab.cpp`, `case LLAMA_VOCAB_PRE_TYPE_QWEN35`.  The commented-out line
 # above it is the `tokenizer.json` original, and llama.cpp's active version differs from it - it spells the
 # contraction classes out instead of using `(?i:...)`, which is behaviourally the same.
 #
-# THE `\p{M}` IS THE WHOLE POINT OF THIS BEING TRANSCRIBED.  The QWEN3 pattern two cases earlier (L389) is
+# THE `\p{M}` IS THE WHOLE POINT OF THIS BEING TRANSCRIBED.  The QWEN3 pattern two cases earlier is
 # the same shape with `\p{L}` where this has `[\p{L}\p{M}]` and without `\p{M}` in the punctuation negation.
 # Writing the QWEN3 pattern for `qwen35` looks right, round-trips perfectly, and is wrong: a combining mark
 # is `\p{M}`, so without it the mark gets swallowed into the following punctuation run and a token like `_j`
-# never forms.  It cost 3 strings out of 1875 and only `tokenize_oracle_check` could see it.
+# never forms.  It cost 3 strings out of 1875 and only a comparison with llama.cpp's tokenizer could see it.
 QWEN35_PATTERN = (
     r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])"
     r"|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+"
@@ -65,8 +65,8 @@ QWEN35_PATTERN = (
 
 
 # GLM-4.x / GLM-5.x (`pre` = glm4, glm5, chatglm-bpe): llama.cpp's LLAMA_VOCAB_PRE_TYPE_CHATGLM4 (src/llama-vocab.cpp),
-# the Llama-3 pattern with digits in runs of up to three. Those vocabularies also set ignore_merges: a piece that is a
-# whole token is that token, without BPE.
+# the Llama-3 pattern with digits in runs of up to three.  glm4 and glm5 also set ignore_merges (a piece that is a
+# whole token is that token, without BPE); chatglm-bpe, the older name, does not (llama_vocab::impl::load).
 GLM4_PATTERN = (
     r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])"
     r"|[^\r\n\p{L}\p{N}]?\p{L}+"
@@ -77,11 +77,31 @@ GLM4_PATTERN = (
     r"|\s+"
 )
 GLM_PRE = ("glm4", "glm5", "chatglm-bpe")
+IGNORE_MERGES_PRE = ("glm4", "glm5")
+
+# llama.cpp's LLAMA_VOCAB_PRE_TYPE_DEFAULT (the `default:` case of llm_tokenizer_bpe), which it uses for a byte-level
+# BPE GGUF without tokenizer.ggml.pre, warning that generation quality will be degraded.  Four patterns, applied one
+# after another (unicode_regex_split): each one splits every piece the previous ones made, and the text between its
+# matches stays a piece of its own.  No ignore_merges.
+DEFAULT_PATTERNS = (
+    r"[\p{P}\$\+<=>\^~\|]+",
+    r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)",
+    r"\p{N}+",
+    r"[0-9][0-9][0-9]",
+)
+
+# pre -> (the patterns in the order they split, where llama.cpp has them)
+PRE_TYPES = {
+    "qwen35": ((QWEN35_PATTERN,), "llama.cpp src/llama-vocab.cpp, LLAMA_VOCAB_PRE_TYPE_QWEN35"),
+    **{pre: ((GLM4_PATTERN,), "llama.cpp src/llama-vocab.cpp, LLAMA_VOCAB_PRE_TYPE_CHATGLM4") for pre in GLM_PRE},
+    "default": (DEFAULT_PATTERNS, "llama.cpp src/llama-vocab.cpp, LLAMA_VOCAB_PRE_TYPE_DEFAULT"),
+}
 
 
 class Tokenizer:
+    # `pre` defaults to GLM-5.x's own; from_gguf passes the GGUF's (a vocabulary built by hand names its own)
     def __init__(self, tokens: list[str], merges: list[str], token_types: list[int] | None = None,
-                 pre: str = "qwen35", special_ids: dict[str, int] | None = None):
+                 pre: str = "glm5", special_ids: dict[str, int] | None = None):
         self.tokens = tokens
         self.pre = pre
         self.token_types = token_types
@@ -101,21 +121,27 @@ class Tokenizer:
             if parts[0] not in self.ids or parts[1] not in self.ids:
                 raise ValueError("merge %d names a token outside the vocabulary: %r" % (i, m))
             self.ranks[(parts[0], parts[1])] = i
-        self.ignore_merges = pre in GLM_PRE
-        self._re = regex.compile(GLM4_PATTERN if pre in GLM_PRE else QWEN35_PATTERN)
+        if pre not in PRE_TYPES:
+            # llama.cpp refuses an unknown pre-tokenizer too: guessing one gives plausible but wrong ids
+            raise ValueError("unknown pre-tokenizer type %r (known: %s)" % (pre, ", ".join(PRE_TYPES)))
+        self.ignore_merges = pre in IGNORE_MERGES_PRE
+        self.pre_patterns = PRE_TYPES[pre][0]
+        self._res = [regex.compile(x) for x in self.pre_patterns]
 
         # The literals matched directly instead of being run through BPE.  GGUF token types: 3 = CONTROL,
         # 4 = USER_DEFINED.  The two classes behave DIFFERENTLY and llama.cpp's own tokenizer settled which:
         #
         #   * type 4 (USER_DEFINED: `<think>`, `<tool_call>`, `<tool_response>`, ...) is matched ALWAYS,
         #     with or without parse_special.
-        #   * type 3 (CONTROL: `<|im_start|>`, `<|im_end|>`, `<|endoftext|>`, ...) is matched ONLY when
+        #   * type 3 (CONTROL: `<|user|>`, `<|assistant|>`, `<|endoftext|>`, ...) is matched ONLY when
         #     parse_special is set.
         #
         # Measured, not assumed: with parse_special=False the oracle still emitted `<tool_response>` as one
         # token and mine emitted four, and the three disagreements were exactly the type-4 cases while every
         # type-3 case agreed.  Treating both classes alike costs 3 strings in 1229 and silently changes a chat
-        # prompt, because `<|im_end|>` decomposed into ordinary pieces is not the token the model expects.
+        # prompt, because `<|user|>` decomposed into ordinary pieces is not the token the model expects.
+        # Their text is stored as plain text, not byte-mapped (llama.cpp's converter writes added tokens decoded),
+        # which is why token_bytes returns it as UTF-8.
         self.special_tokens: dict[str, int] = {}
         if token_types:
             for i, ty in enumerate(token_types):
@@ -123,7 +149,7 @@ class Tokenizer:
                     self.special_tokens[tokens[i]] = i
         always = [t for t, i in self.special_tokens.items() if token_types and token_types[i] == 4]
         self.control_tokens = [t for t, i in self.special_tokens.items() if token_types and token_types[i] == 3]
-        # Longest literal first, or `<|im_end|>` could match a shorter prefix of itself.  `regex.escape` so a
+        # Longest literal first, or `<|user|>` could match a shorter prefix of itself.  `regex.escape` so a
         # token containing regex metacharacters (several do: `<|`, `[`, `(`) is matched literally.
         self._always_re = self._alt(always)
         self._special_re = self._alt(list(self.special_tokens))
@@ -141,6 +167,11 @@ class Tokenizer:
     # -------------------------------------------------------------- constructors
     @classmethod
     def from_gguf(cls, path) -> "Tokenizer":
+        """The tokenizer of a GGUF (its first shard).  `pre` is tokenizer.ggml.pre.  A GGUF without that key gets
+        what llama.cpp gives it: the `default` pre-tokenizer (DEFAULT_PATTERNS, no ignore_merges), with which
+        llama.cpp warns that generation quality will be degraded.  GLM's converters always write the key (glm4 or
+        glm5), so a GLM GGUF without it was written by another tool; llama.cpp does not guess the model from the
+        architecture, and neither does this."""
         sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
         from gguf_reader import GGUFFile
         md = GGUFFile(pathlib.Path(path)).metadata
@@ -155,7 +186,7 @@ class Tokenizer:
                    if k.startswith("tokenizer.ggml.") and k.endswith("_token_id")}
         return cls(list(md["tokenizer.ggml.tokens"]), list(md["tokenizer.ggml.merges"]),
                    list(md.get("tokenizer.ggml.token_type") or []) or None,
-                   md.get("tokenizer.ggml.pre", "qwen35"), special)
+                   md.get("tokenizer.ggml.pre") or "default", special)
 
     # -------------------------------------------------------------- the algorithm
     def _bpe(self, word: str) -> list[str]:
@@ -230,12 +261,33 @@ class Tokenizer:
 
     PIECE_CACHE_MAX = 200_000    # pre-tokenizer pieces remembered (an agent resends its whole history every turn)
 
+    def pieces(self, text: str) -> list[str]:
+        """The pre-tokenizer's pieces of `text`.  With one pattern they are its matches; with several each splits
+        the pieces of the ones before it, and what lies between its matches is a piece too (llama.cpp's
+        unicode_regex_split, which keeps every character)."""
+        if len(self._res) == 1:
+            return self._res[0].findall(text)
+        out = [text] if text else []
+        for pat in self._res:
+            split = []
+            for piece in out:
+                pos = 0
+                for m in pat.finditer(piece):
+                    if m.start() > pos:
+                        split.append(piece[pos:m.start()])
+                    split.append(m.group(0))
+                    pos = m.end()
+                if pos < len(piece):
+                    split.append(piece[pos:])
+            out = split
+        return out
+
     def _encode_plain(self, text: str) -> list[int]:
         out: list[int] = []
         # A piece's ids depend on the piece alone, so repeated pieces (most of a resent conversation) are looked up
         # instead of merged again.  The ids are the ones _bpe gives: this only skips the work.
         cache = self._piece_ids
-        for piece in self._re.findall(text):
+        for piece in self.pieces(text):
             got = cache.get(piece)
             if got is None:
                 mapped = "".join(BYTE_TO_UNICODE[b] for b in piece.encode("utf-8"))
@@ -256,7 +308,7 @@ class Tokenizer:
 
         The split happens on the RAW text, before the byte mapping, because a special token's string is a
         literal to match rather than bytes to decompose.  Everything between the matches is tokenized
-        normally - which is why a near-miss like `<|im_star` still costs ordinary tokens.  A match that starts
+        normally - which is why a near-miss like `<|use` still costs ordinary tokens.  A match that starts
         inside one of the `plain` (start, end) spans is left to the text around it (#537).
         """
         if pat is None:
@@ -293,7 +345,7 @@ class Tokenizer:
     def encode(self, text: str, parse_special: bool = False, plain=()) -> list[int]:
         """Tokenize `text`.
 
-        `parse_special` controls only the type-3 CONTROL literals such as `<|im_end|>`; the type-4
+        `parse_special` controls only the type-3 CONTROL literals such as `<|user|>`; the type-4
         USER_DEFINED ones such as `<think>` are matched either way.  See the note in `__init__`.
         `plain`: (start, end) spans of `text` that are ordinary text even where they spell a literal - a
         `</think>` quoted in a message (#537) - and are tokenized with the text around them.
@@ -301,12 +353,17 @@ class Tokenizer:
         return self._encode_matching(text, self._special_re if parse_special else self._always_re, plain)
 
     def token_bytes(self, i: int) -> bytes:
-        """The raw bytes of one token (a multi-byte character can be split across tokens)."""
+        """The raw bytes of one token (a multi-byte character can be split across tokens).  A CONTROL or
+        USER_DEFINED token (type 3 or 4) is its text in UTF-8, as llama.cpp's token_to_piece gives it: those are
+        stored as plain text, so a space or a non-ASCII letter in one is not a byte-mapped character."""
         cache = self._bytes_cache
         b = cache.get(i)
         if b is None:
             if i < 0 or i >= len(self.tokens):
                 raise IndexError("token id %d is outside the vocabulary (%d)" % (i, len(self.tokens)))
+            if self.token_types and i < len(self.token_types) and self.token_types[i] in (3, 4):
+                b = cache[i] = self.tokens[i].encode("utf-8")
+                return b
             raw = bytearray()
             for ch in self.tokens[i]:
                 v = UNICODE_TO_BYTE.get(ch)
@@ -320,9 +377,10 @@ class Tokenizer:
         return b"".join(self.token_bytes(i) for i in ids).decode("utf-8", errors=errors)
 
 
-# ------------------------------------------------------------------ the pack's tokenizer/ directory
+# ------------------------------------------------------------------ a tokenizer/ directory
 def extract(gguf_path, out_dir) -> dict:
-    """Write the tokenizer into `<out_dir>/tokenizer/` so the engine never opens the weight shards for it."""
+    """Write the GGUF's tokenizer into `<out_dir>/tokenizer/` (vocab.json, merges.txt, token_type.json,
+    tokenizer.json, chat_template.jinja), for a program that should not open the weight shards for it."""
     out = pathlib.Path(out_dir) / "tokenizer"
     out.mkdir(parents=True, exist_ok=True)
     tk = Tokenizer.from_gguf(gguf_path)
@@ -333,17 +391,19 @@ def extract(gguf_path, out_dir) -> dict:
         "n_merges": len(tk.ranks),
         "special_ids": tk.special_ids,
         "add_bos_token": False,
-        # The pattern is SHIPPED, not recomputed by the reader: it is transcribed from llama.cpp for the
-        # declared `pre` type, and a C++ port that re-derived it would be free to get `\p{M}` wrong again.
-        "pre_pattern": QWEN35_PATTERN,
-        "pre_pattern_source": ".ref/llama.cpp src/llama-vocab.cpp L396 (LLAMA_VOCAB_PRE_TYPE_QWEN35)",
+        "ignore_merges": tk.ignore_merges,
+        # The patterns are SHIPPED, not recomputed by the reader: they are transcribed from llama.cpp for the
+        # declared `pre` type, and a port that re-derived them would be free to get `\p{M}` wrong again.  Several
+        # are applied one after another (see Tokenizer.pieces).
+        "pre_patterns": list(tk.pre_patterns),
+        "pre_pattern_source": PRE_TYPES[tk.pre][1],
     }
     (out / "vocab.json").write_text(json.dumps(tk.ids, ensure_ascii=False), encoding="utf-8")
     (out / "merges.txt").write_text("\n".join("%s %s" % k for k, _ in
                                               sorted(tk.ranks.items(), key=lambda kv: kv[1])), encoding="utf-8")
     (out / "token_type.json").write_text(json.dumps(tk.token_types), encoding="utf-8")
     (out / "tokenizer.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=1), encoding="utf-8")
-    # the model's own chat template: fine-tunes change it (Swift 1.5 differs from Qwen3.8-Flash-Next's)
+    # the model's own chat template: fine-tunes change it
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
     from gguf_reader import GGUFFile
     tpl = GGUFFile(pathlib.Path(gguf_path)).metadata.get("tokenizer.chat_template")
