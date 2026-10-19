@@ -52,7 +52,7 @@ python3 setup.py --check
 ```
 
 It ends with `This PC can run GLM-5.3-Flash (<size> recommended)` and exit code 0, or with exit code 1: no NVIDIA GPU
-(`nvidia-smi did not answer`), a driver older than 580, or `neither size fits <N> GB of RAM`.
+(`nvidia-smi did not answer`), a driver older than 580, or `neither size fits <N> GiB of RAM`.
 
 Check the rest by hand:
 
@@ -72,16 +72,16 @@ If the PC does not meet these, tell the user which part is missing and stop. Det
 
 ## 3. Pick the size and the context
 
-Every routed expert stays in RAM. Setup compares the RAM `/proc/meminfo` reports (the `total` of `free -g`) with what
-each size's experts take (calculated, from `setup.py`):
+Every routed expert stays in RAM. Setup compares the RAM `/proc/meminfo` reports (the `total` of `free -g`, in GiB)
+with what each size's experts take in GiB (calculated, from `setup.py`: about 109 GiB at 3-bit, 151 GiB at 4-bit):
 
 | RAM (`free -g`) | Size | Why |
 | --- | --- | --- |
-| 202 GB or more | `--model IQ4_XS` (4-bit) | Its ~162 GB of experts leave 40 GB or more. Setup recommends it. |
-| 174-201 GB | `--model UD-IQ3_XXS` (3-bit) | Recommended. The 4-bit would leave under 40 GB: setup allows it with a warning and gives parked conversations 4096 MiB. |
-| 157-173 GB | `--model UD-IQ3_XXS` | Recommended; the 4-bit does not fit. |
-| 129-156 GB | `--model UD-IQ3_XXS` | Tight: setup warns and gives parked conversations 4096 MiB. Tell the user to close other big programs while it runs. |
-| under 129 GB | none | Neither size fits. Tell the user. Setup can be forced (`--model UD-IQ3_XXS --yes`), but the OS would then read experts from the disk: very slow, or no start at all. |
+| 191 GiB or more | `--model IQ4_XS` (4-bit) | Its ~151 GiB of experts leave 40 GiB or more. Setup recommends it. |
+| 163-190 GiB | `--model UD-IQ3_XXS` (3-bit) | Recommended. The 4-bit would leave under 40 GiB: setup allows it with a warning and gives parked conversations 4096 MiB. A PC with 192 GB installed (about 188 GiB) is here. |
+| 149-162 GiB | `--model UD-IQ3_XXS` | Recommended; the 4-bit does not fit. |
+| 121-148 GiB | `--model UD-IQ3_XXS` | Tight: setup warns and gives parked conversations 4096 MiB. Tell the user to close other big programs while it runs. |
+| under 121 GiB | none | Neither size fits. Tell the user. Setup can be forced (`--model UD-IQ3_XXS --yes`), but the OS would then read experts from the disk: very slow, or no start at all. |
 
 When the repository has no IQ4_XS files, the 4-bit size takes UD-Q4_K_XL instead; setup says so and works out what it
 leaves of the RAM.

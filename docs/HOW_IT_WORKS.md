@@ -65,7 +65,7 @@ instead:
   thinking, so it differs from the engine's state from that point on. The engine restarts from the checkpoint and
   reads the reply and the new message, not the whole conversation. A regenerated reply restarts there too.
 - **Memory.** `--park-mib` caps the RAM that parked conversations and checkpoints use: 8192 MiB by default, 4096
-  when setup finds less than 40 GB of RAM left beside the experts (the 4-bit model on 192 GB). The conversation used
+  when setup finds less than 40 GiB of RAM left beside the experts (the 4-bit model on 192 GB). The conversation used
   least recently goes first. Parking lives in the engine's RAM, so a restart of the engine starts with none.
 
 None of this changes the answers: on the CPU engine, `tools/glm53_park_check.py` checks each resumed reply against

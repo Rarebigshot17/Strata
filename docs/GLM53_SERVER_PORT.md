@@ -170,5 +170,5 @@ models.
 - Whether GLM writes tool calls inside its thinking.
 - The start on napster-ai's SATA SSD: how long the mapping and the layer upload take before the first warm-up line
   (the start watchdog allows 900 s without progress), and how long the warm-up of 117-162 GB takes.
-- The 4-bit model's RAM: about 30 GB left beside its experts on 192 GB (calculated), shared by Linux, the server,
+- The 4-bit model's RAM: about 37 GiB left beside its experts on 192 GB (calculated), shared by Linux, the server,
   Open WebUI and the parked conversations (`--park-mib 4096`).

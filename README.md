@@ -18,7 +18,7 @@ its design, its server and its web app, replaces the engine, and runs GLM-5.3-Fl
 | | |
 | --- | --- |
 | **Graphics cards** | **NVIDIA**, compute capability 7.5 or newer (GeForce RTX 20 series and newer). One card or several: the model's layers are split over them. Driver **580** or newer: setup stops with an older one. |
-| **RAM** | Every expert of the model stays in RAM: about 117 GB at 3-bit, about 162 GB at 4-bit (calculated). Setup wants at least 12 GB left beside them for Linux and the server, and calls a size a good fit when 40 GB are left. So about **130 GB** at the least for the 3-bit size and about **175 GB** for the 4-bit size. [Which size](#which-size-should-i-pick). |
+| **RAM** | Every expert of the model stays in RAM: about 117 GB (109 GiB) at 3-bit, about 162 GB (151 GiB) at 4-bit (calculated). Setup counts RAM in GiB, as Linux reports it (`free -g`). It wants at least 12 GiB left beside the experts for Linux and the server, and calls a size a good fit when 40 GiB are left. So Linux must report about **121 GiB** at the least for the 3-bit size (a PC with 128 GB installed reports about 125) and about **163 GiB** for the 4-bit size (192 GB installed: about 188). [Which size](#which-size-should-i-pick). |
 | **Disk** | About 120 GB free for the 3-bit download, about 170 GB for the 4-bit one, and about 10 GB more when setup installs the CUDA toolkit. An SSD helps: the first start after a reboot reads every expert from it. |
 | **System** | **Linux** only: setup stops on any other system. A CPU with **AVX2**: without it setup warns, because the experts the cards do not hold run on the CPU. |
 
@@ -100,8 +100,8 @@ The 4-bit size is closer to the full model. How much better its answers are is n
 
 | Size | Setup's name | Download | Experts in RAM |
 | --- | --- | ---: | ---: |
-| **3-bit** | `UD-IQ3_XXS` | about 120 GB | about 117 GB |
-| **4-bit** | `IQ4_XS` (`UD-Q4_K_XL` when the repository has no IQ4_XS) | about 170 GB | about 162 GB |
+| **3-bit** | `UD-IQ3_XXS` | about 120 GB | about 117 GB (109 GiB) |
+| **4-bit** | `IQ4_XS` (`UD-Q4_K_XL` when the repository has no IQ4_XS) | about 170 GB | about 162 GB (151 GiB) |
 
 These sizes are setup's own figures, calculated from the model's shapes (about 305 billion expert parameters at
 3.06 or 4.25 bits each), not measured. Setup reads the real file sizes from the repository before it downloads.
@@ -109,25 +109,25 @@ When it takes `UD-Q4_K_XL` instead of `IQ4_XS`, it works out that file's share o
 says what that leaves.
 
 What is left beside the experts holds Linux, the server, your other programs and the parked conversations
-([Using it](#using-it)). Setup's verdict is your RAM minus the experts:
+([Using it](#using-it)). Setup's verdict is the RAM Linux reports minus the experts, both in GiB:
 
-| Your RAM | 3-bit: RAM left | 4-bit: RAM left | Setup recommends |
+| Your RAM (Linux reports) | 3-bit: RAM left | 4-bit: RAM left | Setup recommends |
 | --- | --- | --- | --- |
-| 128 GB | about 11 GB: does not fit | does not fit | neither fits: 3-bit is the default answer, and setup asks before it installs it |
-| 144 GB | about 27 GB: tight | does not fit | 3-bit, with less RAM for parked conversations |
-| **192 GB** | about 75 GB: fits | about 30 GB: tight | **3-bit** |
-| 256 GB | about 139 GB: fits | about 94 GB: fits | 4-bit |
+| 96 GB (about 94 GiB) | does not fit | does not fit | neither fits: 3-bit is the default answer, and setup asks before it installs it |
+| 128 GB (about 125 GiB) | about 16 GiB: tight | does not fit | 3-bit, with less RAM for parked conversations |
+| **192 GB** (about 188 GiB) | about 79 GiB: fits | about 37 GiB: tight | **3-bit** |
+| 256 GB (about 251 GiB) | about 142 GiB: fits | about 100 GiB: fits | 4-bit |
 
-- **Fits:** 40 GB or more left.
-- **Tight:** 12 to 40 GB left. Setup warns and gives parked conversations 4096 MiB instead of 8192 (`--park-mib 4096`).
-  Close other big programs while the model runs.
-- **Does not fit:** under 12 GB left. Linux would read experts from the disk while the model answers: very slow, or
+- **Fits:** 40 GiB or more left.
+- **Tight:** 12 to 40 GiB left. Setup warns and gives parked conversations 4096 MiB instead of 8192
+  (`--park-mib 4096`). Close other big programs while the model runs.
+- **Does not fit:** under 12 GiB left. Linux would read experts from the disk while the model answers: very slow, or
   no start at all. Setup asks before it goes on (the answer is no unless you type y), and `--yes` alone does not
   go on. `--model <size> --yes` does.
 
-These figures are calculated with the RAM that is installed. Setup counts the RAM that Linux reports, which is a few
-GB less, so the figures it prints are a few GB lower. `./setup.sh --check` prints them for your PC without
-installing anything. On napster-ai (192 GB) setup recommends the 3-bit size.
+The RAM Linux reports in this table is about 2% under the RAM installed (188 GiB for 192 GB, as setup's tests
+take it); it differs a little from PC to PC. `./setup.sh --check` prints the figures for your PC without installing
+anything. On napster-ai (192 GB) setup recommends the 3-bit size.
 
 ## Using it
 

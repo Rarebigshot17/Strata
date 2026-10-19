@@ -142,7 +142,7 @@ def install(argv, ram=OWNER_RAM, smi=OWNER_SMI, listing=LISTING, configs=(), env
 
         patches = [mock.patch.object(setup, "ROOT", root), mock.patch.object(setup, "BUILD_DIR", root / "build"),
                    mock.patch.object(setup, "out", return_value=smi),
-                   mock.patch.object(setup, "ram_gb", return_value=ram),
+                   mock.patch.object(setup, "ram_gib", return_value=ram),
                    mock.patch.object(setup, "cpu_info", return_value=cpu),
                    mock.patch.object(setup, "free_gb", return_value=free),
                    mock.patch.object(setup.shutil, "disk_usage", disk_usage),
@@ -195,9 +195,28 @@ class ModelByRam(unittest.TestCase):
         self.assertEqual(setup.park_mib("IQ4_XS", 251.0), 8192)
 
     def test_too_little_ram_for_either(self):
-        self.assertEqual(setup.model_fit("UD-IQ3_XXS", 125.0), "no")          # 128 GB
-        self.assertEqual(setup.recommended_model(125.0), "UD-IQ3_XXS")        # the smallest: nothing fits
+        self.assertEqual(setup.model_fit("UD-IQ3_XXS", 94.0), "no")           # 96 GB
+        self.assertEqual(setup.recommended_model(94.0), "UD-IQ3_XXS")         # the smallest: nothing fits
         self.assertIn("do not fit", setup.fit_text("IQ4_XS", 125.0))
+
+    def test_ram_and_experts_are_compared_in_gib(self):
+        # MemTotal is in KiB: 197132288 kB is 188 GiB, what a PC with 192 GB installed reports.  The experts' sizes
+        # are decimal GB (117e9 bytes at 3-bit, 162e9 at 4-bit): 109 and 151 GiB
+        with mock.patch("builtins.open", mock.mock_open(read_data="MemTotal:       197132288 kB\n")):
+            self.assertAlmostEqual(setup.ram_gib(), 188.0, places=3)
+        self.assertAlmostEqual(setup.ram_left("UD-IQ3_XXS", 188.0), 188.0 - 117e9 / 2**30, places=6)
+        self.assertAlmostEqual(setup.ram_left("IQ4_XS", 188.0), 188.0 - 162e9 / 2**30, places=6)
+        self.assertEqual(setup.fit_text("UD-IQ3_XXS", OWNER_RAM), "~79 GiB of RAM left beside them")
+        self.assertEqual(setup.fit_text("IQ4_XS", OWNER_RAM), "only ~37 GiB of RAM left beside them")
+
+    def test_the_minimum_is_the_experts_and_12_gib(self):
+        self.assertEqual(setup.model_fit("UD-IQ3_XXS", 125.0), "tight")       # 128 GB: 16 GiB beside the experts
+        self.assertEqual(setup.model_fit("UD-IQ3_XXS", 121.5), "tight")
+        self.assertEqual(setup.model_fit("UD-IQ3_XXS", 120.5), "no")
+        self.assertEqual(setup.model_fit("IQ4_XS", 163.0), "tight")
+        self.assertEqual(setup.model_fit("IQ4_XS", 162.5), "no")
+        self.assertEqual(setup.model_fit("IQ4_XS", 191.0), "fits")
+        self.assertEqual(setup.model_fit("IQ4_XS", 190.5), "tight")
 
     def test_yes_installs_the_recommended_size(self):
         code, out, cfgs, _, rec = install(["--yes", "--no-start"])
@@ -210,19 +229,20 @@ class ModelByRam(unittest.TestCase):
     def test_the_4_bit_on_192_gb_warns_and_parks_less(self):
         code, out, cfgs, _, _ = install(["--model", "IQ4_XS", "--yes", "--no-start"])
         self.assertEqual(code, 0, out)
-        self.assertIn("leaves only ~26 GB of RAM beside its experts", out)
+        self.assertIn("leaves only ~37 GiB of RAM beside its experts", out)
         self.assertIn("--park-mib 4096", out)
         args = cfgs["strata-glm-iq4_xs.json"]["args"]
         self.assertEqual(args[args.index("--park-mib") + 1], "4096")
 
     def test_a_size_that_does_not_fit_needs_consent(self):
-        code, out, cfgs, _, _ = install(["--yes", "--no-start"], ram=125.0)   # --yes alone: no consent
+        code, out, cfgs, _, _ = install(["--yes", "--no-start"], ram=94.0)    # --yes alone: no consent
         self.assertEqual(code, 1)
-        self.assertIn("do not fit", out)
+        self.assertIn("UD-IQ3_XXS's experts (~109 GiB) do not fit beside Linux and the server in this PC's 94 GiB", out)
+        self.assertIn("UD-IQ3_XXS needs about 121 GiB of RAM; this PC has 94 GiB", out)
         self.assertEqual(cfgs, {})
-        code, out, cfgs, _, _ = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start"], ram=125.0)
+        code, out, cfgs, _, _ = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start"], ram=94.0)
         self.assertEqual(code, 0, out)                                        # --model is the consent
-        self.assertIn("installing UD-IQ3_XXS with 125 GB of RAM, as you chose", out)
+        self.assertIn("installing UD-IQ3_XXS with 94 GiB of RAM, as you chose", out)
 
 
 class Listing(unittest.TestCase):
@@ -319,14 +339,17 @@ class Listing(unittest.TestCase):
         argv = ["--model", "IQ4_XS", "--context", "131072", "--no-start"]
         code, out, cfgs, _, rec = install(argv, listing=listing)                 # asked, and no answer
         self.assertEqual(code, 1)
-        self.assertIn("UD-Q4_K_XL (200 GB, about 191 GB of experts in RAM: more than this PC's 188 GB)", out)
-        self.assertIn("UD-Q4_K_XL's experts do not fit beside Linux and the server in this PC's 188 GB", out)
+        # 200 GB of files at the 4-bit's share of experts (162 of 170): 190.6e9 bytes, 177.5 GiB of the 188 GiB
+        self.assertIn("UD-Q4_K_XL (200 GB, about 177 GiB of experts in RAM: ~11 GiB of RAM left beside them)", out)
+        self.assertIn("UD-Q4_K_XL's experts do not fit beside Linux and the server in this PC's 188 GiB", out)
+        out = install(argv, listing=listing, ram=170.0)[1]                      # less RAM than the experts
+        self.assertIn("about 177 GiB of experts in RAM: more than this PC's 170 GiB)", out)
         self.assertEqual((cfgs, rec["downloads"], rec["builds"]), ({}, [], []))
         code, out, cfgs, _, rec = install(argv + ["--yes"], listing=listing)     # --model is the consent
         self.assertEqual(code, 0, out)
         self.assertEqual(len(rec["downloads"]), 4)
-        # on 230 GB the 4-bit size fits well, but its fallback leaves less than 40 GB: less RAM for parking
-        code, out, cfgs, _, _ = install(argv + ["--yes"], listing=listing, ram=230.0)
+        # on 210 GiB the 4-bit size fits well, but its fallback leaves less than 40 GiB: less RAM for parking
+        code, out, cfgs, _, _ = install(argv + ["--yes"], listing=listing, ram=210.0)
         self.assertEqual(code, 0, out)
         self.assertNotIn("do not fit", out)
         args = cfgs["strata-glm-iq4_xs.json"]["args"]
@@ -1001,7 +1024,11 @@ class Check(unittest.TestCase):
         code, out, cfgs, _, rec = install(["--check"])
         self.assertEqual(code, 0, out)
         self.assertIn("This PC can run GLM-5.3-Flash (UD-IQ3_XXS recommended)", out)
-        self.assertIn("IQ4_XS     4-bit: ~162 GB of experts in RAM - fits, with little RAM to spare", out)
+        self.assertIn("RAM: 188 GiB", out)
+        self.assertIn("UD-IQ3_XXS 3-bit: ~109 GiB of experts in RAM - fits (~79 GiB of RAM left beside them); "
+                      "download ~120 GB", out)
+        self.assertIn("IQ4_XS     4-bit: ~151 GiB of experts in RAM - fits, with little RAM to spare (only ~37 GiB of "
+                      "RAM left beside them); download ~170 GB", out)
         self.assertEqual((cfgs, rec["downloads"], rec["builds"], rec["urls"]), ({}, [], [], []))
         self.assertFalse((Path(rec["base"]) / "Strata-GLM-data").exists())
         self.assertFalse((Path(rec["base"]) / "settings.json").exists())
@@ -1019,7 +1046,7 @@ class Check(unittest.TestCase):
     def test_check_on_too_little_ram(self):
         code, out, _, _, _ = install(["--check"], ram=60.0)
         self.assertEqual(code, 1)
-        self.assertIn("neither size fits 60 GB of RAM", out)
+        self.assertIn("neither size fits 60 GiB of RAM", out)
 
 
 if __name__ == "__main__":

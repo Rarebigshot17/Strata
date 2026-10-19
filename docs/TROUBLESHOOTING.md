@@ -96,14 +96,14 @@ The model files are about 120 GB (3-bit) or 170 GB (4-bit), calculated from the 
 real total from the repository's listing before it downloads. Put them on a bigger drive: `--models-dir <folder>`,
 or `--data-dir <folder>`, which is remembered for every Strata folder on this PC.
 
-**"<size>'s experts (~N GB) do not fit beside Linux and the server in this PC's N GB of RAM"**.
-Every routed expert stays in RAM: about 117 GB at 3-bit and about 162 GB at 4-bit (calculated from the model's
-shapes, not measured). Setup subtracts that from the RAM Linux reports and prints what is left beside the experts.
-On a PC with 192 GB that is about 75 GB for the 3-bit model and about 30 GB for the 4-bit one (a few GB less, since
-Linux reports a little less than the installed RAM). Below 40 GB left setup warns and gives parked conversations
-4096 MiB instead of 8192 (`--park-mib 4096`). Below 12 GB it asks "Install it anyway?" and stops unless you answer
-`y` (or pass `--model <size> --yes`): the OS would then read experts from the disk while it answers. Choose the
-3-bit model, or add RAM.
+**"<size>'s experts (~N GiB) do not fit beside Linux and the server in this PC's N GiB of RAM"**.
+Every routed expert stays in RAM: about 117 GB (109 GiB) at 3-bit and about 162 GB (151 GiB) at 4-bit (calculated
+from the model's shapes, not measured). Setup subtracts that from the RAM Linux reports, in GiB as `free -g` counts
+it, and prints what is left beside the experts. On a PC with 192 GB installed Linux reports about 188 GiB: that
+leaves about 79 GiB for the 3-bit model and about 37 GiB for the 4-bit one. Below 40 GiB left setup warns and gives
+parked conversations 4096 MiB instead of 8192 (`--park-mib 4096`). Below 12 GiB it asks "Install it anyway?" and
+stops unless you answer `y` (or pass `--model <size> --yes`): the OS would then read experts from the disk while it
+answers. Choose the 3-bit model, or add RAM.
 
 **`./update.sh` says "git pull did not succeed"**.
 A file you changed in the Strata folder stops the pull. `git status` lists them; put your changes aside

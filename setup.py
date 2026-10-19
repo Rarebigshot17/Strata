@@ -65,17 +65,19 @@ BUILD_DIR = ROOT / "build"
 
 # The two sizes, by the quantization of their routed experts (docs/GLM53_PORT.md, "Memory on napster-ai").  Every
 # expert stays in RAM; the GPUs cache the most used ones.  "fallback": the files taken when the repository has none
-# of the size's own quantization.
+# of the size's own quantization.  The sizes are decimal GB (10^9 bytes), as the Hub and the disks count them; the
+# RAM is counted in GiB (2^30 bytes), as Linux reports it, so the experts are compared with it in GiB (experts_gib).
 MODELS = {
     "UD-IQ3_XXS": {"bits": "3-bit", "about": "the recommended size for a PC with about 192 GB of RAM",
                    "download_gb": 120, "experts_gb": 117},
-    "IQ4_XS": {"bits": "4-bit", "about": "better answers, but its experts need about 45 GB more RAM",
+    "IQ4_XS": {"bits": "4-bit", "about": "better answers, but its experts need about 42 GiB more RAM",
                "download_gb": 170, "experts_gb": 162, "fallback": ("UD-Q4_K_XL",)},
 }
-RAM_LEFT_GB = 40         # RAM beside the experts from which a size fits well: Linux, the server, parked conversations
-RAM_LEFT_MIN_GB = 12     # below this the OS pages the experts from the disk: very slow, or no start at all
+GIB = 2**30
+RAM_LEFT_GIB = 40        # RAM beside the experts from which a size fits well: Linux, the server, parked conversations
+RAM_LEFT_MIN_GIB = 12    # below this the OS pages the experts from the disk: very slow, or no start at all
 PARK_MIB = 8192          # the engine's RAM for parked conversations and checkpoints (its default)
-PARK_MIB_TIGHT = 4096    # with less than RAM_LEFT_GB beside the experts (the 4-bit model on 192 GB)
+PARK_MIB_TIGHT = 4096    # with less than RAM_LEFT_GIB beside the experts (the 4-bit model on 192 GB)
 CONTEXTS = [32768, 131072, 262144, 524288, 1048576]
 MAX_CONTEXT = 1048576    # GLM-5.3-Flash's trained context
 MLA_BYTES_PER_TOKEN = 11 * 512 * 2     # the attention cache in VRAM: a 512-wide f16 latent per token in 11 MLA layers
@@ -182,11 +184,12 @@ def mark(path: Path, text=""):
 
 
 # ------------------------------------------------------------------------------------------------ the PC
-def ram_gb():
+def ram_gib():
+    """The RAM Linux reports (MemTotal, the total of `free -g`), in GiB: 188 on a PC with 192 GB installed."""
     try:
         for line in open("/proc/meminfo"):
             if line.startswith("MemTotal"):
-                return int(line.split()[1]) * 1024 / 2**30
+                return int(line.split()[1]) * 1024 / GIB
     except OSError:
         pass
     return 0.0
@@ -325,20 +328,25 @@ def free_gb(path):
 
 
 # ------------------------------------------------------------------------------------------------ the model's size
+def experts_gib(model: str) -> float:
+    """The size's experts in GiB, the unit of the RAM: 109 at 3-bit, 151 at 4-bit."""
+    return MODELS[model]["experts_gb"] * 1e9 / GIB
+
+
 def ram_left(model: str, ram: float) -> float:
-    """The RAM (GB) left beside the size's experts on a PC with `ram` GB."""
-    return ram - MODELS[model]["experts_gb"]
+    """The RAM (GiB) left beside the size's experts on a PC with `ram` GiB."""
+    return ram - experts_gib(model)
 
 
 def model_fit(model: str, ram: float) -> str:
-    """"fits" (RAM_LEFT_GB or more beside the experts), "tight" (less, but more than RAM_LEFT_MIN_GB), or "no"."""
+    """"fits" (RAM_LEFT_GIB or more beside the experts), "tight" (less, but more than RAM_LEFT_MIN_GIB), or "no"."""
     left = ram_left(model, ram)
-    return "fits" if left >= RAM_LEFT_GB else "tight" if left >= RAM_LEFT_MIN_GB else "no"
+    return "fits" if left >= RAM_LEFT_GIB else "tight" if left >= RAM_LEFT_MIN_GIB else "no"
 
 
 def recommended_model(ram: float) -> str:
-    """The best size that fits well (192 GB: the 3-bit; the 4-bit leaves only ~20 GB there); the smallest when none
-    does."""
+    """The best size that fits well (192 GB installed, 188 GiB reported: the 3-bit; the 4-bit leaves only ~37 GiB
+    there); the smallest when none does."""
     return next((m for m in reversed(list(MODELS)) if model_fit(m, ram) == "fits"), next(iter(MODELS)))
 
 
@@ -352,9 +360,9 @@ def park_mib(model: str, ram: float, asked: int | None = None) -> int:
 
 def fit_text(model: str, ram: float) -> str:
     left = ram_left(model, ram)
-    return {"fits": f"~{left:.0f} GB of RAM left beside them",
-            "tight": f"only ~{left:.0f} GB of RAM left beside them",
-            "no": f"they do not fit this PC's {ram:.0f} GB of RAM"}[model_fit(model, ram)]
+    return {"fits": f"~{left:.0f} GiB of RAM left beside them",
+            "tight": f"only ~{left:.0f} GiB of RAM left beside them",
+            "no": f"they do not fit this PC's {ram:.0f} GiB of RAM"}[model_fit(model, ram)]
 
 
 def mla_gb(ctx: int) -> float:
@@ -1510,10 +1518,10 @@ def check_pc(a) -> tuple:
                               "restart, and run this again")
     ok(f"driver {old['driver']}, compute capability " + ", ".join(sorted({cc(g) for g in cards}))
        + f" (the engine is compiled for {cuda_archs(card_archs(cards))})")
-    ram = ram_gb()
+    ram = ram_gib()
     fits = [m for m in MODELS if model_fit(m, ram) != "no"]
-    (ok if fits else warn)(f"RAM: {ram:.0f} GB" + ("" if fits else " - less than either size's experts need beside "
-                                                                    "Linux and the server"))
+    (ok if fits else warn)(f"RAM: {ram:.0f} GiB" + ("" if fits else " - less than either size's experts need beside "
+                                                                     "Linux and the server"))
     cpu, avx2 = cpu_info()
     if avx2:
         ok(f"CPU: {cpu} (AVX2)")
@@ -1533,12 +1541,12 @@ def check_only(a) -> int:
     say()
     for m, d in MODELS.items():
         verdict = {"fits": "fits", "tight": "fits, with little RAM to spare", "no": "does not fit"}
-        say(f"  {m:10s} {d['bits']}: ~{d['experts_gb']} GB of experts in RAM - "
+        say(f"  {m:10s} {d['bits']}: ~{experts_gib(m):.0f} GiB of experts in RAM - "
             f"{verdict[model_fit(m, ram)]} ({fit_text(m, ram)}); download ~{d['download_gb']} GB"
             + ("" if free >= d["download_gb"] + 1 else f", but only {free:.0f} GB of disk space is free"))
     if not any(model_fit(m, ram) != "no" for m in MODELS):
         # #977: every size says "does not fit", so the verdict says so too (and the exit code, for scripts)
-        say(f"\nThis PC cannot run GLM-5.3-Flash yet: neither size fits {ram:.0f} GB of RAM. --model NAME --yes "
+        say(f"\nThis PC cannot run GLM-5.3-Flash yet: neither size fits {ram:.0f} GiB of RAM. --model NAME --yes "
             "installs one anyway, slowly.")
         return 1
     say(f"\nThis PC can run GLM-5.3-Flash ({recommended_model(ram)} recommended). Run it again without --check to "
@@ -1549,8 +1557,8 @@ def check_only(a) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", choices=list(MODELS),
-                    help="UD-IQ3_XXS = 3-bit (~120 GB download, ~117 GB of experts in RAM), IQ4_XS = 4-bit (~170 GB, "
-                         "~162 GB; UD-Q4_K_XL when the repository has no IQ4_XS). Default: the one this PC's RAM fits")
+                    help="UD-IQ3_XXS = 3-bit (~120 GB download, ~109 GiB of experts in RAM), IQ4_XS = 4-bit (~170 GB, "
+                         "~151 GiB; UD-Q4_K_XL when the repository has no IQ4_XS). Default: the one this PC's RAM fits")
     ap.add_argument("--context", type=int, metavar="N",
                     help=f"the longest conversation in tokens (up to {MAX_CONTEXT}); each token takes 11 KB of VRAM "
                          "(1.5 GB at 131072)")
@@ -1660,24 +1668,25 @@ def main() -> int:
     if not a.model:
         for i, m in enumerate(names, 1):
             d = MODELS[m]
-            say(f"  {i}) {m:10s} {d['bits']}, {d['about']}: download ~{d['download_gb']} GB, ~{d['experts_gb']} GB "
-                f"of experts in RAM ({fit_text(m, ram)})" + ("   (recommended)" if m == rec else ""))
+            say(f"  {i}) {m:10s} {d['bits']}, {d['about']}: download ~{d['download_gb']} GB, ~{experts_gib(m):.0f} "
+                f"GiB of experts in RAM ({fit_text(m, ram)})" + ("   (recommended)" if m == rec else ""))
     model = a.model or names[int(ask("Which size?", [str(i) for i in range(1, len(names) + 1)],
                                      str(names.index(rec) + 1), a.yes)) - 1]
     d = MODELS[model]
     fit = model_fit(model, ram)
     if fit == "no":
         smaller = next((m for m in names if model_fit(m, ram) != "no"), None)
-        confirm_risk(f"{model}'s experts (~{d['experts_gb']} GB) do not fit beside Linux and the server in this PC's "
-                     f"{ram:.0f} GB of RAM: the OS would page them from the disk, so it would be very slow, or not "
-                     "start at all", bool(a.model), a.yes,
-                     f"{model} needs about {d['experts_gb'] + RAM_LEFT_MIN_GB} GB of RAM; this PC has {ram:.0f} GB",
+        confirm_risk(f"{model}'s experts (~{experts_gib(model):.0f} GiB) do not fit beside Linux and the server in "
+                     f"this PC's {ram:.0f} GiB of RAM: the OS would page them from the disk, so it would be very slow, "
+                     "or not start at all", bool(a.model), a.yes,
+                     f"{model} needs about {experts_gib(model) + RAM_LEFT_MIN_GIB:.0f} GiB of RAM; this PC has "
+                     f"{ram:.0f} GiB",
                      (f"choose {smaller}, " if smaller else "add RAM, ") + f"or --model {model} --yes to install it "
                      "anyway", "  Install it anyway?")
-        warn(f"installing {model} with {ram:.0f} GB of RAM, as you chose")
+        warn(f"installing {model} with {ram:.0f} GiB of RAM, as you chose")
     park = park_mib(model, ram, a.park_mib)
     if fit == "tight" and a.park_mib is None:
-        warn(f"{model} leaves only ~{ram_left(model, ram):.0f} GB of RAM beside its experts: parked conversations get "
+        warn(f"{model} leaves only ~{ram_left(model, ram):.0f} GiB of RAM beside its experts: parked conversations get "
              f"{PARK_MIB_TIGHT} MiB instead of {PARK_MIB} (--park-mib {PARK_MIB_TIGHT}); close other big programs "
              "while it runs")
     ok(f"size: {model} ({d['bits']})")
@@ -1726,18 +1735,20 @@ def main() -> int:
         on_disk = sum(p.stat().st_size for s in shards for p in (s, s.with_name(s.name + ".part")) if p.is_file()) / 1e9
         ok(f"{quant}: {len(files)} file{'s' if len(files) > 1 else ''}, {total:.0f} GB")
         if quant != model:
-            # its experts, taken as the same share of its files as the size's own: what it leaves of the RAM
-            experts = total * d["experts_gb"] / d["download_gb"]
+            # its experts, taken as the same share of its files as the size's own: what it leaves of the RAM (GiB)
+            experts = total * d["experts_gb"] / d["download_gb"] * 1e9 / GIB
             warn(f"the repository has no {model} files: the {d['bits']} model is its {quant} ({total:.0f} GB, about "
-                 f"{experts:.0f} GB of experts in RAM: " + (f"~{ram - experts:.0f} GB of RAM left beside them)"
-                                                            if ram >= experts else f"more than this PC's {ram:.0f} GB)"))
-            if fit != "no" and ram - experts < RAM_LEFT_MIN_GB:
-                confirm_risk(f"{quant}'s experts do not fit beside Linux and the server in this PC's {ram:.0f} GB of "
+                 f"{experts:.0f} GiB of experts in RAM: "
+                 + (f"~{ram - experts:.0f} GiB of RAM left beside them)" if ram >= experts else
+                    f"more than this PC's {ram:.0f} GiB)"))
+            if fit != "no" and ram - experts < RAM_LEFT_MIN_GIB:
+                confirm_risk(f"{quant}'s experts do not fit beside Linux and the server in this PC's {ram:.0f} GiB of "
                              "RAM: the OS would page them from the disk, so it would be very slow, or not start at all",
                              bool(a.model), a.yes,
-                             f"{quant} needs about {experts + RAM_LEFT_MIN_GB:.0f} GB of RAM; this PC has {ram:.0f} GB",
+                             f"{quant} needs about {experts + RAM_LEFT_MIN_GIB:.0f} GiB of RAM; this PC has "
+                             f"{ram:.0f} GiB",
                              f"choose {names[0]}, or --model {model} --yes to install it anyway", "  Install it anyway?")
-            elif ram - experts < RAM_LEFT_GB and a.park_mib is None and park != PARK_MIB_TIGHT:
+            elif ram - experts < RAM_LEFT_GIB and a.park_mib is None and park != PARK_MIB_TIGHT:
                 park = PARK_MIB_TIGHT
                 warn(f"parked conversations get {PARK_MIB_TIGHT} MiB instead of {PARK_MIB} (--park-mib {PARK_MIB_TIGHT})")
         need = max(total - on_disk, 0) + 1

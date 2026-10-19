@@ -39,16 +39,17 @@ each value against the real GGUF before code depends on it.
 The routed experts are about 304B parameters (288 experts x 3 matrices x 4096 x 2048 x 42 MoE layers). All figures
 below are calculated, not measured.
 
-| Option | Expert quant | Experts in RAM | RAM left beside them on 192 GB |
+| Option | Expert quant | Experts in RAM | RAM left beside them on 192 GB (188 GiB reported) |
 |---|---|---|---|
-| 3-bit | UD-IQ3_XXS (IQ3_XXS: 3.06 bits) | about 117 GB | about 75 GB |
-| 4-bit | IQ4_XS (4.25 bits); UD-Q4_K_XL when the repository has no IQ4_XS | about 162 GB | about 30 GB |
+| 3-bit | UD-IQ3_XXS (IQ3_XXS: 3.06 bits) | about 117 GB (109 GiB) | about 79 GiB |
+| 4-bit | IQ4_XS (4.25 bits); UD-Q4_K_XL when the repository has no IQ4_XS | about 162 GB (151 GiB) | about 37 GiB |
 
-`setup.py` uses the same figures (its `MODELS` table) and prints what is left beside the experts, taken from the
-RAM Linux reports, which is a few GB under the installed 192 GB. With less than 40 GB left it calls a size tight
-and gives parked conversations 4096 MiB instead of 8192 (`--park-mib`); below 12 GB it asks before it installs.
-On napster-ai it therefore recommends the 3-bit model, and keeps the 4-bit one when you choose it. For UD-Q4_K_XL
-setup takes the experts as the same share of its files as for IQ4_XS.
+`setup.py` uses the same figures (its `MODELS` table, in GB) and prints what is left beside the experts in GiB,
+taken from the RAM Linux reports (`/proc/meminfo`), which is a few GiB under the installed 192 GB: setup's tests
+take 188 GiB. With less than 40 GiB left it calls a size tight and gives parked conversations 4096 MiB instead of
+8192 (`--park-mib`); below 12 GiB it asks before it installs. On napster-ai it therefore recommends the 3-bit model,
+and keeps the 4-bit one when you choose it. For UD-Q4_K_XL setup takes the experts as the same share of its files as
+for IQ4_XS.
 
 The MLA cache stores a 512-wide latent per token in each of the 11 MLA layers. The engine keeps it in f16, as
 llama.cpp does by default: 11 KB per token, 1.5 GB of VRAM at 131,072 tokens and 11.8 GB at 1M (an 8-bit cache
@@ -165,8 +166,9 @@ yet.
    ```
 
    The GPU kernels take every type these files use for experts (IQ3_XXS, IQ3_S, IQ4_XS, Q3_K-Q6_K, Q8_0); the
-   inspector lists any tensor whose type has none. With the 4-bit file about 30 GB of RAM is left beside the
-   experts (calculated), so parked conversations get less of it (`--park-mib 4096`; setup does this itself).
+   inspector lists any tensor whose type has none. With the 4-bit file about 37 GiB of RAM is left beside the
+   experts (calculated, of the 188 GiB Linux reports), so parked conversations get less of it (`--park-mib 4096`;
+   setup does this itself).
 
 6. **Reference logits from llama.cpp** on the real model. `--n-cpu-moe` keeps that many layers' experts on the
    CPU; lower it until VRAM runs out, then raise it by a few:
