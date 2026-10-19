@@ -808,6 +808,11 @@ Listening beyond it without an API key prints a warning: anyone on the network c
 - **CORS.** Off by default. `"cors_origins": ["https://chat.example.com"]` lets pages of those origins call `/v1/*`
   from a browser; `["*"]` lets any page do it (only sensible with an API key; the start says so). It never opens the
   other routes.
+- **Tool calls** come from the model's own special tokens only, so a call the model copies as plain text (from a
+  tool result, a web page or the user) stays text and is never returned as a call; a request with no tools, or with
+  `tool_choice` `"none"`, gets no calls. This needs GLM's tags to be special tokens in the GGUF, which the start line
+  says ([How tool calls are recognised](#how-tool-calls-are-recognised)). Running a call is the client's choice: an
+  agent that runs shell commands decides what it runs.
 - **The request monitor** keeps prompts and answers; see [above](#the-request-monitor).
 - **MCP tools** run programs with the server's rights; see [The MCP tool loop](#the-mcp-tool-loop).
 - **Bodies and timeouts.** A request body may hold at most 256 MiB (`STRATA_MAX_BODY_MIB`); a larger one is a 413
@@ -816,7 +821,7 @@ Listening beyond it without an API key prints a warning: anyone on the network c
   keep arriving: 120 s without data ends it (a 408 for the body). The answer has no such limit, so a long stream is
   not cut. Control routes (`/load`, `/unload`) take at most 64 KiB. Every answer closes its connection.
 
-For reporting a security problem, see [SECURITY.md](../SECURITY.md).
+Strata has had no outside security audit.
 
 ## Limits
 

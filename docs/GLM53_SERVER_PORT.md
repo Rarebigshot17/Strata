@@ -173,6 +173,9 @@ tokens more slowly than the engine wrote them (now each pass ends where the serv
   a keyless server on every interface), and the server (a start line saying whether calls are read from special
   tokens, the page's Thinking On sent, `response_format` patterns and `logit_bias` checked before generating, the
   free-VRAM check and the Monitor on every card when the config names none).
+- [x] The repository is the owner's personal project: the upstream project's public-project files (the issue forms,
+  the pull request template, SECURITY.md's reporting process, the funding link, AGENTS.md's contribution rules) are
+  removed; what SECURITY.md said about the server's protections is in [DETAILS.md](DETAILS.md#security).
 
 ## Known risks to check on napster-ai
 

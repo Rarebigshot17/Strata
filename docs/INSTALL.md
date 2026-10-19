@@ -499,7 +499,7 @@ has not been run there yet):
 - **Other devices** (over Tailscale, 100.126.222.90): set `--host 0.0.0.0 --api-key <secret>`. `--host
   100.126.222.90` instead listens on the Tailscale address only; the apps on napster-ai itself then use that address
   too, since 127.0.0.1 no longer answers. A host name such as a Tailscale MagicDNS name works with an API key; without
-  a key it must be added to `allowed_hosts`. See [SECURITY.md](../SECURITY.md).
+  a key it must be added to `allowed_hosts`. See [Security](DETAILS.md#security).
 
 A command for a first install there, without questions, with the cards named in nvidia-smi's order:
 

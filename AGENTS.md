@@ -83,16 +83,12 @@ Plain words and short sentences. A measured number comes with what it was measur
 that it is calculated. No claim without a measurement or the code behind it. Markdown, lines of about 120
 characters.
 
-## Contributing a change or report
+## Changing the code
 
-- This fork is [Rarebigshot17/Strata](https://github.com/Rarebigshot17/Strata), branch `glm53-flash`. Search its
-  open issues and pull requests first, and add to a thread that already covers your point.
-- Open an issue with the form that fits (bug report, feature request or question).
-- One change per pull request. Say what it changes and what it leaves alone.
-- A new feature is opt-in, and the default path stays as it was. Say how you checked.
-- Run the Python tests, the tools' tests and `ctest` before asking for review. A change to the engine also builds
-  `strata-glm` with CUDA, and runs the GLM checks it touches.
-- Change a default only where you measured it better, and show the numbers with what they were measured on.
-- A report from a real run is welcome, above all a first run on a GPU or on the real model. Say what you ran, on
-  which machine, and what you did not test.
-- Security problems: [SECURITY.md](SECURITY.md), privately.
+This is the owner's personal project: [Rarebigshot17/Strata](https://github.com/Rarebigshot17/Strata), branch
+`glm53-flash`.
+
+- Run the Python tests, the tools' tests and `ctest` after a change. A change to the engine also builds `strata-glm`
+  with CUDA, and runs the GLM checks it touches.
+- Change a default only where you measured it better, and give the numbers with what they were measured on.
+- A result from a real run says what ran, on which machine, and what was not tested.
