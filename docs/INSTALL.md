@@ -320,7 +320,7 @@ A config as setup writes it (the paths are an example):
 | --- | --- | --- |
 | `exe` | The engine: `build/strata-glm`. A relative path is taken from `cwd`. | Required. |
 | `args` | The engine's options, a list of strings ([below](#engine-options-args)). Must have `-m <first shard>`. | Required. |
-| `cwd` | The engine's working folder. Relative paths in `exe`, `-m` and `chat_template` are taken from here. | The server's own folder. |
+| `cwd` | The engine's working folder. Relative paths in `exe`, `-m` and `chat_template` are taken from here. | The folder the server was started from. |
 | `log` | The engine's log file, appended to. Give a full path. | No log (and the server cannot follow the warm-up). |
 | `lib_dirs` | Folders put first on the engine's `LD_LIBRARY_PATH`: the CUDA toolkit's libraries the engine was built with (from `build/BUILD.json`). | The system's library path. |
 | `model_name` | The name `/v1/models` lists. | The GGUF's `general.name`, else `glm-5.3-flash`. |
@@ -423,8 +423,8 @@ is ([HOW_IT_WORKS.md](HOW_IT_WORKS.md)). Each MLA layer's cache sits on the card
 when the attention cache would take more than half of the chosen cards' VRAM; it keeps your choice. How much a smaller
 expert cache slows the answers is not measured yet.
 
-A long context also costs RAM when a conversation is parked (several clients taking turns, [below](#parking-and-several-clients)):
-about 0.15 GB for the KDA state plus 11 KB per token. Calculated: about 1.6 GB for a 128K-token conversation, about
+A long context also costs RAM when a conversation is parked (several clients taking turns,
+[below](#parking-and-several-clients)): about 0.15 GB for the KDA state plus 11 KB per token. Calculated: about 1.6 GB for a 128K-token conversation, about
 6.1 GB for 512K, about 12 GB for 1M.
 
 To change the context of an installed model: `./setup.sh --setup --model <size> --context <tokens>`, or edit `--ctx` in
@@ -477,7 +477,8 @@ has not been run there yet):
   of it (calculated); neither is more than half, so setup does not warn.
 - **Port:** 8101. Open WebUI (3000), Portainer (8000) and the UPS dashboard (8080) keep theirs.
 - **Clients:** four agents, a chat and a Discord bot take turns on the one engine. With contexts of 512K-1M tokens,
-  the default `--park-mib 8192` keeps at most one 512K conversation and no 1M one ([Parking](#parking-and-several-clients)).
+  the default `--park-mib 8192` keeps at most one 512K conversation and no 1M one
+  ([Parking](#parking-and-several-clients)).
 - **Other devices** (over Tailscale, 100.126.222.90): set `--host 0.0.0.0 --api-key <secret>`. A host name such as a
   Tailscale MagicDNS name works with an API key; without a key it must be added to `allowed_hosts`. See
   [SECURITY.md](../SECURITY.md).

@@ -153,8 +153,8 @@ sudo).
 The port opens only when the engine is ready. Before that, the engine reads every routed expert into memory: about
 117 GB (3-bit) or 162 GB (4-bit). At 550 MB/s, the top speed of a SATA SSD, that is about 3.5 or 5 minutes
 (calculated, not measured). `strata-server.out` shows the progress (`[strata] reading the experts into memory ...`,
-then `warming the experts: X of Y GB` about every 20 seconds). The server gives up only when the engine says nothing new for
-900 seconds. The start is done when the output has a line `ready: http://127.0.0.1:8101/v1 ...`.
+then `warming the experts: X of Y GB` about every 20 seconds). The server gives up only when the engine says
+nothing new for 900 seconds. The start is done when the output has a line `ready: http://127.0.0.1:8101/v1 ...`.
 
 To stop it: `kill $(cat strata-server.pid)`. That sends SIGTERM to the server alone; it stops the engine, and the
 engine saves its expert profile. Do not `kill -9` it and do not kill `strata-glm` itself: the profile of that run is
