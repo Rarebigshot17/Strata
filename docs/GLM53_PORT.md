@@ -69,8 +69,8 @@ Every piece is checked against llama.cpp, which has run GLM-5.3-Flash since its 
 
 1. **CPU reference** (`strata-glm-ref`, `src/glm/cpu_ref.cpp`): the whole model on the CPU, one token at a time,
    with ggml-cpu's own dot products. It matches llama.cpp on small random GLM-5.3-Flash models to float rounding
-   (`tools/glm53_selftest.sh`, which runs without a GPU or a download). On the real model it is far slower than the
-   GPU engine (not measured) and only used as the reference.
+   (`tools/glm53_selftest.sh`, which runs without a GPU or a download). On the real model it is only meant as the
+   reference; its speed there is not measured.
 2. **GPU engine** (`strata-glm`): each CUDA kernel is to be checked against the CPU reference, then whole-model
    logits against llama.cpp on the real GGUF (`tools/glm53_compare.py`). Written, not yet run on a GPU.
 
@@ -107,7 +107,7 @@ Nothing about the answers changes: `tools/glm53_park_check.py` checks every resu
 engine's, token for token.
 
 Small random GLM-5.3-Flash models for tests that need no download: llama.cpp's
-`test-llama-archs -a glm5-next -o DIR` writes a 20 MB `glm5-next-moe.gguf` with 2 layers (one MLA, one KDA).
+`test-llama-archs -a glm5-next -o DIR` writes a small `glm5-next-moe.gguf` with 2 layers (one MLA, one KDA).
 `tools/glm53_tiny_variant.py` switches on the paths it leaves off (SwiGLU clamps, expert weight scaling, an
 indexer top-k small enough to drop pools).
 
