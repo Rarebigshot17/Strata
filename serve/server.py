@@ -1137,7 +1137,10 @@ class StrataEngine:
 
     def shutdown(self):
         """The server's own stop (main()): no engine is started from here on - a request's restart, a load - and this
-        one ends as close() ends it."""
+        one ends as close() ends it.  Once: atexit calls it again after main()'s stop, which a second Ctrl+C or
+        EngineStuck may have cut short with a kill - that engine is not sent QUIT and waited for a second time."""
+        if self.stopping:
+            return
         self.stopping = True
         self.close()
 

@@ -124,6 +124,37 @@ class QuitWait(unittest.TestCase):
         self.assertIn("saves its expert profile", out.getvalue())
         self.assertIn("killed", out.getvalue())
 
+    def test_main_s_stop_then_atexit_end_the_engine_once(self):
+        # main()'s stop runs shutdown(), and atexit runs it again however main() ends.  When a second Ctrl+C cut the
+        # first short (main() then killed the engine, which can take seconds to give its VRAM back) or it ended in
+        # EngineStuck, the engine was killed: atexit must not send QUIT and wait for it again, nor say after
+        # "[strata] stopped" that it saves its expert profile
+        for first in (KeyboardInterrupt, S.EngineStuck):
+            with self.subTest(first=first.__name__):
+                engine = S.StrataEngine("missing-executable", [], lazy=True)
+                proc = mock.Mock()
+                proc.stdin, proc.stdout = io.StringIO(), io.StringIO()
+                proc.poll.return_value = None            # killed, and still ending
+                waits = []
+
+                def wait(timeout=None):
+                    waits.append(timeout)
+                    if first is KeyboardInterrupt and not proc.kill.called:
+                        raise KeyboardInterrupt          # the second Ctrl+C, during the wait for QUIT
+                    raise subprocess.TimeoutExpired("engine", timeout)
+                proc.wait.side_effect = wait
+                engine.proc = proc
+                with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(S, "ENGINE_QUIT_S", 120.0), \
+                        self.assertRaises(first):
+                    engine.shutdown()                    # main()'s stop
+                proc.kill()                              # (main()'s answer to the second Ctrl+C)
+                waits.clear()
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out), mock.patch.object(S, "ENGINE_QUIT_S", 120.0):
+                    engine.shutdown()                    # atexit
+                self.assertEqual(waits, [])
+                self.assertNotIn("saves its expert profile", out.getvalue())
+
     @unittest.skipUnless(sys.platform.startswith("linux"), "a fake engine process")
     def test_an_engine_slow_to_end_is_waited_for_and_the_window_says_so(self):
         with tempfile.TemporaryDirectory() as d:
