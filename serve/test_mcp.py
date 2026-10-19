@@ -5,6 +5,8 @@ the fake MCP server in serve/mcp_fake_server.py (no GPU, no model, no MCP SDK).
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import sys
@@ -204,6 +206,27 @@ class HttpClient(unittest.TestCase):
         self.assertIn("timed out", r["text"])
         self.assertEqual(self.hub.servers["down"].status, "failed")
         self.assertIn("could not reach", self.hub.servers["down"].error)
+
+
+class SecretsInTheAddress(unittest.TestCase):
+    """An address can carry its secret (a token in the query string, a user name and password): GET /mcp, the web
+    page and the log show it without them."""
+
+    def test_unreachable(self):
+        urls = {"query": "http://127.0.0.1:9/mcp?token=sk-query-1#sk-frag-2",
+                "user": "http://alice:sk-pass-3@127.0.0.1/mcp",     # urllib: InvalidURL "nonnumeric port: 'sk-pass-3@..."
+                "bare": "example.invalid/mcp?token=sk-query-4"}     # urllib: ValueError "unknown url type: '<all of it>'"
+        hub = McpHub({n: {"url": u} for n, u in urls.items()}, {"start_timeout_s": 5})
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            hub.start(wait=True)
+        for name in urls:
+            self.assertEqual(hub.servers[name].status, "failed", name)
+        self.assertIn("could not reach http://127.0.0.1:9/mcp: ", hub.servers["query"].error)
+        self.assertIn("could not reach http://127.0.0.1/mcp: ", hub.servers["user"].error)
+        self.assertIn("example.invalid/mcp", hub.servers["bare"].error)
+        for text in (json.dumps(hub.status()), out.getvalue(), err.getvalue()):
+            self.assertNotRegex(text, "sk-|alice")
 
 
 class Config(unittest.TestCase):
