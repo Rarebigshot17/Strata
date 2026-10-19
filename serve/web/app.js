@@ -779,15 +779,7 @@ async function send() {
   busy = {controller, msg: m};
   setBusy(true);
 
-  const body = {model: health.model, messages: apiMessages(), stream: true};
-  if (settings.thinking === "none") body.reasoning_effort = "none";   // thinking off; on is the model's default
-  if (settings.temperature > 0) {
-    Object.assign(body, {temperature: +settings.temperature, top_p: +settings.top_p, top_k: +settings.top_k});
-  } else {
-    body.temperature = 0;
-  }
-  if (settings.seed) body.seed = +settings.seed;
-  if (settings.max) body.max_tokens = +settings.max;
+  const body = {model: health.model, messages: apiMessages(), stream: true, ...samplingFields(settings)};
   if (settings.mcp !== false && mcpInfo.tools > 0) body.strata_mcp = true;   // this server may run MCP tools for it
 
   let firstAt = null, thinkStart = null, usage = null, frame = 0;
@@ -984,9 +976,10 @@ async function loadShared() {
   } catch (e) { /* an older server: the switch just stays off */ }
   $("s-share").setAttribute("aria-checked", String(sharedOn));
 }
-function sharedDefaults(s) {
-  const d = {temperature: +s.temperature};
-  if (s.thinking === "none") d.reasoning_effort = "none";
+// The settings' request fields: what the chat sends, and what "Use for other apps too" shares.  Thinking is sent
+// either way ("On" as "high": GLM has no levels), so a run config or shared setting that turns it off does not win
+function samplingFields(s) {
+  const d = {temperature: +s.temperature, reasoning_effort: s.thinking === "none" ? "none" : "high"};
   if (+s.temperature > 0) Object.assign(d, {top_p: +s.top_p, top_k: +s.top_k});
   if (s.seed) d.seed = +s.seed;
   if (s.max) d.max_tokens = +s.max;
@@ -994,7 +987,7 @@ function sharedDefaults(s) {
 }
 async function saveShared(on, s) {
   const r = await fetch("settings", {method: "POST", headers: headers(true),
-                                      body: JSON.stringify({defaults: on ? sharedDefaults(s) : null})});
+                                      body: JSON.stringify({defaults: on ? samplingFields(s) : null})});
   if (!r.ok) {
     let msg = `HTTP ${r.status}`;
     try { msg = (await r.json()).error.message || msg; } catch (e) { /* not json */ }

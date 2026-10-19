@@ -206,8 +206,9 @@ What the user should know about it:
   declares tools, and not with `"tool_choice": "none"`. When the model's tokenizer has GLM's tags as special tokens, a
   call is read only from those tokens, so call-like text copied from a tool result, a web page or the user stays text
   and is never run. Whether the real GGUF has them as special tokens is still to be checked on a real install
-  ([GLM53_SERVER_PORT.md](GLM53_SERVER_PORT.md)). The agent still decides what it runs: keep its own confirmation for
-  shell commands.
+  ([GLM53_SERVER_PORT.md](GLM53_SERVER_PORT.md)): the server's start line says it, and a `WARNING` line about tool
+  calls read from the plain text means it does not; tell the user. The agent still decides what it runs: keep its own
+  confirmation for shell commands.
 - **MCP tools** set up in Strata's run config run for Strata's own chat page only, unless the config says
   `"mcp_for_api": true`.
 - API details: [DETAILS.md](DETAILS.md#the-api); every config key: [INSTALL.md](INSTALL.md#the-run-config).

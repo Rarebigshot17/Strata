@@ -594,10 +594,10 @@ class Confirmed(Http):
         """The engine's plain ERR line (raised as ValueError) is the request's fault: 400, as on the other APIs
         (fixed in 3bdf0cd), not a 500 a client would retry."""
         def refuse(*args, **kwargs):
-            raise ValueError("logit_bias ID 999999999 outside the vocabulary")
+            raise ValueError("the prompt does not fit the engine's context")
             yield                                               # a generator, as the engine's
         with mock.patch.object(self.engine, "generate", refuse), mock.patch("builtins.print"):
-            code, _, body = self.call("/v1/responses", {"input": "hi", "logit_bias": {"999999999": 5}})
+            code, _, body = self.call("/v1/responses", {"input": "hi"})
             self.assertEqual(code, 400, body)
             self.assertEqual(json.loads(body)["error"]["type"], "invalid_request_error")
             code, _, body = self.call("/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}]})

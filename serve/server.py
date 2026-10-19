@@ -169,6 +169,12 @@ PP_SLACK = 3.0
 # STRATA_ENGINE_READY_S overrides it (0 = wait for ever).
 
 
+def env_on(name: str) -> bool:
+    """A STRATA_ switch in the environment: off when unset, empty or "0", "false", "no", "off" (any case), the words
+    the other switches read as off (POST /unload's wait); any other value is on."""
+    return os.environ.get(name, "").strip().lower() not in ("", "0", "false", "no", "off")
+
+
 def _timeout_env(name: str, default: float) -> float | None:
     try:
         v = float(os.environ.get(name, default))
@@ -853,7 +859,7 @@ class StrataEngine:
             self.last.update(hits=int(f[9]), lookups=int(f[10]))
         if len(f) >= 15:
             self.last["prompt_read"] = int(f[14])
-        if os.environ.get("STRATA_REQUEST_LINES"):
+        if env_on("STRATA_REQUEST_LINES"):
             print(request_line(self.last), flush=True)
 
     @staticmethod
@@ -1354,7 +1360,22 @@ def output_tags(tok) -> dict[int, str]:
     return {} if None in tags else tags
 
 
-OPENAI_MAX_STOP = 4                                  # OpenAI's limit on `stop`
+def tag_mode_line(tok) -> str:
+    """The start line that says where tool calls and </think> are read from: the tags' own special tokens, or (when
+    the model's tokenizer lacks one of them) the plain text, with a warning - a call the model copies from a tool
+    result or a web page is then a call again.  Requests with tools are still served in that mode: it is how servers
+    that read calls from the text work, and refusing them would leave every agent without tools on such a GGUF."""
+    if output_tags(tok):
+        return ("[strata] tool calls and </think> are read from the model's own special tokens only: a call copied "
+                "as text (from a tool result, a web page or the user) stays text")
+    special = getattr(tok, "special_tokens", None) or {}
+    missing = ", ".join(tag for tag in OUTPUT_TAGS if tag not in special)
+    return (f"[strata] WARNING: the model's tokenizer does not have {missing} as special tokens, so tool calls and "
+            "</think> are read from the plain text: a call the model copies from a tool result, a web page or the "
+            "user is returned as a call, and an agent that runs shell commands would run it")
+
+
+OPENAI_MAX_STOP = 4                                 # OpenAI's limit on `stop`
 
 
 def stop_strings(req: dict) -> list[str]:
@@ -1572,7 +1593,8 @@ class Service:
         # only start it again when this much VRAM is free, and run this command first (e.g. to unload another
         # server's model); the next request after an unload starts the engine again
         self.idle_unload_s = 0
-        self.min_free_vram_mib = 0
+        self.min_free_vram_mib = 0                       # ... on each of the engine's GPUs
+        self.vram_gpu = None                             # the card free_vram_mib() found with the least free
         self.before_load = None
         self.before_load_timeout_s = 120.0               # #1997: how long the before_load command may run
         self.before_load_ignore_failure = False          # #1997: load even when it fails, without a VRAM check
@@ -1632,12 +1654,37 @@ class Service:
         return value if value > 0 else None
 
     def free_vram_mib(self) -> int | None:
-        """Free VRAM on the engine's (first) GPU, from NVML; None when it can't be read (then nothing is refused)."""
+        """The least free VRAM of the engine's GPUs (every card of a layer split: each needs its share), from NVML;
+        self.vram_gpu is that card.  A card that can't be read is left out; None when none can (then nothing is
+        refused)."""
+        self.vram_gpu = None
         try:
             from serve.telemetry import free_vram_mib
-            return free_vram_mib(int(getattr(self, "gpu_index", 0) or 0))
+            least = None
+            for index in self.vram_cards():
+                free = free_vram_mib(index)
+                if free is not None and (least is None or free < least):
+                    least, self.vram_gpu = free, index
+            return least
         except Exception:  # noqa: BLE001 - no NVML, no reading
             return None
+
+    def vram_cards(self) -> list[int]:
+        """The cards free_vram_mib() reads, numbered as nvidia-smi numbers them: the config's GPUs.  A config that
+        names none (setup's when every card can run the engine) lets the engine split the layers over every card it
+        sees, so every card NVML counts - or the first card only when CUDA_VISIBLE_DEVICES in the server's environment
+        hides some, since its numbers need not be NVML's."""
+        named = getattr(self, "gpu_indices", None)
+        if named:
+            return list(named)
+        first = int(getattr(self, "gpu_index", 0) or 0)
+        if os.environ.get("CUDA_VISIBLE_DEVICES") is not None:
+            return [first]
+        from serve.telemetry import gpu_reader
+        cards = []
+        while len(cards) < 64 and gpu_reader(len(cards)).ok():
+            cards.append(len(cards))
+        return cards or [first]
 
     def ensure_loaded(self):
         """Start the engine if it is not running (unloaded, or it died - issue #27), after the before_load hook and
@@ -1686,7 +1733,9 @@ class Service:
                 if hook_failed and not self.before_load_ignore_failure:
                     print(f"[strata] the before_load command failed ({hook_failed}) and only {free} MiB of VRAM is "
                           f"free (the model needs {self.min_free_vram_mib}): not loading; 503", flush=True)
-                raise GpuBusy(f"the GPU is in use by another program: {free} MiB of VRAM free, the model needs "
+                card = getattr(self, "vram_gpu", None)
+                raise GpuBusy(f"the GPU is in use by another program: {free} MiB of VRAM free"
+                              f"{'' if card is None else f' on GPU {card}'}, the model needs "
                               f"{self.min_free_vram_mib} (min_free_vram_mib) - it stays unloaded until that is free"
                               + (f"; the before_load command failed ({hook_failed})" if hook_failed else ""),
                               retry_after=15)
@@ -2179,8 +2228,9 @@ class Service:
         `force` (forced_call): the opening of the call the reply must make - see prepare().  `raw`: a plain
         completion (/v1/completions), whose text is all content: no thinking and no tool calls are read from it."""
         defaults = {**self.sampling_defaults, **self.shared}   # GLM's and the config's, then the Chat settings
-        if defaults:                   # the request's own fields win (explicit 0 stays greedy)
-            req_values = {k: v for k, v in (sampling or {}).items() if v is not None}
+        if defaults:                   # the request's own fields win (explicit 0 stays greedy); null and a value that
+            # means unset (a negative top_k, say) take the default, as a field left out does
+            req_values = {k: v for k, v in (sampling or {}).items() if v is not None and not sampling_unset(k, v)}
             sampling = {**defaults, **req_values}
         checkpoint, self.checkpoint.at = getattr(self.checkpoint, "at", None), None   # prepare()'s, for this run
         # #123: read after the merge, so a budget shared through POST /settings is seen like the other keys
@@ -2513,7 +2563,7 @@ class Service:
                             print("[strata] the reply reached max tokens while still thinking, so it has no "
                                   "answer: a thinking budget (reasoning_budget_tokens, in the request or in "
                                   "the run config for every request) leaves room to answer", flush=True)
-                        if os.environ.get("STRATA_DEBUG") and raw_ids:
+                        if env_on("STRATA_DEBUG") and raw_ids:
                             print(f"[strata] raw: {self.tok.decode(raw_ids)!r}", flush=True)
                     st["busy"] = False
                     st.pop("tail", None)                     # #212: the answer's end is not kept once it is done
@@ -2640,7 +2690,7 @@ def request_stats(segments: list[dict]) -> dict:
 
 def _debug_req(api, req, messages, tools, max_new, thinking, prompt_tokens):
     """One compact line per request while diagnosing blank/empty turns. Set STRATA_DEBUG=1 to enable."""
-    if not os.environ.get("STRATA_DEBUG"):
+    if not env_on("STRATA_DEBUG"):
         return
     last = messages[-1] if messages else {}
     body = last.get("content")
@@ -4182,7 +4232,16 @@ def make_handler(svc: Service):
                 check_request_sampling(req)                   # the request is also the sampling dict (see below)
             except ValueError as e:                           # its message starts with the field's name: the param
                 raise ResponsesError(str(e), str(e).partition(":")[0]) from None
+            vocab = len(getattr(svc.tok, "tokens", ())) or None
+            try:
+                bias_api.normalize(req.get("logit_bias"), vocab)   # ... and so is a bad logit_bias, as on chat
+            except ValueError as e:
+                raise ResponsesError(str(e), "logit_bias") from None
             svc.load()
+            try:
+                bias_api.validate_request(req, svc.engine, vocab)  # an engine that takes no biases: known once loaded
+            except ValueError as e:
+                raise ResponsesError(str(e), "logit_bias") from None
             # #924 (opt-in): a Codex compaction request is rendered with its conversation's tools, so its prompt
             # starts as the cached one did; the parser and the response keep the request's own tools
             shown = responses_api.prompt_tools(req, tools) if svc.codex_compaction_cache else tools
@@ -4217,6 +4276,7 @@ def make_handler(svc: Service):
             messages, tools, kw = anthropic_to_messages(req, svc.anthropic_think_unasked)
             stop_strings(req)                                 # the same 400 as the request itself would get
             check_request_sampling(req)                       # ... likewise a sampling field of the wrong type
+            bias_api.normalize(req.get("logit_bias"), len(getattr(svc.tok, "tokens", ())) or None)   # ... and a bias
             self._json(200, {"input_tokens": len(svc.encode_prompt(messages, tools, kw))})
 
         def _anthropic(self, req):
@@ -4230,7 +4290,10 @@ def make_handler(svc: Service):
             svc.reasoning_budget(req)                         # a bad value is a 400 before anything is sent
             stop_strings(req)                                 # ... and so is a bad stop / stop_sequences
             check_request_sampling(req)                       # ... and a sampling field of the wrong type
+            # ... and a bad logit_bias (the request is the sampling: unchecked, the engine refused it mid-stream)
+            bias_api.normalize(req.get("logit_bias"), len(getattr(svc.tok, "tokens", ())) or None)
             svc.load()                                        # only now: a refused request does not load the model
+            bias_api.validate_request(req, svc.engine, len(getattr(svc.tok, "tokens", ())) or None)
             ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new, force=force)
             cancel = threading.Event()
             self._watch_client(cancel)                       # #430 #431
@@ -4622,6 +4685,16 @@ def sampling_defaults_from_config(cfg: dict) -> dict:
     return out
 
 
+def sampling_unset(key: str, value) -> bool:
+    """A request's sampling value that means "not set" (see check_request_sampling): a negative top_k, or a
+    penalty_last_n or seed <= 0 (llama.cpp's and vLLM's -1; sampling_keys sends no window of 0, and repeat_last_n 0 is
+    unset too).  The shared or configured value applies to it, as to a field left out; without one the engine's
+    default does (top_k off, a random seed, a 64-token window)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return (key == "top_k" and value < 0) or (key in ("penalty_last_n", "seed") and value <= 0)
+
+
 def check_request_sampling(req) -> None:
     """A request's sampling field of the wrong JSON type ("temperature": "0.7", "top_k": 40.0, "seed": true) is a 400
     that names the field, as the same value is through POST /settings or the run config.  Unchecked, the value
@@ -4630,7 +4703,7 @@ def check_request_sampling(req) -> None:
     or float) for top_k, penalty_last_n and seed.  Ranges: what the engine can use, which checks none itself - a
     finite number it can hold (no NaN or Infinity, which json.loads reads), temperature >= 0 (0 is greedy), top_p and
     min_p 0..1, a repetition penalty > 0 (it divides by it; 1 is off), top_k and penalty_last_n up to ENGINE_INT_MAX
-    and a seed up to ENGINE_SEED_MAX (top_k 0 is off; a negative top_k or penalty_last_n, or a seed <= 0, is unset).
+    and a seed up to ENGINE_SEED_MAX (top_k 0 is off; a negative top_k, or a penalty_last_n or seed <= 0, is unset).
     An absent or null field is not checked."""
     if isinstance(req, dict):      # #1819: llama.cpp's names; the OpenAI-style field wins when both are sent
         if req.get("repeat_penalty") is not None and req.get("repetition_penalty") is None:
@@ -4731,8 +4804,8 @@ def main() -> int:
                          "model servers) can use the VRAM; the next request loads it again (also \"idle_unload_s\" "
                          "in the config; default: never)")
     ap.add_argument("--min-free-vram-mib", type=int, default=None,
-                    help="load an unloaded model only when this much VRAM is free, else answer 503 (also "
-                         "\"min_free_vram_mib\" in the config; default: always load)")
+                    help="load an unloaded model only when this much VRAM is free on each of its GPUs, else answer "
+                         "503 (also \"min_free_vram_mib\" in the config; default: always load)")
     ap.add_argument("--before-load", help="a command run before the model is loaded again (e.g. to unload another "
                                           "server's model; also \"before_load\" in the config, a string or a list)")
     a = ap.parse_args()
@@ -4764,6 +4837,8 @@ def main() -> int:
     override = a.chat_template or (config_path_of(cfg, cfg["chat_template"]) if cfg.get("chat_template") else None)
     template = chat_template_for(files, override)
     eos_ids = end_of_turn_ids(tok)
+    if files is not None:                               # where tool calls are read from (the mock's bytes: no model)
+        print(tag_mode_line(tok), flush=True)
     hub = hub_from_config(cfg, a.mcp_config)            # before the minutes of loading: a bad entry stops here
     # Every ordinary stop takes Ctrl+C's path (KeyboardInterrupt, at the end): Ctrl+C (SIGINT), SIGTERM (kill, docker
     # stop, a systemd stop) and SIGHUP (the terminal was closed). It ends the engine with STOP and QUIT, and the

@@ -161,9 +161,10 @@ anything. On napster-ai (192 GB) setup recommends the 3-bit size.
 - **Tool calls** are read from the model's own special tokens only. A call that the model copies as plain text, from
   a tool result, a web page or the user's message, stays text: it is never returned as a call, and never runs as an
   MCP tool. This needs GLM's tags to be special tokens in the model's tokenizer; that is expected, but not checked
-  on the real GGUF yet. A request that declares no tools, or sets `tool_choice` to `"none"`, gets no calls at all.
-  This matters for an agent that runs shell commands. MCP tools set up on the server run only for Strata's own web
-  page, unless the run config says `"mcp_for_api": true`.
+  on the real GGUF yet (the server window says at the start: a `WARNING` line means it reads them from the text). A
+  request that declares no tools, or sets `tool_choice` to `"none"`, gets no calls at all. This matters for an agent
+  that runs shell commands. MCP tools set up on the server run only for Strata's own web page, unless the run config
+  says `"mcp_for_api": true`.
 - **Several clients:** Strata answers one request at a time. The others wait, in the order they arrived. When a
   request belongs to another conversation, the engine parks the current conversation's state in RAM. A later turn
   of a parked conversation reads only the new tokens, not the whole conversation again. Parked conversations get

@@ -176,7 +176,8 @@ models.
   `strftime_now`, the tool dict shape. `tools/glm53_inspect.py` prints it; the server reads it from the GGUF.
 - Token types of `<think>`, `<tool_call>`, `<arg_key>` ... in the real GGUF (type 3 or 4). If any of the tags is not
   a special token there, `output_tags` is empty and the parser reads the tags from the text, so a call the model
-  copies from a tool result could be read as a call again.
+  copies from a tool result could be read as a call again. The server's start line says which (`tag_mode_line`: a
+  `WARNING` line that names the missing tags).
 - Whether GLM writes tool calls inside its thinking.
 - The start on napster-ai's SATA SSD: how long the mapping and the layer upload take before the first warm-up line
   (the start watchdog allows 900 s without progress), and how long the warm-up of 117-162 GB takes.

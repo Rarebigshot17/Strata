@@ -180,6 +180,30 @@ class MaxTokens(unittest.TestCase):
             del os.environ["STRATA_DEBUG"]
 
 
+class EnvSwitches(unittest.TestCase):
+    """STRATA_DEBUG and STRATA_REQUEST_LINES are off for "0", "false", "no", "off" (any case) and empty, as the other
+    STRATA_ switches read those words; any other value turns them on.  "0" turned them on."""
+
+    def test_off_words_are_off(self):
+        from serve.server import _debug_req
+        tok = GlmTokenizer()
+        svc = Service(MockEngine(tok, "hello", max_context=CTX), tok, glm_template())
+        engine = StrataEngine.__new__(StrataEngine)
+        for value, on in (("1", True), ("yes", True), ("2", True), ("0", False), ("false", False), ("No", False),
+                          (" off ", False), ("", False)):
+            with self.subTest(value=value), mock.patch.dict(os.environ, {"STRATA_DEBUG": value,
+                                                                         "STRATA_REQUEST_LINES": value}):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    _debug_req("openai", {}, [{"role": "user", "content": "hi"}], None, 8, False, 3)
+                    list(svc.run(tok.encode("hi"), False, None, 8, {}, threading.Event()))
+                    engine._parse_done("DONE 30 1200 50 300 stop 0 0 1000 40 60 0 0 0.0 200 0")
+                text = out.getvalue()
+                self.assertEqual("[strata] req openai:" in text, on, text)       # STRATA_DEBUG's request line
+                self.assertEqual("[strata] raw:" in text, on, text)              # ... and the model's raw text
+                self.assertEqual("[strata] request prompt 1200" in text, on, text)   # STRATA_REQUEST_LINES
+
+
 class FitMaxTokens(unittest.TestCase):
     """PR #24: --fit-max-tokens clamps an explicit budget that overshoots the context instead of a 400."""
 
@@ -2863,6 +2887,54 @@ class SharingTheGpu(unittest.TestCase):
         self.assertGreater(time.time() - t0, 10)                    # waited for memory being given back first
         self.svc.free_vram_mib = lambda: 9000
         self.assertEqual(self.chat()[0], 200)
+
+    def test_min_free_vram_is_checked_on_every_gpu_of_the_config(self):
+        # a layer split needs its room on every card: another program on the third card stops the load as one on the
+        # first does (only the first was read)
+        free = {0: 20000, 1: 20000, 2: 1500}
+        self.svc.gpu_index, self.svc.gpu_indices = 0, [0, 1, 2]
+        self.svc.min_free_vram_mib = 8000
+        self.svc.vram_free_wait_s = 0.2
+        self.svc.unload()
+        with mock.patch("serve.telemetry.free_vram_mib", lambda index=0: free.get(index)):
+            s, b = self.chat()
+            self.assertEqual(s, 503, b)
+            self.assertIn("1500 MiB of VRAM free on GPU 2", b["error"]["message"])
+            self.assertFalse(self.engine.alive())
+            free[2] = 9000
+            self.assertEqual(self.chat()[0], 200)
+            # a card that cannot be read is left out; when none can be, nothing is refused
+            free.update({0: None, 1: 3000})
+            self.assertEqual(self.svc.free_vram_mib(), 3000)
+            free.update({1: None, 2: None})
+            self.assertIsNone(self.svc.free_vram_mib())
+            self.svc.gpu_indices = []                                # a config that names no GPU, without NVML
+            free[0] = 4000                                           # to count the cards: the first card
+            with mock.patch("serve.telemetry.gpu_reader", lambda index=0: mock.Mock(ok=lambda: False)):
+                self.assertEqual(self.svc.free_vram_mib(), 4000)
+
+    def test_min_free_vram_reads_every_card_when_the_config_names_none(self):
+        # setup names no GPU when every card can run the engine (napster-ai's three), and the engine then splits the
+        # layers over all the cards it sees: a program on the third card is in the way as on the first
+        free = {0: 20000, 1: 20000, 2: 1500}
+        self.svc.gpu_index, self.svc.gpu_indices = 0, []
+        self.svc.min_free_vram_mib = 8000
+        self.svc.vram_free_wait_s = 0.2
+        self.svc.unload()
+        cards = mock.patch("serve.telemetry.gpu_reader", lambda index=0: mock.Mock(ok=lambda: index in free))
+        with cards, mock.patch("serve.telemetry.free_vram_mib", lambda index=0: free.get(index)), \
+                mock.patch.dict(os.environ):
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+            s, b = self.chat()
+            self.assertEqual(s, 503, b)
+            self.assertIn("1500 MiB of VRAM free on GPU 2", b["error"]["message"])
+            self.assertFalse(self.engine.alive())
+            # CUDA_VISIBLE_DEVICES in the server's environment hides cards whose NVML numbers are unknown: the first
+            os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+            self.assertEqual(self.svc.free_vram_mib(), 20000)
+            free[2] = 9000
+            del os.environ["CUDA_VISIBLE_DEVICES"]
+            self.assertEqual(self.chat()[0], 200)
 
     def test_min_free_vram_unreadable_loads(self):
         self.svc.min_free_vram_mib = 8000

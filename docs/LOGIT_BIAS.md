@@ -1,7 +1,8 @@
 # Per-request token biases
 
-`POST /v1/chat/completions` and `POST /v1/completions` accept `logit_bias`. The same bias applies to every token
-the request generates. Nothing is biased by default, and a request without the field has no bias.
+`POST /v1/chat/completions` and `POST /v1/completions` accept `logit_bias`, and so do `/v1/messages` and
+`/v1/responses` (the request is also the sampling settings there). The same bias applies to every token the request
+generates. Nothing is biased by default, and a request without the field has no bias.
 
 ## Finding a token's ID
 
@@ -48,7 +49,7 @@ The bias belongs to its request only. It is not kept in a parked conversation or
 change the model's state, so the next request without the field is unbiased again.
 
 The server refuses (HTTP 400) malformed entries, duplicate IDs in a pair list, IDs outside the vocabulary,
-out-of-range biases and a ban of the whole vocabulary. On both routes this happens before streaming starts.
+out-of-range biases and a ban of the whole vocabulary. On every route this happens before streaming starts.
 The engine says `logit_bias=1` in its `INFO` line. A server talking to an engine that lacks it refuses a non-empty
 bias instead of ignoring it.
 

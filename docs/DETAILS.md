@@ -108,13 +108,13 @@ recommendation, temperature 1.0 and top_p 0.95 ([Settings](#sampling-defaults)).
 | --- | --- | --- |
 | `temperature` | a number >= 0 | 0 is greedy (always the most likely token) |
 | `top_p` | 0 to 1 | 1 is off |
-| `top_k` | a whole number up to 2,147,483,647 | 0 (or more than the vocabulary) is off; a negative value is not passed on, so the engine's default (off) applies |
+| `top_k` | a whole number up to 2,147,483,647 | 0 (or more than the vocabulary) is off; a negative value (-1) counts as left out: the shared or configured top_k, else off |
 | `min_p` | 0 to 1 | 0 is off |
 | `repetition_penalty` (also `repeat_penalty`) | a number > 0 | 1 is off |
 | `frequency_penalty`, `presence_penalty` | finite numbers | 0 is off |
-| `penalty_last_n` (also `repeat_last_n`) | a whole number up to 2,147,483,647 | the window of the three penalties; 64 when a penalty is on and no window is given |
-| `seed` | a whole number from 1 to 2^64-1 | the same seed and request give the same draw; unset, 0 or negative is random |
-| `logit_bias` | token id -> -100..100 | a per-request token bias, checked before the answer starts on `/v1/chat/completions` and `/v1/completions` ([LOGIT_BIAS.md](LOGIT_BIAS.md)) |
+| `penalty_last_n` (also `repeat_last_n`) | a whole number up to 2,147,483,647 | the window of the three penalties; 64 when a penalty is on and no window is given (0 or a negative value counts as left out) |
+| `seed` | a whole number from 1 to 2^64-1 | the same seed and request give the same draw; 0 or negative (-1) counts as left out: the shared or configured seed, else random |
+| `logit_bias` | token id -> -100..100 | a per-request token bias, checked before the answer starts on every route ([LOGIT_BIAS.md](LOGIT_BIAS.md)) |
 
 A value of the wrong type or out of range is a 400 that names the field (`top_p: a number from 0 to 1`). That
 includes NaN and Infinity (which JSON parsers in Python accept), `true` for a number, a number with a decimal point
@@ -230,7 +230,9 @@ an agent that runs shell commands: a call written into a fetched page does not r
 text; only a call the model writes itself, with its own tokens, is a call.
 GLM's GGUF files are expected to list these tags as special tokens; on the real file this is still to be checked
 ([GLM53_SERVER_PORT.md](GLM53_SERVER_PORT.md), "Known risks"). Should one of them not be a special token, the
-server reads all of them from the text instead, and that protection is gone.
+server reads all of them from the text instead, and that protection is gone. The server window says which at the
+start: a line that calls come from the special tokens only, or a `WARNING` line that names the missing tags. Requests
+with tools are served either way (refusing them would leave every agent without tools on such a GGUF).
 
 Further rules:
 
@@ -269,8 +271,9 @@ The schema is checked with the Python package `jsonschema` when it is installed 
 "jsonschema>=4.23,<5"`; setup does not install it). Without it, only "one JSON object" is checked, and the server
 says so once. A schema's `pattern` and `patternProperties` run with the `regex` package under two limits
 (`serve/structured.py`): together they may take 2 s on one answer, and a pattern may have at most 10,000 parts with
-its repeats written out (`a{100000}` has 100,000). A pattern over either limit fails the answer's check with a 502;
-the size limit is only checked then, after the model has written the answer.
+its repeats written out (`a{100000}` has 100,000). A pattern over the size limit is a 400 when the request arrives,
+on both routes that take a JSON format (the message says where in the schema it is); one that takes longer than 2 s
+fails the answer's check with a 502.
 
 On `/v1/chat/completions`, a JSON format together with tools or MCP is a 400. On `/v1/responses` it may come with
 tools: the schema applies to the final answer, and a turn that calls a tool is passed on as written.
@@ -475,9 +478,10 @@ The Sampling drawer (the gear button in the chat) holds: **Thinking** off or on 
 until done), **Seed** (empty: random), **Show thinking**, **Use tools from MCP servers** (shown when MCP servers are
 configured) and **Use for other apps too** (the shared settings, below). They are kept in this browser. With each
 request the chat sends the temperature (and top-p and top-k when the temperature is above 0), the seed and max
-tokens when they are set, and `"reasoning_effort": "none"` when thinking is off. What it does not send falls back to
-the defaults below: with thinking **On** it sends nothing, so a run config or shared setting that turns thinking off
-applies. The About tab holds the API key (also kept in this browser) and the theme.
+tokens when they are set, and `"reasoning_effort"`: `"none"` when thinking is off, `"high"` when it is on (GLM has
+no levels), so the page's choice wins over a run config or shared setting. What it does not send falls back to the
+defaults below. **Use for other apps too** shares the same fields, thinking included. The About tab holds the API key
+(also kept in this browser) and the theme.
 
 ### Shared settings for other clients
 
@@ -584,9 +588,12 @@ The model loads when the server starts, and the port opens once the engine is re
   curl -X POST http://127.0.0.1:8101/unload -H "Content-Type: application/json" -d '{}'
   ```
 
-- `"min_free_vram_mib": N` (or `--min-free-vram-mib N`): an unloaded model is loaded again only when the first GPU of
+- `"min_free_vram_mib": N` (or `--min-free-vram-mib N`): an unloaded model is loaded again only when every GPU of
   the config has N MiB free (waiting up to 15 s for memory another program just gave back); otherwise the request
-  gets a 503 with `Retry-After`. With three GPUs only the first is checked.
+  gets a 503 with `Retry-After` that names the fullest card. A config that names no GPU (setup's when every card can
+  run the engine) means every card, as the engine uses them all; the first only when `CUDA_VISIBLE_DEVICES` is set
+  in the server's environment. A layer split needs its share on each card, so a program on any of them is in the
+  way; a card NVML cannot read is left out.
 - `"before_load": "<command>"` (a string or a list; or `--before-load`): a command run before the model is loaded
   again, for example another server's unload. It may run `"before_load_timeout_s"` seconds (default 120). When it
   fails, the model is loaded anyway, unless `min_free_vram_mib` is set and too little VRAM is free (503).
@@ -617,9 +624,9 @@ GPU.
 | `STRATA_ENGINE_READY_S` | How long a starting engine may go without progress before the server ends it (default 900; 0: no limit) |
 | `STRATA_ENGINE_STALL_S` | How long an engine may stay silent with no CPU time, no disk I/O and an idle GPU before the server ends it as frozen (default 90; 0: off; needs psutil) |
 | `STRATA_ENGINE_QUIT_S` | How long the server waits for the engine to end after `QUIT` before it kills it (default 120; 0: no limit) |
-| `STRATA_REQUEST_LINES` | `1`: one line per request on the server's output (for a supervisor such as llama-swap) |
+| `STRATA_REQUEST_LINES` | `1`: one line per request on the server's output (for a supervisor such as llama-swap); `0`, `false`, `no` or `off` is off |
 | `STRATA_DROP_CACHE_ON_EXIT` | `1`: give the model files' page cache back when the server stops |
-| `STRATA_DEBUG` | `1`: one line per request and the raw model text in the server window |
+| `STRATA_DEBUG` | `1`: one line per request and the raw model text in the server window; `0`, `false`, `no` or `off` is off |
 | `STRATA_KEEP_EMPTY_TURNS` | `1`: render empty earlier assistant turns in the prompt (they are left out by default) |
 
 ## Several clients on one engine

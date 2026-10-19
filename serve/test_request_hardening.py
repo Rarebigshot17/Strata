@@ -194,6 +194,48 @@ class Hardening(unittest.TestCase):
                 self.assertEqual(code, 400, (path, out))
                 self.assertIn(field, json.dumps(out))
 
+    def test_values_that_mean_unset_take_the_configured_ones(self):
+        """A negative top_k, or a penalty_last_n or seed <= 0, is unset (check_request_sampling): the shared or
+        configured value applies, as for a field left out.  It replaced that value in the merge and was then dropped
+        by sampling_keys, so the engine's default (top_k off, a random seed, a 64-token window) applied instead.
+        penalty_last_n 0 is unset as repeat_last_n 0 is: sampling_keys sends no window of 0 either."""
+        from serve.server import StrataEngine
+
+        class Recording(MockEngine):
+            def generate(self, ids, max_new, sampling, cancel, checkpoint=None, end_ids=None, drawn=0):
+                self.sampling = dict(sampling)
+                yield from super().generate(ids, max_new, sampling, cancel, checkpoint)
+
+        tok = ByteTokenizer()
+        engine = Recording(tok, "hello", max_context=4096)
+        svc = Service(engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"),
+                      sampling_defaults={"top_k": 40, "seed": 42, "repetition_penalty": 1.1, "penalty_last_n": 256})
+        httpd = serve(svc, port=0)
+        try:
+            self.port = httpd.server_address[1]
+            chat = {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 4}
+            for path, body in (("/v1/chat/completions", chat), ("/v1/messages", chat),
+                               ("/v1/responses", {"input": "hi", "max_output_tokens": 16}),
+                               ("/v1/completions", {"prompt": "hi", "max_tokens": 4})):
+                for unset in ({"top_k": -1, "seed": -1, "penalty_last_n": -1},
+                              {"top_k": "-5", "seed": 0, "penalty_last_n": 0}, {"repeat_last_n": 0}):
+                    with self.subTest(path=path, unset=unset):
+                        code, out = self.post(path, {**body, **unset})
+                        self.assertEqual(code, 200, out)
+                        keys = StrataEngine.sampling_keys(engine.sampling)
+                        self.assertIn(" top_k=40 ", keys)
+                        self.assertIn(" penalty_last_n=256", keys)
+                        self.assertIn(" seed=42", keys)
+                svc.shared = {"top_k": 7}                       # the Chat settings shared with other apps, likewise
+                self.assertEqual(self.post(path, {**body, "top_k": -1})[0], 200)
+                self.assertIn(" top_k=7 ", StrataEngine.sampling_keys(engine.sampling))
+                svc.shared = {}
+                self.assertEqual(self.post(path, {**body, "top_k": 0, "seed": 5})[0], 200)   # 0 is off: it wins
+                self.assertEqual((engine.sampling["top_k"], engine.sampling["seed"]), (0, 5))
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
     def test_in_type_values_and_nulls_still_answer(self):
         chat = {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 8, "temperature": 0, "top_k": 0,
                 "seed": 7}
