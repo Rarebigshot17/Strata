@@ -3822,6 +3822,34 @@ class ModelAliases(unittest.TestCase):
             httpd.server_close()
 
 
+class MonitorCards(unittest.TestCase):
+    """The Monitor reads the cards the engine runs on.  A config that names no GPU (setup's when every card can run the
+    engine: napster-ai's three) lets the engine split the layers over every card it sees, so the Monitor reads every
+    card NVML counts, as the free-VRAM check does; the first card only when CUDA_VISIBLE_DEVICES hides some."""
+
+    def cards(self, named, env=None):
+        tok = GlmTokenizer()
+        svc = Service(MockEngine(tok, "x"), tok, glm_template())
+        svc.gpu_index, svc.gpu_indices = 0, named
+        seen = {}
+        fake = lambda **kw: seen.update(kw) or SimpleNamespace(snapshot=lambda: {"now": {}})  # noqa: E731
+        with mock.patch("serve.telemetry.Telemetry", fake), \
+                mock.patch("serve.telemetry.gpu_reader", lambda index=0: mock.Mock(ok=lambda: index < 3)), \
+                mock.patch.dict(os.environ, env or {}):
+            if env is None:
+                os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+            svc.start_telemetry()
+        return seen["gpu_indices"]
+
+    def test_every_card_when_the_config_names_none(self):
+        self.assertEqual(self.cards([]), [0, 1, 2])
+        self.assertEqual(self.cards(None), [0, 1, 2])
+
+    def test_the_configs_cards_or_the_first_behind_cuda_visible_devices(self):
+        self.assertEqual(self.cards([2, 0]), [2, 0])
+        self.assertEqual(self.cards([], {"CUDA_VISIBLE_DEVICES": "1"}), [0])
+
+
 class TelemetryNoDisks(unittest.TestCase):
     """psutil.disk_io_counters() returns None where it finds no disk (a gVisor container; Windows with its disk counters
     off): the sampler goes on without a disk reading instead of its thread ending at the first sample, which left

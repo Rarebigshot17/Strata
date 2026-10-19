@@ -696,7 +696,9 @@ The web app's Monitor tab polls `GET /metrics` once a second:
   their state and tools.
 
 GPU readings come from NVIDIA's NVML library (installed with the driver); CPU, RAM and disk from `psutil` (setup
-installs it). A reading that is not available shows as a dash.
+installs it). A reading that is not available shows as a dash. The GPU readings cover the cards the engine runs on:
+the config's `"gpu"`, or every card NVML counts when it names none (the engine then splits the layers over all of
+them), or the first card only when `CUDA_VISIBLE_DEVICES` is set in the server's environment.
 
 ### GET /metrics (JSON)
 
