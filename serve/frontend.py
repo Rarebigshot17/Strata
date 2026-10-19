@@ -789,13 +789,39 @@ def value_end(text: str, start: int = 0) -> tuple[int, str]:
     return max(start, len(text) - len(VALUE_END) + 1), "open"
 
 
-def _string_params(tool) -> set[str]:
-    """The parameters a tool's schema types as "string": their values are kept as written."""
+def _json_types(schema, branches: bool = True) -> set[str] | None:
+    """The JSON types a parameter's schema allows: its "type" (a name or a list of names, as zod's .nullable() writes
+    it) or the types of its anyOf / oneOf branches (Pydantic's and FastMCP's `str | None`).  None: it does not say."""
+    if not isinstance(schema, dict):
+        return None
+    kind = schema.get("type")
+    if isinstance(kind, str):
+        return {kind}
+    if isinstance(kind, list) and kind and all(isinstance(k, str) for k in kind):
+        return set(kind)
+    alts = schema.get("anyOf", schema.get("oneOf")) if branches else None
+    if isinstance(alts, list) and alts:
+        types = [_json_types(b, False) for b in alts]
+        if None not in types:
+            return set().union(*types)
+    return None
+
+
+def _param_types(tool) -> dict[str, set[str]]:
+    """The JSON types of the parameters of a tool's schema, for those it says (see _json_types)."""
     params = tool.get("parameters") if isinstance(tool, dict) else None
     props = params.get("properties") if isinstance(params, dict) else None
     if not isinstance(props, dict):
-        return set()
-    return {k for k, v in props.items() if isinstance(v, dict) and v.get("type") == "string"}
+        return {}
+    return {k: t for k, t in ((k, _json_types(v)) for k, v in props.items()) if t}
+
+
+_KIND = {type(None): "null", bool: "boolean", float: "number", str: "string", list: "array", dict: "object"}
+
+
+def _kinds(value) -> set[str]:
+    """The JSON types of `value` (decoded JSON)."""
+    return {"integer", "number"} if type(value) is int else {_KIND[type(value)]}
 
 
 def _escape(text: str) -> str:
@@ -816,8 +842,9 @@ class CallReader:
     feed() returns the call's arguments as pieces of one JSON object: "{" once the name is known, then for each
     argument `"key":` and its value - a string parameter's text JSON-escaped as it arrives, any other value whole
     once it is complete - and "}" at `</tool_call>`.  Values are kept as written: a parameter the tool's schema types
-    as "string" is the text itself, any other is JSON-decoded (the text itself when it is not JSON), as the template
-    writes them (`v | tojson if v is not string else v`).  `args` holds the decoded arguments."""
+    as "string" is the text itself, any other is JSON-decoded (the text itself when it is not JSON, or for a parameter
+    that may also be a string, when it is not one of its other types), as the template writes them
+    (`v | tojson if v is not string else v`).  `args` holds the decoded arguments."""
 
     def __init__(self, schemas: dict, declared: bool = True):
         self.schemas = schemas
@@ -828,7 +855,8 @@ class CallReader:
         self.stage = "name"          # name -> between -> key -> value -> str | raw -> between ... -> done (or prose)
         self.name: str | None = None
         self.args: dict = {}
-        self.strings: set[str] = set()
+        self.types: dict[str, set[str]] = {}     # the JSON types of the tool's parameters (_param_types)
+        self.strings: set[str] = set()           # the parameters that are strings only
         self.key = ""
         self.count = 0               # arguments written so far
         self.part: list[str] = []    # the current value's text read so far
@@ -851,9 +879,15 @@ class CallReader:
         if key in self.strings:
             return value
         try:
-            return json.loads(value)
+            decoded = json.loads(value)
         except (ValueError, RecursionError):
             return value
+        # a parameter that may be a string or another type (str | None): the decoded value only when it is one of the
+        # others ("null" is None), else the text as written ("123", {"a": 1} written to a file)
+        types = self.types.get(key, set())
+        if "string" in types and not _kinds(decoded) & (types - {"string"}):
+            return value
+        return decoded
 
     def written(self) -> str:
         return "".join(self.seen)
@@ -878,7 +912,8 @@ class CallReader:
                     if not self._is_name(name):
                         self.stage = "prose"
                         return out
-                    self.name, self.strings = name, _string_params(self.schemas.get(name))
+                    self.name, self.types = name, _param_types(self.schemas.get(name))
+                    self.strings = {k for k, t in self.types.items() if t == {"string"}}
                     self.text, self.stage = after, "between"
                     out.append("{")
                 elif KEY_START.startswith(after) or CALL_END.startswith(after):

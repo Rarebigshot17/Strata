@@ -192,6 +192,20 @@ class ToolCalls(Base):
                          [("write_file", {"path": " a b ", "content": "\nline 1\n\tline 2\n\n", "mode": 5,
                                           "raw": "not json"})])
 
+    def test_nullable_and_union_string_params(self):
+        # str | None (Pydantic, FastMCP: anyOf; zod's .nullable(): a type list) and other unions with a string: a value
+        # is decoded only when it is one of the other types the schema allows, else it is the text as written
+        tools = [{"name": "w", "parameters": {"type": "object", "properties": {
+            "content": {"anyOf": [{"type": "string"}, {"type": "null"}]}, "msg": {"type": ["string", "null"]},
+            "n": {"oneOf": [{"type": "string"}, {"type": "integer"}]}, "f": {"type": ["number", "string"]}}}}]
+        for key, value, want in (("content", '{"debug": true}', '{"debug": true}'), ("content", "null", None),
+                                 ("content", '"q"', '"q"'), ("msg", "123", "123"), ("msg", "true", "true"),
+                                 ("msg", "null", None), ("n", "42", 42), ("n", "4.5", "4.5"), ("n", "[1]", "[1]"),
+                                 ("f", "4.5", 4.5), ("f", "4", 4), ("f", "x y", "x y")):
+            with self.subTest(key=key, value=value):
+                text = f"<tool_call>w<arg_key>{key}</arg_key><arg_value>{value}</arg_value></tool_call>"
+                self.assertEqual(self.calls(text, thinking=False, tools=tools), [("w", {key: want})])
+
     def test_escapes_and_unicode_stream_as_json(self):
         content = 'He said "hi" \\ path\\to\\x é\U0001F642 \x01\t end'
         text = (f"<tool_call>write_file<arg_key>path</arg_key><arg_value>a</arg_value><arg_key>content</arg_key>"
