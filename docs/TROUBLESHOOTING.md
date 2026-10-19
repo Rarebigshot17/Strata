@@ -58,7 +58,8 @@ Ubuntu/Debian" or "the CUDA Toolkit can be installed automatically on Ubuntu 22.
 with your distribution's packages (Arch: `pacman -S base-devel cuda`) or from
 [developer.nvidia.com/cuda-downloads](https://developer.nvidia.com/cuda-downloads), then run it again. A CUDA
 toolkit of 12.0 or newer that is already installed is used as it is (setup installs CUDA 13.0 only when none
-of 12.0 or newer is); setup finds `nvcc` on `PATH`, under `CUDA_PATH` or `CUDA_HOME`, in `/usr/local/cuda*` and in `/opt/cuda*`.
+of 12.0 or newer is); setup finds `nvcc` on `PATH`, under `CUDA_PATH` or `CUDA_HOME`, in `/usr/local/cuda*` and in
+`/opt/cuda*`.
 
 **The engine does not compile** (`command failed (exit N): cmake`).
 The compiler's own error is printed above that line. Setup already tried the build twice. Two mismatches between
@@ -92,8 +93,8 @@ Run `./setup.sh` again: downloads continue where they stopped. What setup says a
 
 **"not enough free disk space in <folder>: need ~N GB"**.
 The model files are about 120 GB (3-bit) or 170 GB (4-bit), calculated from the model's shapes; setup prints the
-real total from the repository's listing before it downloads. Put them on a bigger drive: `--models-dir <folder>`, or `--data-dir <folder>`, which
-is remembered for every Strata folder on this PC.
+real total from the repository's listing before it downloads. Put them on a bigger drive: `--models-dir <folder>`,
+or `--data-dir <folder>`, which is remembered for every Strata folder on this PC.
 
 **"<size>'s experts (~N GB) do not fit beside Linux and the server in this PC's N GB of RAM"**.
 Every routed expert stays in RAM: about 117 GB at 3-bit and about 162 GB at 4-bit (calculated from the model's
@@ -130,10 +131,11 @@ The server prints the engine log's last lines under it, and they say why. The co
   know. Take it out (the usage text lists the options it takes).
 - **`strata-glm: CUDA cudaMalloc...: out of memory`**: the GPUs have too little free VRAM for the layers and the
   attention cache. The engine reserves the attention cache for the whole context at start: 11 KB per token
-  (calculated, the figure setup uses), so 1.5 GB at 131,072 tokens and 11.8 GB at 1,048,576. Choose a shorter context
-  (`./setup.sh --setup --context 262144`, or change the number after `--ctx` in the run config's `"args"`), close
-  other programs that hold VRAM (`nvidia-smi` lists them), or remove a `"split"` you set by hand. Whatever VRAM is
-  left after the layers goes to the expert cache, less `--vram-reserve` (1 GB per GPU by default).
+  (calculated, the figure setup uses), so 1.5 GB at 131,072 tokens and 11.8 GB at 1,048,576. Choose a shorter
+  context (`./setup.sh --setup --context 262144`, or change the number after `--ctx` in the run config's
+  `"args"`), close other programs that hold VRAM (`nvidia-smi` lists them), or remove a `"split"` you set by hand.
+  Whatever VRAM is left after the layers goes to the expert cache, less `--vram-reserve` (1 GB per GPU by
+  default).
 - **A negative exit code** (`-9`) and nothing in the log: Linux ended the engine, most often for lack of RAM.
   `sudo dmesg | grep -i -E 'killed process|out of memory'` confirms it. See
   [The engine died](#the-engine-died) for what to do.
@@ -182,10 +184,10 @@ The request ends with an error (a 503 that ends in "the next request restarts it
 that had started), and the next request starts the engine again. What the server adds:
 
 - "The usual cause is running out of RAM ...": the engine left no reason of its own; most often a signal ended
-  it, sent by Linux's out-of-memory killer (check with `dmesg` as above). The experts are read through the page cache, which Linux can
-  give back; what it cannot take back is the engine's own buffers, the parked conversations (`--park-mib`) and every
-  other program. Close other programs, lower `--park-mib` (setup: `./setup.sh --park-mib 4096`), or use the 3-bit
-  model.
+  it, sent by Linux's out-of-memory killer (check with `dmesg` as above). The experts are read through the page
+  cache, which Linux can give back; what it cannot take back is the engine's own buffers, the parked conversations
+  (`--park-mib`) and every other program. Close other programs, lower `--park-mib` (setup:
+  `./setup.sh --park-mib 4096`), or use the 3-bit model.
 - "The engine exited (code N). Its last log line: ...": the engine ended by itself and said why.
 - "The engine exited (code N) after it reported: ...": the engine reported an error before it exited.
 
@@ -299,9 +301,9 @@ The server turns the model's output into a tool call only when:
   fetched page is not run because the model repeated it.
 
 A call written inside the thinking is run only when the turn shows it was meant: nothing but more calls follows it
-before the thinking or the turn ends. The window then says `tool calls inside the thinking: N read as calls, M kept
-as reasoning`. `"tool_call_recovery": true`
-in the run config also accepts a declared tool's call written as JSON inside `<tool_call>`.
+before the thinking or the turn ends, and it is not quoted (in code or on a "> " line). The window then says
+`tool calls inside the thinking: N read as calls, M kept as reasoning`. `"tool_call_recovery": true` in the run
+config also accepts a declared tool's call written as JSON inside `<tool_call>`.
 
 ## Open WebUI cannot connect
 
