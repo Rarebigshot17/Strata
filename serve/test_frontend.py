@@ -323,6 +323,24 @@ class ThinkingKwargs(unittest.TestCase):
                          {"reasoning_effort": "high"})
         self.assertEqual(openai_to_messages({"messages": msgs})[2], {})
 
+    def test_zai_thinking_switch_on_chat(self):
+        # Z.ai's switch for GLM on its OpenAI-compatible API: "thinking": {"type": "disabled" | "enabled"}.  It wins
+        # over an effort (the run config's, which the server fills in when a request has none of its own fields)
+        msgs = [{"role": "user", "content": "hi"}]
+        for thinking, fields, want in (
+                ({"type": "disabled"}, {}, {"enable_thinking": False}),
+                ({"type": "disabled"}, {"reasoning_effort": "high"}, {"enable_thinking": False}),
+                ({"type": "enabled"}, {}, {}),
+                ({"type": "enabled"}, {"reasoning_effort": "none"}, {}),
+                ({"type": "enabled"}, {"reasoning_effort": "high"}, {"reasoning_effort": "high"}),
+                ({"type": "disabled"}, {"chat_template_kwargs": {"enable_thinking": True}}, {"enable_thinking": True}),
+                ({"type": "auto"}, {"reasoning_effort": "none"}, {"enable_thinking": False})):
+            with self.subTest(thinking=thinking, fields=fields):
+                self.assertEqual(openai_to_messages({"messages": msgs, "thinking": thinking, **fields})[2], want)
+        rendered = ChatTemplate(TEMPLATE).render(msgs, **openai_to_messages(
+            {"messages": msgs, "thinking": {"type": "disabled"}})[2])
+        self.assertTrue(rendered.endswith("<|assistant|></think>"), rendered[-40:])
+
     def test_every_chat_template_kwarg_reaches_the_template(self):
         msgs = [{"role": "user", "content": "hi"}]
         for convert in (openai_to_messages, anthropic_to_messages):

@@ -549,6 +549,13 @@ def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
     # OpenAI Chat Completions: "reasoning_effort"; Responses style: "reasoning": {"effort": ...}
     reasoning = req.get("reasoning") if isinstance(req.get("reasoning"), dict) else {}
     kwargs.update(effort_kwargs(req.get("reasoning_effort") or reasoning.get("effort")))
+    # Z.ai's switch for GLM on its OpenAI-compatible API (as on /v1/messages): "thinking": {"type": "disabled" |
+    # "enabled"}, over an effort (the run config's fills in for a request that sends none of the fields above)
+    thinking = req["thinking"].get("type") if isinstance(req.get("thinking"), dict) else None
+    if thinking == "disabled":
+        kwargs = {"enable_thinking": False}
+    elif thinking == "enabled" and kwargs.get("enable_thinking") is False:
+        kwargs = {}
     kwargs = merge_template_kwargs(kwargs, req.get("chat_template_kwargs"))
     return _late_system_to_user(messages), tools, kwargs
 
