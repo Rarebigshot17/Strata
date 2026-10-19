@@ -1036,10 +1036,11 @@ def build_engine(archs, yes, llama, force=False) -> Path:
     return BUILD_DIR / EXE
 
 
-def update_installed_engine(force=False) -> None:
+def update_installed_engine(force=False, yes=False) -> None:
     """Before a start or with --update: the engine is compiled again when its source changed (a `git pull`), when it
     is missing, or when the PC has a GPU it has no code for.  A failed compile keeps the installed engine: the model
-    starts as before."""
+    starts as before.  `yes` (--yes) answers the one question it can ask, whether to install missing build tools,
+    with the recommended y: it never waits for an answer."""
     meta = installed_build()
     usable = [g for g in gpus() if gpu_problem(g) is None]
     archs = card_archs(usable) or [int(x) for x in meta.get("archs", [])]
@@ -1051,7 +1052,7 @@ def update_installed_engine(force=False) -> None:
     if (BUILD_DIR / EXE).exists() and not force:
         say("  The engine's source changed, or a GPU is new: compiling it again ...")
     try:
-        build_engine(archs, False, get_llama_cpp(), force=True)
+        build_engine(archs, yes, get_llama_cpp(), force=True)
     except (Exception, SystemExit) as e:               # a failed compile must not stop the model from starting
         warn(f"could not compile the updated engine{'' if isinstance(e, SystemExit) else f' ({e})'}: starting the "
              "installed one")
@@ -1408,14 +1409,15 @@ def write_run_script(tag, cfg_path, port, open_browser=True):
 def update_install(have: list, a) -> int:
     """#475: `setup.py --update` (update.sh, after its git pull): what a plain ./setup.sh does to an install before it
     starts the model, without starting it - the Python packages and the engine (compiled again when its source
-    changed; --build: always).  No question is asked and the model files are not touched."""
+    changed; --build: always).  The model files are not touched.  No question is asked, except whether to install
+    the C++ compiler or the CUDA toolkit when they went missing; --yes answers it (y)."""
     have = [p for p in have if model_config(p)]        # #549: a strata-glm-*.json that is no model config is skipped
     if not have:
         say("  No model is installed in this Strata folder yet: run ./setup.sh to set it up - it finds an earlier")
         say("  install's model files in the data folder and reuses them.")
         return 0
     python_packages()
-    update_installed_engine(force=a.build)
+    update_installed_engine(force=a.build, yes=a.yes)
     for cfg_path in have:
         ok(f"{cfg_path.name}: up to date")
     say()
@@ -1676,7 +1678,7 @@ def main() -> int:
     port = a.port or PORT                              # a new install's port (issue #32: --port for an existing one)
     keep = {"host": a.host, "api_key": a.api_key, "park_mib": a.park_mib, "open_browser": a.browser}
     if have and not explicit:
-        update_installed_engine(force=a.build)
+        update_installed_engine(force=a.build, yes=a.yes)
         run_gpu = parse_gpus(a.gpus, gpus()) if a.gpus else a.gpu
         if len(have) == 1:
             return start(have[0], a.port, run_gpu, keep=keep)

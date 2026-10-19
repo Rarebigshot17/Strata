@@ -561,10 +561,11 @@ Before you enable it:
 
 In a git clone it runs `git pull --ff-only`, then `./setup.sh --update`: the Python packages, and the engine compiled
 again when its source changed. It asks nothing (unless the C++ compiler or the CUDA toolkit has gone missing: then
-it asks to install them), does not touch the model files and does not start the model. Options
-go on to `setup.py` (`./update.sh --build` compiles the engine even when it is up to date). A running server keeps the
-engine it started; restart the model to use the new one. If `git pull` fails (files you changed can stop it), nothing
-is updated and it says so. If the new engine does not compile, the one you had stays and still starts.
+it asks to install them; `./update.sh --yes` takes the answer y without asking), does not touch the model files and
+does not start the model. Options go on to `setup.py` (`./update.sh --build` compiles the engine even when it is up
+to date). A running server keeps the engine it started; restart the model to use the new one. If `git pull` fails
+(files you changed can stop it), nothing is updated and it says so. If the new engine does not compile, the one you
+had stays and still starts.
 
 In a copy that was not made with git, `./update.sh` cannot fetch new files. Download the new zip
 (https://github.com/Rarebigshot17/Strata/archive/refs/heads/glm53-flash.zip), unzip it anywhere and run `./setup.sh` in

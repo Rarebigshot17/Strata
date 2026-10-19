@@ -28,8 +28,8 @@ class Update(unittest.TestCase):
                      encoding="utf-8")
         return p
 
-    def run_update(self, have, build=False):
-        a = mock.Mock(build=build)
+    def run_update(self, have, build=False, yes=False):
+        a = mock.Mock(build=build, yes=yes)
         out = io.StringIO()
         with mock.patch.object(setup, "python_packages") as pip, \
                 mock.patch.object(setup, "update_installed_engine") as eng, \
@@ -45,7 +45,7 @@ class Update(unittest.TestCase):
             rc, pip, eng, start, call, out = self.run_update([p])
         self.assertEqual(rc, 0)
         pip.assert_called_once()
-        eng.assert_called_once_with(force=False)
+        eng.assert_called_once_with(force=False, yes=False)
         start.assert_not_called()
         call.assert_not_called()
         self.assertIn("strata-glm-ud-iq3_xxs.json: up to date", out)
@@ -56,7 +56,29 @@ class Update(unittest.TestCase):
             p = self.config(Path(d))
             rc, pip, eng, *_ = self.run_update([p], build=True)
         self.assertEqual(rc, 0)
-        eng.assert_called_once_with(force=True)
+        eng.assert_called_once_with(force=True, yes=False)
+
+    def test_yes_never_asks_for_the_build_tools(self):
+        """./update.sh --yes where the build tools went missing: --yes takes the recommended answer, it never waits
+        for one (an agent's shell has nobody to type it).  The installed engine stays when the compile fails."""
+        with tempfile.TemporaryDirectory() as d:
+            build = Path(d) / "build"
+            build.mkdir()
+            (build / setup.EXE).write_bytes(b"")
+            (build / "BUILD.json").write_text(json.dumps({"src": "older", "archs": [86]}), encoding="utf-8")
+            p = self.config(Path(d))
+            card = {"index": 0, "name": "RTX 3090 Ti", "vram_gb": 24.0, "arch": "86", "driver": "580.95.05"}
+            asked = mock.Mock(return_value="n")
+            out = io.StringIO()
+            with mock.patch.object(setup, "BUILD_DIR", build), mock.patch.object(setup, "python_packages"), \
+                    mock.patch.object(setup, "gpus", return_value=[card]), \
+                    mock.patch.object(setup, "get_llama_cpp", return_value=Path(d) / "llama.cpp"), \
+                    mock.patch.object(setup, "find_nvcc", return_value=(None, None)), \
+                    mock.patch.object(setup.shutil, "which", return_value=None), \
+                    mock.patch("builtins.input", asked), contextlib.redirect_stdout(out):
+                self.assertEqual(setup.update_install([p], mock.Mock(build=False, yes=True)), 0)
+        asked.assert_not_called()
+        self.assertIn("could not compile the updated engine: starting the installed one", out.getvalue())
 
     def test_nothing_installed(self):
         rc, pip, eng, start, call, out = self.run_update([])
@@ -88,6 +110,18 @@ class Update(unittest.TestCase):
             with mock.patch.object(setup, "ROOT", Path(d)), contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(setup.installed_configs(), [p])    # a Qwen config is no GLM model
                 self.assertEqual(setup.older_configs(), [Path(d) / "strata-iq3_s.json"])
+
+    def test_a_start_with_yes_passes_it_on(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = self.config(Path(d))
+            with mock.patch.object(sys, "argv", ["setup.py", "--yes"]), \
+                    mock.patch.object(setup, "data_folder", return_value=(Path(d), [])), \
+                    mock.patch.object(setup, "installed_configs", return_value=[p]), \
+                    mock.patch.object(setup, "update_installed_engine") as eng, \
+                    mock.patch.object(setup, "start", return_value=0), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(setup.main(), 0)
+        eng.assert_called_once_with(force=False, yes=True)
 
     def test_main_update_never_starts(self):
         with tempfile.TemporaryDirectory() as d:
