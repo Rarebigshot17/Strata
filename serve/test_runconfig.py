@@ -65,6 +65,22 @@ class Apply(unittest.TestCase):
         with self.assertRaises(ValueError):                              # one bad value: nothing is applied
             runconfig.apply(CFG, {"fit_max_tokens": True, "sampling.top_k": -1})
 
+    def test_only_finite_numbers(self):
+        # Python's json reads NaN, Infinity and 1e400: NaN passed every range test (idle_unload_s NaN unloaded the
+        # model at every idle moment), Infinity reached int() (OverflowError), and a huge park_mib or
+        # vram_reserve_gb overflowed the engine's cast to size_t
+        nan, inf = float("nan"), float("inf")
+        for key in ("idle_unload_s", "engine_silence_s", "vram_reserve_gb", "park_mib", "reasoning_budget_tokens",
+                    "sampling.temperature", "sampling.top_p", "sampling.top_k", "sampling.min_p"):
+            for v in (nan, inf, -inf):
+                with self.subTest(key=key, v=v), self.assertRaises(ValueError):
+                    runconfig.apply(CFG, {key: v})
+        for key, v in (("park_mib", 1e300), ("park_mib", 1 << 50), ("vram_reserve_gb", 1e12)):
+            with self.subTest(key=key, v=v), self.assertRaises(ValueError):
+                runconfig.apply(CFG, {key: v})
+        new, _ = runconfig.apply(CFG, {"vram_reserve_gb": 24, "park_mib": 262144, "idle_unload_s": 86400})
+        self.assertEqual(new["args"][len(CFG["args"]):], ["--vram-reserve", "24", "--park-mib", "262144"])
+
     def test_top_k_has_no_cap(self):                                     # the GLM sampler takes any top_k; 0 = off
         for k in (0, 64, 65, 200, 1000):
             new, _ = runconfig.apply(CFG, {"sampling.top_k": k})
@@ -142,11 +158,29 @@ class Http(unittest.TestCase):
         status, _ = self.call("POST", b'{"set": {"fit_max_tokens": true}}', {"Content-Type": "text/plain"})
         self.assertEqual(status, 415)
         for body in ({"set": {"api_key": ""}}, {"set": {"mcp_servers": {"x": {"command": "calc"}}}},
-                     {"set": {"sampling.top_k": -1}}, {"nothing": 1}, b"not json"):
+                     {"set": {"sampling.top_k": -1}}, {"nothing": 1}, b"not json",
+                     b'{"set": {"idle_unload_s": NaN}}', b'{"set": {"park_mib": Infinity}}',
+                     b'{"set": {"park_mib": 1e400}}', b'{"set": {"vram_reserve_gb": -Infinity}}'):
             status, b = self.call("POST", body, {"Origin": f"http://{self.host}"})
             self.assertEqual(status, 400, (body, b))
         self.assertEqual(self.path.read_bytes(), before)                 # nothing was written
         self.assertFalse((self.path.parent / "strata-q2_0.json.bak").exists())
+
+    def test_a_file_with_nan(self):
+        # an earlier version took "idle_unload_s": NaN and wrote it; only standard JSON is written now, and a save
+        # that cannot be written touches nothing (not the .bak either) until that key is set again
+        self.path.write_text(json.dumps({**CFG, "idle_unload_s": float("nan")}, indent=1), encoding="utf-8")
+        before = self.path.read_bytes()
+        origin = {"Origin": f"http://{self.host}"}
+        status, b = self.call("POST", {"set": {"fit_max_tokens": True}}, origin)
+        self.assertEqual(status, 400, b)
+        self.assertIn("NaN or Infinity", b["error"]["message"])
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertFalse((self.path.parent / "strata-q2_0.json.bak").exists())
+        with contextlib.redirect_stdout(io.StringIO()):
+            status, b = self.call("POST", {"set": {"idle_unload_s": 600, "fit_max_tokens": True}}, origin)
+        self.assertEqual(status, 200, b)
+        self.assertEqual(self.saved(), {**CFG, "idle_unload_s": 600, "fit_max_tokens": True})
 
     def test_the_api_key(self):
         self.svc.api_key = "secret"

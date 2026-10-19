@@ -10,12 +10,14 @@ used from the next start on.
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 from pathlib import Path
 
 # (key, kind, help).  kind: "bool", "int>=0", "num>=0", ("enum", values), "names", or ("sampling", check) for a key
-# of the "sampling" block, ("arg", flag, check) for an engine option kept in "args" ("int>=0" or "num>=0").
+# of the "sampling" block, ("arg", flag, check, most) for an engine option kept in "args" ("int>=0" or "num>=0", at
+# most `most`: the engine turns it into a size_t).
 EDITABLE = [
     ("sampling.temperature", ("sampling", "num>=0"),
      "Default temperature for requests that send none (0 = greedy; empty: 1.0)"),
@@ -32,9 +34,9 @@ EDITABLE = [
     ("engine_silence_s", "num>=0", "End a request when the engine says nothing for this long (default 300 s, 0 = wait)"),
     ("api_monitor", "bool", "Keep the last 100 requests' prompts and answers in memory for /api-monitor"),
     ("open_browser", "bool", "Open the chat page in the browser when the model is ready"),
-    ("vram_reserve_gb", ("arg", "--vram-reserve", "num>=0"),
+    ("vram_reserve_gb", ("arg", "--vram-reserve", "num>=0", 1024),
      "VRAM in GB the engine leaves free on each GPU after its expert cache (engine default 1)"),
-    ("park_mib", ("arg", "--park-mib", "int>=0"),
+    ("park_mib", ("arg", "--park-mib", "int>=0", 1 << 24),
      "RAM in MiB for parked conversations and checkpoints, so a chat resumes without reading it again "
      "(engine default 8192, 0 = none)"),
 ]
@@ -77,9 +79,10 @@ def view(cfg: dict, path: str | Path) -> dict:
 
 
 def _number(key, v, whole=False, lo=0.0, hi=None, lo_open=False):
-    if isinstance(v, bool) or not isinstance(v, (int, float)) or (whole and v != int(v)) or \
-            (v <= lo if lo_open else v < lo) or (hi is not None and v > hi):
-        rng = f"{'more than' if lo_open else 'at least'} {lo:g}" + (f" and at most {hi:g}" if hi is not None else "")
+    # Python's json reads NaN, Infinity and 1e400 (inf): NaN passes every comparison, so they are refused first
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or (isinstance(v, float) and not math.isfinite(v)) or \
+            (whole and v != int(v)) or (v <= lo if lo_open else v < lo) or (hi is not None and v > hi):
+        rng = f"{'more than' if lo_open else 'at least'} {lo:g}" + (f" and at most {hi}" if hi is not None else "")
         raise ValueError(f"{key}: expected a {'whole ' if whole else ''}number, {rng}, not {v!r}")
     return int(v) if whole else v
 
@@ -111,7 +114,7 @@ def check(key: str, v):
     if k == "num>=0":
         return _number(key, v)
     if k == "arg":
-        return _number(key, v, whole=kind[2] == "int>=0")
+        return _number(key, v, whole=kind[2] == "int>=0", hi=kind[3])
     rule = kind[1]                                     # a sampling key: the server's own rules
     if rule == "num>=0":
         return float(_number(key, v))
@@ -168,10 +171,15 @@ def apply(cfg: dict, changes: dict) -> tuple[dict, list[str]]:
 def save(path: str | Path, cfg: dict) -> Path:
     """The config written whole (a temporary file moved over the old one), the earlier one kept as <name>.bak."""
     path = Path(path)
+    try:
+        text = json.dumps(cfg, indent=1, allow_nan=False)                # standard JSON only
+    except ValueError:
+        raise ValueError(f"{path.name} holds NaN or Infinity, which JSON does not allow: set that key again here, "
+                         "or correct the file by hand") from None
     bak = path.with_name(path.name + ".bak")
     shutil.copyfile(path, bak)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
+    tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
     return bak
 
