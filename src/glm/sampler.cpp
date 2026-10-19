@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <cfloat>
 #include <cmath>
 #include <cstdlib>
 #include <numeric>
@@ -67,8 +68,8 @@ bool SamplingParams::set(const std::string& key, const std::string& value) {
 
 std::string SamplingParams::check(int64_t n_vocab) const {
     if (!bias_error.empty()) return bias_error;
-    // a draw needs finite weights: an infinite or NaN value, or a repetition penalty of 0 or below (a positive logit
-    // over 0 is infinite; a negative one turns a ban's -inf into +inf), leaves none, and a banned token can come out
+    // a draw needs finite weights: an infinite or NaN value leaves none, and a banned token can come out; a
+    // repetition penalty of 0 or below is none (a positive logit over 0 is infinite, below 0 the signs flip)
     const std::pair<const char*, float> values[] = {{"temperature", temperature}, {"top_p", top_p}, {"min_p", min_p},
         {"penalty_repeat", penalty_repeat}, {"penalty_freq", penalty_freq}, {"penalty_present", penalty_present}};
     for (const auto& [key, v] : values)
@@ -102,8 +103,12 @@ int32_t Sampler::sample(const std::vector<float>& logits_in, const std::vector<i
         for (const auto& [tok, cnt] : count) {
             if (tok < 0 || tok >= n) continue;
             float& l = logits[(size_t) tok];
+            if (l == -INFINITY) continue;                // a ban stays one (minus a -inf penalty it was NaN)
             l = l <= 0.0f ? l * p_.penalty_repeat : l / p_.penalty_repeat;
             l -= (float) cnt * p_.penalty_freq + (cnt > 0 ? p_.penalty_present : 0.0f);
+            // a huge penalty overflows: the least or the most likely token then, never +-inf or NaN (an infinite
+            // best logit gives NaN weights)
+            l = std::isnan(l) ? -FLT_MAX : std::clamp(l, -FLT_MAX, FLT_MAX);
         }
     }
 

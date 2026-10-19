@@ -78,12 +78,14 @@ int main() {
         e.set("logit_bias", "1:-100,0:-100"); std::printf("  2-token vocab all banned -> %s\n", e.check(2).c_str()); bad += e.check(2).empty();
     }
     // settings that leave nothing to draw from are refused: a repetition penalty of 0 or below (a positive logit
-    // over 0 is infinite; a negative one turns a ban's -inf into +inf, so the banned token comes out) and values
+    // over 0 is infinite; a negative one turned a ban's -inf into +inf, so the banned token came out) and values
     // that are not finite numbers
     {
         std::vector<float> l(10, 0.0f); l[3] = 2.0f;
         SamplingParams q; q.set("logit_bias", "3:-100"); q.set("penalty_repeat", "-1"); Sampler gq(q);
-        std::printf("penalty_repeat -1 with token 3 banned and in the history: greedy -> %d\n", gq.sample(l, {3}));
+        const int got = gq.sample(l, {3});
+        std::printf("penalty_repeat -1 with token 3 banned and in the history: greedy -> %d %s\n", got, got != 3 ? "ok" : "FAIL");
+        bad += got == 3;
         for (auto [key, value] : {std::pair{"penalty_repeat", "0"}, {"penalty_repeat", "-1"}, {"penalty_repeat", "nan"},
                                   {"temperature", "inf"}, {"temperature", "1e39"}, {"temperature", "nan"},
                                   {"top_p", "nan"}, {"min_p", "inf"}, {"penalty_freq", "-inf"},
@@ -96,6 +98,29 @@ int main() {
         SamplingParams ok; ok.set("penalty_repeat", "1.1"); ok.set("temperature", "0.7"); ok.set("penalty_freq", "-0.5");
         std::printf("  accepted penalty_repeat=1.1 temperature=0.7 penalty_freq=-0.5 %s\n", ok.check(10).empty() ? "ok" : "FAIL");
         bad += !ok.check(10).empty();
+    }
+    // finite penalties so large that they overflow: a ban stays one (-inf minus -inf was NaN, which greedy took at
+    // id 0 and a draw at the end), and an overflowing boost is the most likely token, not +inf (NaN weights: every
+    // draw went to one of the boosted tokens)
+    {
+        int out = 0;
+        for (int ban : {0, 9})
+            for (const char* temp : {"0", "1"})
+                for (const char* top_p : {"1", "0.9"}) {
+                    std::vector<float> l(10, 0.0f); l[5] = 2.0f;
+                    SamplingParams p; p.set("logit_bias", (std::to_string(ban) + ":-100").c_str());
+                    p.set("penalty_freq", "-2e38"); p.set("temperature", temp); p.set("top_p", top_p); p.set("seed", "1");
+                    Sampler s(p);
+                    for (int i = 0; i < 100; ++i) out += s.sample(l, {ban, ban, 5}) == ban;
+                }
+        std::vector<float> l(10, 0.0f); l[5] = 2.0f; l[6] = 1.5f;
+        SamplingParams p; p.set("penalty_repeat", "1e-40"); p.set("temperature", "1"); p.set("seed", "1");
+        Sampler s(p); int five = 0, six = 0;
+        for (int i = 0; i < 400; ++i) { const int t = s.sample(l, {5, 6}); five += t == 5; six += t == 6; }
+        std::printf("penalty_freq -2e38 with the banned token in the history: banned drawn %d/800; penalty_repeat 1e-40 "
+                    "boosting 5 and 6: %d and %d of 400 %s\n", out, five, six,
+                    out == 0 && five > 100 && six > 100 && five + six == 400 ? "ok" : "FAIL");
+        bad += !(out == 0 && five > 100 && six > 100 && five + six == 400);
     }
     // integer keys beyond int's range are its nearest end: a penalty window of 2^32 tokens covers the whole history
     // (cast to int it read INT_MIN on x86, a window of nothing), a top_k of 1e20 is off
