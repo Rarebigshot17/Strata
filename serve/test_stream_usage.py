@@ -54,6 +54,7 @@ class IncludeUsage(unittest.TestCase):
         tail, last = chunks[-1], chunks[-2]
         self.assertEqual(tail["choices"], [])
         self.assertEqual(tail["object"], "text_completion")
+        self.assertEqual(last["choices"][0]["finish_reason"], "length")
         self.assertEqual(tail["usage"]["completion_tokens"], 4)
         self.assertEqual([c for c in chunks if c.get("usage")], [tail])
 
