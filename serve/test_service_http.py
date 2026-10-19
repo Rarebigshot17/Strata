@@ -8,9 +8,72 @@ import os
 import tempfile
 import threading
 import unittest
+import urllib.error
+import urllib.request
 from unittest import mock
 
-from serve.server import ConvCacheLog
+from serve.glm_fixtures import GlmTokenizer, glm_template
+from serve.server import ConvCacheLog, MockEngine, Service, serve
+
+
+class RestartableEngine(MockEngine):
+    """A MockEngine that can die and be started again, as StrataEngine (auto_load)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.running, self.unloaded, self.starting, self.starts = True, False, False, 0
+
+    def alive(self):
+        return self.running
+
+    def exit_code(self):
+        return None
+
+    def restart(self):
+        self.running, self.unloaded = True, False
+        self.starts += 1
+
+
+class Http(unittest.TestCase):
+    """A server on a RestartableEngine; `self.base` is its address."""
+    reply = "Hello."
+
+    def setUp(self):
+        self.tok = GlmTokenizer()
+        self.engine = RestartableEngine(self.tok, self.reply, max_context=8192)
+        self.svc = Service(self.engine, self.tok, glm_template())
+        self.httpd = serve(self.svc, port=0)
+        self.addCleanup(self.httpd.server_close)
+        self.addCleanup(self.httpd.shutdown)
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+    def call(self, path, body=None, headers=None, timeout=30):
+        """-> (status, headers, body bytes)."""
+        data = None if body is None else body if isinstance(body, bytes) else json.dumps(body).encode()
+        req = urllib.request.Request(self.base + path, data=data,
+                                     headers={"Content-Type": "application/json", **(headers or {})})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.status, r.headers, r.read()
+        except urllib.error.HTTPError as e:
+            with e:
+                return e.code, e.headers, e.read()
+
+
+class ModelList(Http):
+    def test_a_dead_engine_that_restarts_on_use_is_listed(self):
+        """The engine died between requests (OOM) with idle unload off: the next request starts it again, so
+        /v1/models still lists the model (as unloaded), or a chatbot's model picker drops it."""
+        self.engine.running = False
+        for path in ("/v1/models", "/models"):
+            code, _, body = self.call(path)
+            self.assertEqual(code, 200)
+            data = json.loads(body)["data"]
+            self.assertEqual([m["id"] for m in data], [self.svc.model], path)
+            self.assertEqual(data[0]["status"], {"value": "unloaded"})
+        self.engine.starting = True                     # while it starts again
+        self.assertEqual(json.loads(self.call("/v1/models")[2])["data"][0]["status"], {"value": "loading"})
+        self.assertEqual(self.engine.starts, 0)         # listing it does not start it
 
 
 class ConvCacheLogThreads(unittest.TestCase):

@@ -3178,8 +3178,11 @@ def make_handler(svc: Service):
                     model = {"id": svc.model, "object": "model", "status": {"value": "loaded"},
                              "meta": {"n_ctx": svc.reported_ctx()},
                              "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]}}
-                    if not loaded and (svc.idle_unload_s or getattr(svc.engine, "unloaded", False)):
-                        model["status"] = {"value": "unloaded"}   # like llama-server's router: listed, loads on use
+                    # an engine that died (OOM, a CUDA fault) is started again by the next request too (auto_load)
+                    if not loaded and (svc.idle_unload_s or getattr(svc.engine, "unloaded", False)
+                                       or hasattr(svc.engine, "restart")):
+                        # like llama-server's router: listed, loads on use
+                        model["status"] = {"value": "loading" if getattr(svc.engine, "starting", False) else "unloaded"}
                         loaded = True
                     if svc.aliases:                       # #297: the aliases, and each one listed under its own id
                         model["aliases"] = list(svc.aliases)
