@@ -1,195 +1,351 @@
 # Something went wrong?
 
-The common problems and what to do. Back to the [README](../README.md#something-went-wrong). The full table of
-error messages, with the older engine fixes, is in the [details](DETAILS.md#troubleshooting).
+Problems with Strata on GLM-5.3-Flash (Linux, NVIDIA GPUs) and what to do about them. The headings and the quoted
+lines are the messages that setup, the server and the engine print, so you can search this page for the words you
+see. Back to the [README](../README.md#something-went-wrong).
 
-## While installing or starting
+Nothing has run on a GPU or on the real model yet, so this page has no measured times, speeds or memory figures.
+Where a fix depends on how long something takes, it says which line of the log to look at instead.
 
-**My PC froze, or got very slow, the first time Strata started.**
-That's normal while it starts, most of all the first time. Strata loads 35-55 GB into your RAM, locks part of it for
-the graphics card, and works out how much of the model fits on your GPU. The mouse can freeze for a few minutes.
-**Wait, and don't close the window.** The next starts are much faster. Still frozen after 10 minutes? Restart the
-PC, close other programs (browsers use a lot of RAM) and try again. If it keeps happening, pick a smaller size (Q2_0
-or IQ2_XS).
+## Reading the log
 
-**It stopped while downloading or installing.**
-Run `START-HERE.bat` (Linux: `./setup.sh`) again. It continues where it stopped.
+Strata writes to two places:
 
-**It says the NVIDIA driver is too old.**
-Update it (NVIDIA App or [nvidia.com/drivers](https://www.nvidia.com/drivers)), restart the PC, and run
-`START-HERE.bat` again.
+- **The server window** (or wherever the output of `./setup.sh`, `run-glm-<size>.sh` or `serve/server.py` goes,
+  for example the systemd journal). Its lines start with `[strata]`: what the engine does while it starts, then
+  `ready: http://...`, then progress lines while a request runs (`reading the prompt: N tokens, S s so far`,
+  `thinking: N of max M tokens, ...`) and a `done: N tokens in S s (...)` line when it ends, refused requests
+  (`400 invalid request: ...`, some `503: ...`) and what happened when the engine ended.
+- **The engine log**, `strata-glm-<size>.log` in the Strata folder (the run config's `"log"`). It holds the engine's
+  own output: `GPU N: layers a-b, ... GB weights and buffers, ... GB expert cache`, `expert cache: ...`,
+  `warming the experts: X of Y GB (...)`, the `conversations: ...` lines, and on a failure the engine's last words,
+  such as `strata-glm: <reason>` or `glm gpu kernel <name>: <CUDA error>`. Each start begins with a line
+  `[strata] <date> <time> engine started: <command>`.
 
-**It says port 8080 is already in use.**
-Strata is already running. Look for its window. Or another program uses the port: `START-HERE.bat --port 8081`.
-Only an address that is really taken says "already in use". Any other reason (Windows keeps the port reserved, or
-the config's `"host"` is not an address of this PC) is printed as what the OS said, with what to change (#769).
+Commands that help (`<size>` is `ud-iq3_xxs` or `iq4_xs`):
 
-**"Windows blocked the Strata engine (or the image encoder) ... Smart App Control".**
-On a clean Windows 11, Smart App Control refuses programs that are not signed, and Strata's `strata.exe` and
-`strata-vision.exe` are not (#735). Turn it off (Windows Security > App & browser control > Smart App Control
-settings; it cannot be turned back on without a reset of Windows), or, if only the image encoder is blocked, run
-`START-HERE.bat --setup --vision no`.
+```bash
+tail -n 80 strata-glm-<size>.log                         # the end of the engine log
+grep -n "engine started" strata-glm-<size>.log | tail -3  # where the last starts begin
+sudo dmesg | grep -i -E 'killed process|out of memory'   # did Linux end the engine for lack of RAM?
+nvidia-smi                                               # the GPUs, their free VRAM and what else uses them
+free -g                                                  # RAM: used, and the page cache (buff/cache)
+curl -s http://127.0.0.1:8101/health                     # is the server up, is the model loaded
+```
 
-**A new engine misbehaves after an update.**
-An update keeps the engine it replaced in `engine\.previous` (one generation, about 210 MiB).
-`python setup.py --rollback-engine` puts it back (and keeps the newer one there: run it again to go forward) (#670).
+Two switches print more, both in the server's environment (for example `STRATA_DEBUG=1 ./run-glm-<size>.sh`):
+`STRATA_REQUEST_LINES=1` prints one line per engine request (prompt tokens, reused tokens, times),
+`STRATA_DEBUG=1` one line per request with the start of its last message, and the model's whole raw reply after
+it. The second one puts what people wrote and what the model answered into the log, so turn it off again when you
+are done.
 
-**UPDATE.bat / update.sh say "git pull did not succeed", or "has no commit in common" (#1276).**
-The repository's history was cleaned up on 2026-10-06, so a clone made before that cannot be updated with `git pull`.
-The 0.1.40.2 scripts handle it: when no tracked file is edited they keep your old commits in the branch
-`pre-cleanup-backup` and move the clone to the new history; otherwise they print the two commands for you. Your models,
-settings and engine are untracked files and are never touched. An older UPDATE.bat / update.sh (before 0.1.40.2) cannot
-do this itself: run these once in the Strata folder, then use UPDATE.bat as usual (add `git stash` first if `git status`
-lists edited files):
+## While installing
 
-    git fetch origin
-    git branch pre-cleanup-backup
-    git checkout -B main origin/main
+**"no NVIDIA GPU found (nvidia-smi did not answer)"** or **"the NVIDIA driver is too old"**.
+Install or update the NVIDIA driver (580 or newer; on Ubuntu `sudo ubuntu-drivers install`), restart the PC and run
+`./setup.sh` again. Everything already done is kept.
 
-**Python or the build tools could not be installed.**
-Install what it names (links are printed), then run it again. Everything already done is kept.
+**"GPU N (...) cannot be used: not supported - compute capability X"**.
+strata-glm needs compute capability 7.5 or newer (RTX 20 series and newer). This stops setup when `--gpu` or
+`--gpus` names such a card. Setup prints the table of your GPUs and the cards it can use; leave the card out of
+`--gpus` (for example `--gpus 0,1`), or give neither option: setup then uses every card that can run the engine
+and leaves the others out. "none of your GPUs can run the engine" means no card is new enough.
 
-**Linux: the engine does not compile (`unsupported GNU version`, or `exception specification is incompatible` for
-`cospi`/`sinpi`/`rsqrt`).** Two known mismatches between the CUDA toolkit and a new Linux (#601):
-- gcc newer than 14 (Ubuntu 26.04's default 15): CUDA 12.x and 13.0 refuse it. Install g++-14 and run
-  `CXX=g++-14 ./setup.sh` (CC, CXX and CUDAHOSTCXX name the build's compilers; setup passes them to CMake itself,
-  so an already-configured build folder picks them up too, #1645).
-- glibc 2.43 with CUDA 12.9: the toolkit's math headers clash with glibc's, already in CMake's first test compile.
-  Use CUDA 12.8 or 13.x instead. Setup takes the newest toolkit it finds; `STRATA_NVCC=/usr/local/cuda-12.8/bin/nvcc
-  ./setup.sh` makes it use that one (only that one).
+**"The engine is compiled for your GPUs, which needs: ..."**.
+Setup installs the C++ compiler and the CUDA toolkit for you on Ubuntu 22.04 and 24.04 (it asks first, and sudo
+asks for your password). On other distributions it stops with "the automatic install is only done on
+Ubuntu/Debian" or "the CUDA Toolkit can be installed automatically on Ubuntu 22.04 / 24.04 only": install them
+with your distribution's packages (Arch: `pacman -S base-devel cuda`) or from
+[developer.nvidia.com/cuda-downloads](https://developer.nvidia.com/cuda-downloads), then run it again. A CUDA
+toolkit of 12.0 or newer that is already installed is used as it is (setup installs CUDA 13.0 only when none
+of 12.0 or newer is); setup finds `nvcc` on `PATH`, under `CUDA_PATH` or `CUDA_HOME`, in `/usr/local/cuda*` and in
+`/opt/cuda*`.
 
-**The first start takes minutes.**
-It is reading 34-55 GB into RAM; the second start is faster while the files are in the OS cache. Started from Task
-Scheduler, it can be 24x slower: see [Running it at startup](DETAILS.md#running-it-at-startup-task-scheduler).
-On Linux the engine now asks the kernel to read the model files ahead (a cold start went from ~920 s to 70 s on one
-PC); `STRATA_READ_AHEAD=0` turns that off. On Linux with transparent huge pages on `always`, the arena no longer asks
-for `MADV_HUGEPAGE` on top (a fragmented machine spent minutes compacting memory, #771); `STRATA_NO_ARENA_THP=1` skips
-that request on any setting.
+**The engine does not compile** (`command failed (exit N): cmake`).
+The compiler's own error is printed above that line. Setup already tried the build twice. Two mismatches between
+a CUDA toolkit and a newer Linux that users of the upstream project reported (not reproduced here):
 
-**Setup says the engine does not match GitHub's checksum.**
-Setup checks the downloaded ready-made engine against the SHA-256 GitHub publishes. On a mismatch the file is corrupt or was changed on the way, so setup deletes it and stops; run setup again to download it afresh. If GitHub gives no checksum (offline, rate limited, your own mirror), setup warns and installs anyway. `STRATA_SKIP_SHA256=1` skips the check, only if you insist.
+- `unsupported GNU version`: the toolkit does not take your gcc. Install an older one (for example g++-14) and run
+  `CXX=g++-14 ./setup.sh`. `CC`, `CXX` and `CUDAHOSTCXX` name the compilers; setup passes them to CMake, so a
+  build folder that was configured before picks them up too.
+- `exception specification is incompatible` for `cospi`/`sinpi`/`rsqrt`: the toolkit's math headers clash with
+  your glibc (upstream issue #601). Use another toolkit: `STRATA_NVCC=/usr/local/cuda-12.8/bin/nvcc ./setup.sh`
+  makes setup use that `nvcc` and no other.
 
-## While it answers
+Setup takes the newest toolkit it finds; `STRATA_NVCC=<path to nvcc>` picks another. `./setup.sh --build`
+compiles the engine again in the same `build` folder; to build from scratch, delete the `build` folder and run
+setup again.
 
-**It's very slow and the disk light keeps blinking.**
-Your PC is out of free RAM. Close other programs, or pick a smaller size (Q2_0 or IQ2_XS).
+**The download stopped, or a file is wrong.**
+Run `./setup.sh` again: downloads continue where they stopped. What setup says and does:
 
-**An answer stopped with "the engine stopped unexpectedly".**
-Usually not enough RAM (on Linux the system then stops the engine). Just send your message again: Strata starts the
-engine by itself. If it keeps happening, close other programs or pick a smaller size.
+- "cannot list the model's files": the Hugging Face listing did not answer. Check the internet connection (or
+  `HF_ENDPOINT`, if you set one to a mirror).
+- "could not finish downloading ...": the connection broke too often. Run it again; it resumes.
+- "... is N bytes, not the M the repository lists: deleted" and "... has the wrong SHA-256 ...: deleted": the file
+  was damaged. Setup deleted it; run it again to download it again.
+- "unsloth/GLM-5.3-Flash-GGUF has no <size> files": the repository has none of that quantization (for the 4-bit
+  model setup also tries UD-Q4_K_XL). Download the files by hand (`hf download`) and run setup with
+  `--gguf-dir <their folder>`.
+- "<folder> has no <size> GGUF file" (with `--gguf-dir`): no GGUF file under the folder (sub-folders included)
+  has that quantization in its path. "... is short: N of M bytes": a shard is cut off. Delete it and download it
+  again.
 
-**It says the prompt exceeds the context.**
-The conversation is longer than the context you chose. Start a new chat, or run `SETUP.bat` and pick more
-context.
+**"not enough free disk space in <folder>: need ~N GB"**.
+The model files are about 120 GB (3-bit) or 170 GB (4-bit), calculated from the model's shapes; setup prints the
+real total from the repository's listing before it downloads. Put them on a bigger drive: `--models-dir <folder>`,
+or `--data-dir <folder>`, which is remembered for every Strata folder on this PC.
 
-**It is slower than the tables.**
-The monitor plugged into the graphics card and other GPU programs take VRAM from the expert cache; RAM running below
-its rated speed (enable EXPO/XMP in the BIOS) slows the CPU half.
+**"<size>'s experts (~N GB) do not fit beside Linux and the server in this PC's N GB of RAM"**.
+Every routed expert stays in RAM: about 117 GB at 3-bit and about 162 GB at 4-bit (calculated from the model's
+shapes, not measured). Setup subtracts that from the RAM Linux reports and prints what is left beside the experts.
+On a PC with 192 GB that is about 75 GB for the 3-bit model and about 30 GB for the 4-bit one (a few GB less, since
+Linux reports a little less than the installed RAM). Below 40 GB left setup warns and gives parked conversations
+4096 MiB instead of 8192 (`--park-mib 4096`). Below 12 GB it asks "Install it anyway?" and stops unless you answer
+`y` (or pass `--model <size> --yes`): the OS would then read experts from the disk while it answers. Choose the
+3-bit model, or add RAM.
 
-**An earlier reply that came back empty is gone from the chat history (0.1.40, #843).**
-The server leaves out finished assistant turns that have no text, so the next reply does not copy the empty ones.
-`STRATA_KEEP_EMPTY_TURNS=1` in the server's environment renders them as before.
+**`./update.sh` says "git pull did not succeed"**.
+A file you changed in the Strata folder stops the pull. `git status` lists them; put your changes aside
+(`git stash`) and run `./update.sh` again. Your model files, run configs and the engine are not tracked by git and
+are never touched. A copy that was not made with git cannot update itself: update.sh prints where to download the
+newest one.
 
-**A Turing card (RTX 20) reads prompts above ~90K tokens differently (0.1.40, #743).**
-The prompt's top-k selection takes a wider kernel there, with the same ids. `STRATA_TOPK_STREAM=0` restores the old one.
+## While starting
 
-**Decode is several times slower with `--expert-cache N` than with `auto` (#781, #831).**
-An explicit N is a byte budget that is not checked against the free VRAM once the slots are written. On a card it
-fills (the log says `0 MiB of VRAM free with everything loaded - LOW`), Windows pages the GPU's memory and decode drops
-from 100 to 14 tok/s with only a few hundred slots too many. Use `--expert-cache auto`, or a smaller N.
+**"port 8101 is already in use - is Strata (or another server) already running?"**.
+`ss -ltnp | grep 8101` shows which program has it. Close the other Strata, or start this one on another port:
+`./setup.sh --port 8102` (for that start only) or `./setup.sh --setup --port 8102` (kept, and written into the run
+script). Strata uses 8101 because 3000, 8000 and 8080 are often taken (on napster-ai by Open WebUI, Portainer and a
+UPS dashboard).
 
-**A low-RAM PC (about 32 GB) stalls with `--resident-budget-gib N` (#649).**
-The budget is pinned (locked) in RAM, which leaves the OS and the CPU workers little room. `STRATA_RESIDENT_PIN=0` keeps
-it pageable; a smaller budget works too.
+**"cannot listen on HOST:8101: ... HOST is not an address of this PC"**.
+The run config's `"host"` (or `--host`) names an address this PC does not have, at least not yet: a Tailscale
+address before Tailscale is up at boot, for example. Use `"host": "0.0.0.0"` with an API key (see
+[Open WebUI cannot connect](#open-webui-cannot-connect)).
 
-**Decode got slower in 0.1.40 on a 32 GB PC with `--resident-budget-gib N`, and the drive is read hard (#1194, #1116, #1085).**
-The start line "the file tier reads unbuffered" means the experts outside the RAM copy are read straight from the drive.
-0.1.40 chose that whenever the free RAM could not hold all of them; but the same few come back token after token, and
-a cache a twentieth of their size serves most of the repeats. 0.1.40.2 asks for that much (at least 1.5 GiB beside the
-4 GiB headroom) and reads through the cache otherwise, which measured 7% to 118% faster decode with a third to a sixth of
-the drive traffic on a 20 to 32 GB box. On 0.1.40 / 0.1.40.1: `STRATA_UNBUFFERED_LOAD=0` does the same, `=1` forces the
-unbuffered reads.
+**"the engine did not start: the engine exited before it was ready (exit code N)"**.
+The server prints the engine log's last lines under it, and they say why. The common ones:
 
-**Linux: the start is OOM-killed while the engine allocates the page-locked expert copy (#1250).**
-Page-locked pages come from the driver in one go and cannot wait for the kernel to give back file cache, so with the
-model files' cache in the way (little really free RAM, much "available") the host could run out. 0.1.40.2 gives back the
-cached pages of the model files it mapped before it page-locks the copy; when the really free RAM still does not cover it,
-it takes the pages in 1 GiB steps while the RAM available (cgroup limits included) stays above the headroom, page-locks
-what it has, and keeps the rest resident but pageable with a warning ("only N of M GiB could be page-locked"): the answers
-are the same, only the copies of the pageable part to the GPU go through the CPU. `STRATA_PIN_GUARD=0` turns this off,
-`STRATA_PIN_RESERVE_GIB=N` sets the RAM that must stay free (default: `STRATA_RESIDENT_HEADROOM_GIB`, 4 GiB).
+- **Exit code 2** and a `usage: strata-glm ...` text: the run config's `"args"` has an option strata-glm does not
+  know. Take it out (the usage text lists the options it takes).
+- **`strata-glm: CUDA cudaMalloc...: out of memory`**: the GPUs have too little free VRAM for the layers and the
+  attention cache. The engine reserves the attention cache for the whole context at start: 11 KB per token
+  (calculated, the figure setup uses), so 1.5 GB at 131,072 tokens and 11.8 GB at 1,048,576. Choose a shorter
+  context (`./setup.sh --setup --context 262144`, or change the number after `--ctx` in the run config's
+  `"args"`), close other programs that hold VRAM (`nvidia-smi` lists them), or remove a `"split"` you set by hand.
+  Whatever VRAM is left after the layers goes to the expert cache, less `--vram-reserve` (1 GB per GPU by
+  default).
+- **A negative exit code** (`-9`) and nothing in the log: Linux ended the engine, most often for lack of RAM.
+  `sudo dmesg | grep -i -E 'killed process|out of memory'` confirms it. See
+  [The engine died](#the-engine-died) for what to do.
+- **`strata-glm: architecture is '...'; this engine runs GLM-5.3-Flash (glm5-next)`** or `GGUF is missing ...`:
+  `-m` in `"args"` does not name the first shard of a GLM-5.3-Flash GGUF (`...-00001-of-0000N.gguf`). The server
+  checks the same before it starts the engine and stops with
+  `[strata] cannot read the model's tokenizer: ... -m must name the model's first shard (...)` when `-m` names a
+  file without the tokenizer, such as a later shard.
 
-**The Windows display driver resets, then the PC blue-screens (0x141, then 0x116 in `nvlddmkm`) during an answer (#961).**
-This is the NVIDIA driver, not Strata: the report shows the same wedge with other CUDA programs on that driver (610.88,
-RTX 4080 SUPER). Try another driver (a Studio one, or an older one) and a lower power limit; if it only happens with
-`--spec 4`, `--spec 0` avoids the verify window while you wait for a driver fix.
+At the server's own start such a failure stops the server. When the engine is started again later (after it
+died, or after an unload), the server tries three times, 15 seconds apart ("the engine did not start (try 1 of
+3)"), and answers the waiting request with a 503 if all three fail.
 
-**An RTX 50 card (a source build with CUDA 13.2) answers with nonsense, or reads prompts wrongly (#892, #968).**
-CUDA 13.2.0 and 13.2.1's compiler (nvcc 13.2.51) miscompile some of the engine's kernels for sm_120: on our RTX 5070 the IQ2_S and IQ3_S
-products are wrong (relative error 0.5 to 1.0 in the tests) with 13.2 and right with 13.0. The ready-made engine is built
-with 13.0. If you compile it yourself, use CUDA 13.0, 13.1 or 13.2.2 (13.2.2, nvcc build 13.2.86, fixes it; an older one can sit next to a newer: `STRATA_NVCC=<path to its nvcc>`);
-setup warns when it finds 13.2.0 or 13.2.1 for such a card, and takes an older 13.x when one is installed.
+**"<config> refers to missing files"**.
+The engine or a model file moved or was deleted. `./setup.sh --setup` repairs the run config; it finds model files
+in the data folder (`Strata-GLM-data` next to the Strata folder, or the `--data-dir` you chose).
 
-**Pictures are refused, or slow.**
-"this server was started without the vision encoder": the model was set up for text only - run setup again with
-`--vision gpu` (or `--vision cpu`). Pictures that take several seconds (about 3 s at 300 image tokens on 8 cores, more with more tokens) are read by the encoder on the CPU; `--vision gpu`
-(NVIDIA, ~1.4 GB of VRAM) makes it 0.1-0.5 s.
+**A `[strata] config ...` line, and the server stops.**
+A key in the run config has a value the server cannot use, for example
+`[strata] config sampling.temperature=-1: expected a number >= 0 (0 = greedy)` or
+`[strata] config "mcp_for_api" must be true or false`. The line names the key and what it takes. The keys are
+described in [the run config](INSTALL.md#the-run-config) and [the settings](DETAILS.md#settings).
 
-## AMD cards
+**The start takes long: "reading the experts into memory ...", then "warming the experts: X of Y GB (...)"**.
+Before it says it is ready, the engine reads every routed expert once (117 GB at 3-bit, 162 GB at 4-bit,
+calculated), so the first request does not wait for the disk. After a reboot all of it comes from the disk, and
+the PC can be slow meanwhile. The line shows how far it is and its GB/s; the time left is the GB still to read
+divided by that rate. Wait for `ready: http://...`. A start soon after the last one is faster when Linux still has
+the files in its page cache. `--no-warm` in `"args"` skips the warm-up; the first requests then read the experts
+from the disk instead.
 
-**"No AMD GPU found (the amdgpu driver's KFD topology is empty)" on Linux.**
-The kernel's amdgpu driver is not loaded for the card. Integrated Radeon GPUs are listed as not supported; setup
-lists every card it found and whether Strata can use it.
+**"the engine did not report READY within 900 s"** (with "of its last warm-up progress (N GB read)" once the
+warm-up had begun).
+The server ends a start that makes no progress for 900 seconds. Every warm-up line that moves on starts the 900
+seconds again, so a slow disk that keeps reading is not ended. Other lines do not count: before the warm-up begins
+(mapping the files, placing the layers on the GPUs) the 900 seconds run from the start. If your PC needs longer
+than that before the warm-up begins, or the warm-up stalls for that long, give it more time in the server's
+environment: `STRATA_ENGINE_READY_S=1800 ./run-glm-<size>.sh` (0 waits for ever).
 
-**The engine stops at start with the card's name, its architecture and the build's list.**
-The engine was compiled for another card (for example after moving the Strata folder to another PC). Run
-`./setup.sh --setup --backend hip`: it compiles the engine for this card's architecture.
+## While running
 
-**On Windows the engine exits with `0xC0000005` in `amdhip64_7.dll` before it prints anything (#654).**
-Two things in your environment can cause it, and the server now repairs both before it starts the engine (it says so in
-the log): `HIP_PATH`, `HIP_DEVICE_LIB_PATH` or `LLVM_PATH` naming a ROCm folder that no longer exists (a deleted build),
-and a `TEMP`/`TMP` folder the engine cannot create files in (AMD's runtime compiles its first kernels through temporary
-files). If you start `strata.exe` by hand, fix them yourself: `set HIP_PATH=`, and point `TEMP` and `TMP` at a normal
-folder such as `C:\Temp`.
+### The engine died
 
-**Windows AMD: the driver resets (VIDEO_ENGINE_TIMEOUT_DETECTED / screen flicker / the engine dies mid-answer).**
-Windows gives a GPU about 2 seconds to answer; when a graphics card does not, it resets the driver (a TDR): the screen
-flickers, the engine dies, and the Event Viewer shows `VIDEO_ENGINE_TIMEOUT_DETECTED` (#613, with #579 and #541 on
-Linux). Strata 0.1.39 and newer say "the GPU stopped responding" in the log. It was seen with KV streaming on
-(`--kv-resident 32768`, which setup turns on from 64K context) while reading a long prompt on a gfx1201 card. Try these
-in order, one at a time, and tell us what changed:
-1. **Send us the evidence.** The last ~80 lines of `strata-<model>.log` in the Strata folder (the server window shows
-   the same lines), your AMD driver version (AMD Software > System), your card and Windows version, the Strata
-   version, and the exact steps (context size, how long the prompt was, which app sent it). If Windows wrote a
-   dump, the newest `.dmp` in `C:\Windows\LiveKernelReports\WATCHDOG` (or `C:\Windows\Minidump`) helps; it holds no
-   chats, only the driver state.
-2. **Find the step that hangs:** add `"STRATA_PF_STEP_SYNC": "1"` to the `"env"` block of `strata-<model>.json`
-   and restart. The prompt path then waits for the GPU after each step and logs any step over 250 ms, so the log names
-   the step. It is slower; use it to diagnose, then take it out.
-3. **`"STRATA_KV_HOST_DMA": "1"`** in the same `"env"` block: no GPU kernel writes the RAM copy of the K/V during a
-   prompt, it is copied by DMA instead. Same answers.
-4. **No KV streaming:** run setup again and pick 32K context (or remove `--kv-resident` and its number from
-   `"args"` in the JSON, with a context that fits the VRAM).
-5. **A smaller prompt chunk:** change `--prefill` in `"args"` (for example `--prefill 512`): each GPU launch then does
-   less work between two checks by Windows. Prompts are read more slowly.
-6. **Optional, your decision: give Windows more time (`TdrDelay`).** The default is 2 seconds. In the registry,
-   `HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\GraphicsDrivers`, a DWORD `TdrDelay` of `10` (seconds)
-   lets a long GPU job finish before Windows resets the driver; restart the PC. It hides the symptom and does not fix
-   a GPU that has really hung, and a hung GPU then freezes the screen for those 10 seconds. Strata changes no Windows
-   setting itself; to undo it, delete the value.
-7. **Driver:** use the newest AMD Software release for your card (Adrenalin, not a Windows Update driver) and restart
-   after installing. If it started after a driver update, tell us both versions; going back one version is a fair
-   test.
+**"the engine stopped unexpectedly (exit code N)"**, followed by why the server thinks it ended.
+The request ends with an error (a 503 that ends in "the next request restarts it", or an error event in a stream
+that had started), and the next request starts the engine again. What the server adds:
 
-**Large pinned host allocations fail on ROCm although RAM is free.**
-See [AMD_HIP.md](AMD_HIP.md#model-and-serving-configuration): the mapped expert mode avoids the full pinned arena.
+- "The usual cause is running out of RAM ...": the engine left no reason of its own; most often a signal ended
+  it, sent by Linux's out-of-memory killer (check with `dmesg` as above). The experts are read through the page
+  cache, which Linux can give back; what it cannot take back is the engine's own buffers, the parked conversations
+  (`--park-mib`) and every other program. Close other programs, lower `--park-mib` (setup:
+  `./setup.sh --park-mib 4096`), or use the 3-bit model.
+- "The engine exited (code N). Its last log line: ...": the engine ended by itself and said why.
+- "The engine exited (code N) after it reported: ...": the engine reported an error before it exited.
 
-**"verify: timed out at layer N" or "no progress for 60 s" on AMD (Linux), mostly with `--mmap-experts`.**
-Two reports fixed it with `"GPU_PINNED_MIN_XFER_SIZE": "1048576"` (RX 6800) or `"HSA_USERPTR_FOR_PAGED_MEM": "0"` (two
-R9700) in the `env` block of the server JSON, then a restart. Experimental, one machine each; on a systemd unit use
-`MemoryMax`, not `MemoryHigh`. Details: [AMD_HIP.md](AMD_HIP.md#linux-verify-timeouts-while-the-kernel-reclaims-host-memory-experimental-workarounds).
+A 500 with "the engine failed: <reason>" is the same kind of failure reported by the engine itself (a CUDA error,
+memory it could not get): the request's state is gone, and if the engine exits after it, the next request starts it
+again.
 
-## Still stuck?
+**It is very slow and the disk is busy all the time.**
+The page cache cannot hold every expert beside everything else, so the engine reads experts from the disk again
+while it answers. `free -g` shows little `buff/cache`. Free RAM as above; the 4-bit model leaves the least.
 
-Look in the [full troubleshooting table](DETAILS.md#troubleshooting), or open an
-[issue](https://github.com/Niko1221/Strata/issues) and attach `strata-<model>.log` from the Strata folder.
+### The engine went silent
+
+**"the engine said nothing for N s during the request; the server ended the engine"**.
+While a request runs, the engine prints a line at least every few seconds (a token, prompt progress, or a
+heartbeat while it is busy). When it prints nothing for 300 seconds (longer while it reads the first part of a
+long prompt), the server takes it as lost and ends it; the next request starts it again. If that was a slow PC
+and not a hang, raise `"engine_silence_s"` in the run config (0 waits for ever). If it happens again on a working
+PC, please report it with the end of the engine log.
+
+**"the engine said nothing for N s and used no CPU or disk in that time (frozen ...)"**.
+The engine was silent for 90 seconds and did no work in that time, so the server ended it without waiting for the
+300 seconds. `STRATA_ENGINE_STALL_S` in the server's environment changes the 90 (0 turns this check off).
+
+**"the engine has said nothing for N s but is still working; it is not ended"**.
+Only a note: the engine is busy (CPU or disk), so it is left alone until `"engine_silence_s"`.
+
+### The context is full
+
+**400 "request exceeds the context window: prompt (N tokens) + max tokens (M) exceeds the context (C)"**, or
+**"prompt (N tokens) leaves no room to answer in the context (C)"**.
+Requests are never cut down to fit. Send a smaller `max_tokens` (the message says how much fits), start a new
+conversation, or give the model a longer context: `./setup.sh --setup --context 524288` (up to 1,048,576; each
+token takes 11 KB of VRAM, calculated). `"fit_max_tokens": true` in the run config shortens a `max_tokens` that
+does not fit instead of refusing the request. A reply that reaches the end of the context while it is written stops
+there with finish reason `length`.
+
+### The first answer after a start is slow
+
+Several things make the first requests after a start slower than later ones:
+
+- Parked conversations live in the engine's RAM and end with it. After a start (or a restart after the engine
+  died) each client's first request reads its whole conversation again, which for an agent at 512K tokens is the
+  longest prompt there is. `reading the prompt: X of Y tokens` in the server window shows the progress.
+- The VRAM expert cache starts from the expert profile (`--expert-profile`, which setup writes into the run
+  config). The engine saves it only when it leaves its request loop: when the server sends it `QUIT` (`/unload`,
+  an idle unload, or a server that is stopped with SIGTERM, as `docker stop` and `kill <server pid>` do), or when
+  the server's end of the pipe closes. strata-glm has no signal handler of its own, so a signal that reaches the
+  engine itself ends it without saving the profile: Ctrl+C in the server's terminal reaches both processes, and so
+  does a systemd stop with the default `KillMode` (`KillMode=mixed` sends SIGTERM to the server only). After such
+  an end, or on the first start ever, the cache fills while it answers.
+- With `--no-warm`, or when Linux gave the page cache to other programs, the experts come from the disk.
+- With `"lazy_load": true` or `"idle_unload_s"`, the first request starts the engine, warm-up included.
+
+### A client was cut off
+
+- A request that is not streamed sends nothing until its answer is complete, and reading a long prompt takes time.
+  A client or a reverse proxy with a read timeout gives up first. Use streaming (`"stream": true`): the server then
+  sends a keep-alive at least every 10 seconds while the request waits for its turn and while it reads the prompt.
+  Or raise the client's timeout.
+- When a client closes the connection, the server stops the engine on that request, so the others in the queue
+  go on.
+- 408 "the request body stopped arriving (120 s without data)": the client stopped sending its request. A
+  request's headers and body must keep arriving: 120 seconds without data ends it (a 408 for a body; headers that
+  stop arriving just close the connection). The answer has no such limit, so a long streamed answer is never cut
+  off by the server.
+
+### A 400 that names a field
+
+**400 with a message such as "temperature: a number >= 0 (0: greedy)"**, "top_p: a number from 0 to 1",
+"repetition_penalty: a number > 0 (1: off)", "seed: an integer up to ...", "top_k: an integer" or
+"temperature: a finite number".
+A sampling value is out of range or of the wrong type: NaN and Infinity, a repetition penalty of 0 or less,
+temperature below 0, top_p or min_p outside 0 to 1, or an integer too large for the engine. The message names the
+field. The shared Chat settings (`POST /settings`, a 400 that names the field) and the run config's `"sampling"`
+block (a `[strata] config sampling.<field>=...` line, and the server stops) are checked the same way, each with
+its own wording; a shared temperature goes up to 2. "unknown reasoning effort ...: use none, low, medium or high"
+is the same for `reasoning_effort`. The server window prints each refused request as
+`[strata] 400 invalid request: ...`.
+
+### A 503 or a 413 about the request's size
+
+**503 "too many large requests at once (over 16 MiB each); try again shortly"**, with `Retry-After: 30`.
+A request body over 16 MiB takes one of two places while its request runs; a third one is refused until a place is
+free. The window says `[strata] 503: 2 requests with bodies over 16 MiB are already in the server`. Retry after
+the time the header gives; a client that honours `Retry-After` does this by itself.
+
+**413 "the request body is larger than 256 MiB"**: the most a request may hold. `STRATA_MAX_BODY_MIB` in the
+server's environment changes it.
+
+**503 "the engine is starting ...; try again shortly"**: the engine is (re)starting and has not said it is ready.
+
+### MCP tools are missing for an API client
+
+**403 "MCP tools (strata_mcp) run only for Strata's own page"**.
+The MCP servers in the run config (`"mcp_servers"`, or `--mcp-config`) run their tools with your rights on this
+PC, so by default only Strata's own web page may use them. To let API clients (an agent, a bot) use them too, set
+`"mcp_for_api": true` in the run config and restart. The client must also ask for them with `"strata_mcp": true` in
+a `/v1/chat/completions` request (the only route that offers them); without it a client gets only the tools it
+declares itself. A browser page of another site gets a 403
+"MCP tools can be used only from Strata's own page (or an origin in the config's trusted_origins)".
+
+### A tool call came back as text
+
+The server turns the model's output into a tool call only when:
+
+- the request declares tools, and `tool_choice` is not `"none"`;
+- the call is written with GLM's own tag tokens. When the tokenizer has all of GLM's tags (`<think>`,
+  `<tool_call>`, `<arg_key>`, ...) as special tokens, a call that the model copies as plain text from a tool result,
+  a web page or the user stays text and is never run. That matters for the automation agent: a command inside a
+  fetched page is not run because the model repeated it.
+
+A call written inside the thinking is run only when the turn shows it was meant: nothing but more calls follows it
+before the thinking or the turn ends, and it is not quoted (in code or on a "> " line). The window then says
+`tool calls inside the thinking: N read as calls, M kept as reasoning`. `"tool_call_recovery": true` in the run
+config also accepts a declared tool's call written as JSON inside `<tool_call>`.
+
+## Open WebUI cannot connect
+
+Open WebUI runs in Docker, so `127.0.0.1` inside its container is the container itself, not the PC.
+
+1. **The server must listen beyond this PC.** Set `"host": "0.0.0.0"` and an `"api_key"` in the run config, or
+   start it once with `./setup.sh --host 0.0.0.0 --api-key <key>` (both are then saved for this model). The server
+   then prints `from other devices: http://<IP>:8101/` for each address it has.
+2. **The address.** In Open WebUI add an OpenAI connection with:
+   - `http://172.17.0.1:8101/v1` when its container is on Docker's default bridge (172.17.0.1 is the PC's address
+     there; on a network of your own, `docker network inspect <network>` shows its gateway);
+   - `http://host.docker.internal:8101/v1` when the container was started with
+     `--add-host=host.docker.internal:host-gateway`;
+   - on napster-ai `http://100.126.222.90:8101/v1` over Tailscale works too, also for the agents and the Discord bot
+     on other machines.
+3. **The API key.** Put the server's key in the connection's key field. A wrong or missing key is a 401
+   "missing or wrong API key". Clients send it as `Authorization: Bearer <key>` or `x-api-key: <key>`.
+4. **Allowed hosts.** Without an API key the server answers only to the names it knows (protection against DNS
+   rebinding): IP addresses, `localhost`, and while it listens beyond this PC also this PC's name and
+   `host.docker.internal`. Another name gets a 403
+   "Host '...' is not allowed (DNS rebinding protection)". Add it to `"allowed_hosts"` in the run config, or set an
+   API key, which turns this check off.
+5. **A firewall.** If nothing reaches the server at all (`curl` from inside the container times out), a firewall
+   on the PC (ufw, for example) may drop traffic from the Docker network to port 8101. Allow the port from that
+   network.
+
+A request from inside the container answers when the address and the firewall are right, for example
+`docker exec <container> curl -s http://172.17.0.1:8101/health` (if its image has `curl`).
+
+## Opening an issue
+
+Search [the open issues](https://github.com/Rarebigshot17/Strata/issues) first, then open one with:
+
+- what you did, what you expected and what happened, with the exact message;
+- the commit (`git rev-parse --short HEAD`) and the engine version (`build_info` in
+  `curl -s http://127.0.0.1:8101/props` while the engine runs; add `-H "Authorization: Bearer <key>"` when the
+  server has a key);
+- `./setup.sh --check`, `nvidia-smi` and `free -g`;
+- the run config `strata-glm-<size>.json`, **with the `"api_key"` removed**;
+- the server window's output around the problem, and the end of `strata-glm-<size>.log` from the last
+  `engine started` line on;
+- for a crash, the `dmesg` lines above.
+
+Leave out conversations and API keys. `STRATA_DEBUG=1` output contains parts of what was asked, so read it before
+you attach it.
