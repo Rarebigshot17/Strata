@@ -3266,22 +3266,32 @@ class ThinkingBudget(unittest.TestCase):
 
     def test_anthropic_budget_tokens_and_the_other_budgets(self):
         # the request's own reasoning_budget_tokens wins (0: none); its budget_tokens wins over a shared or configured
-        # budget, which only fill in for a request that sets none; a budget the thinking stays under changes nothing
+        # budget, which only fill in for a request that sets none (a budget_tokens of 0 or less sets none); a budget
+        # the thinking stays under changes nothing.  The thinking must end at the budget that wins exactly: one cut at
+        # another budget starts with the same words
+        from serve.server import REASONING_WRAP_UP
         self.svc.reasoning_budget_tokens = 50
         self.svc.set_shared({"reasoning_budget_tokens": 60})
         cases = [({"thinking": {"type": "enabled", "budget_tokens": 20}, "reasoning_budget_tokens": 0}, None),
                  ({"thinking": {"type": "enabled", "budget_tokens": 30}}, 30),
                  ({"thinking": {"type": "enabled", "budget_tokens": 30}, "reasoning_budget_tokens": 25}, 25),
                  ({"thinking": {"type": "enabled", "budget_tokens": 3000}, "max_tokens": 4000}, None),
-                 ({"thinking": {"type": "enabled"}}, 60)]
+                 ({"thinking": {"type": "enabled", "budget_tokens": 0}}, 60),
+                 ({"thinking": {"type": "enabled", "budget_tokens": -5}}, 60),
+                 ({"thinking": {"type": "enabled"}}, 60),
+                 (None, None),                                  # the shared settings cleared: the config's is next
+                 ({"thinking": {"type": "enabled", "budget_tokens": 30}}, 30),
+                 ({"thinking": {"type": "enabled", "budget_tokens": 0}}, 50)]
         for extra, cut in cases:
-            with self.subTest(extra=extra):
+            if extra is None:
+                self.svc.set_shared(None)
+                continue
+            with self.subTest(extra=extra, shared=bool(self.svc.shared)):
                 code, thinking, text = self.anthropic(**extra)
                 self.assertEqual(code, 200, thinking)
                 self.assertEqual(text, ThinkingEngine.ANSWER)
-                want = ThinkingEngine.THOUGHT if cut is None else ThinkingEngine.THOUGHT[:cut]
-                self.assertTrue(thinking.startswith(want), thinking)
-                self.assertEqual(thinking == ThinkingEngine.THOUGHT, cut is None, thinking)
+                self.assertEqual(thinking, ThinkingEngine.THOUGHT if cut is None else
+                                 ThinkingEngine.THOUGHT[:cut] + REASONING_WRAP_UP.split("</think>")[0])
 
     def test_anthropic_budget_tokens_that_is_not_a_number_is_a_400(self):
         for bad in ("lots", 20.5, True, [20]):
