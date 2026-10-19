@@ -175,9 +175,7 @@ class NoBrowser(unittest.TestCase):
             p.write_text(json.dumps({"exe": str(exe), "args": ["--ctx", "131072"], **cfg}))
             call = unittest.mock.Mock(return_value=0)
             with unittest.mock.patch.object(setup, "gpus", owner_gpus), \
-                    unittest.mock.patch.object(setup.subprocess, "call", call), \
-                    unittest.mock.patch.dict(setup.os.environ, {}, clear=False):
-                setup.os.environ.pop("STRATA_EXECV", None)
+                    unittest.mock.patch.object(setup, "exec_server", call):
                 _, out = quiet(setup.start, p, None, None, keep)
             return call.call_args[0][0], out, json.loads(p.read_text())
 

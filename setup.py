@@ -1482,11 +1482,17 @@ def start(cfg_path: Path, port: int | None, gpu: int | list | None = None, keep=
     for n, line in enumerate(textwrap.wrap(f"Settings ({cfg_path.name}): {settings_summary(cfg, port)}", 100,
                                            break_on_hyphens=False)):   # #564: what this start uses
         say(("  " if n == 0 else "    ") + line)
-    if os.environ.get("STRATA_EXECV"):
-        # Replace this process instead of spawning a child. The Docker image sets STRATA_EXECV=1, so there the server
-        # is PID 1 and docker stop's SIGTERM reaches the process that can answer the engine with QUIT.
-        os.execv(cmd[0], cmd)
-    return subprocess.call(cmd)
+    return exec_server(cmd)
+
+
+def exec_server(cmd: list[str]):
+    """Replace this process with the server; never returns.  Ctrl+C, closing the terminal, `kill <pid>` and docker
+    stop (the server is PID 1 in the image) then reach the server itself, which ends the engine with STOP and QUIT
+    (it saves its expert profile).  A child started with subprocess.call was killed a quarter of a second after
+    Ctrl+C, before that stop could finish."""
+    sys.stdout.flush()                                 # what setup printed: exec keeps no buffer (a pipe, a log)
+    sys.stderr.flush()
+    os.execv(cmd[0], cmd)
 
 
 # ------------------------------------------------------------------------------------------------ main

@@ -156,7 +156,7 @@ def install(argv, ram=OWNER_RAM, smi=OWNER_SMI, listing=LISTING, configs=(), env
                    mock.patch.object(setup, "get_llama_cpp", return_value=root / "third_party" / "llama.cpp"),
                    mock.patch.object(setup, "build_engine", build_engine),
                    mock.patch.object(setup, "update_installed_engine", lambda force=False: rec["updates"].append(force)),
-                   mock.patch.object(setup.subprocess, "call", call),
+                   mock.patch.object(setup, "exec_server", call),
                    mock.patch.object(setup.time, "sleep", lambda s: None),
                    mock.patch.object(sys, "argv", ["setup.py", *argv]),
                    mock.patch.object(sys, "stdin", io.StringIO("")),        # a question ends at EOF
@@ -166,7 +166,6 @@ def install(argv, ram=OWNER_RAM, smi=OWNER_SMI, listing=LISTING, configs=(), env
         with contextlib.ExitStack() as stack:
             for p in patches:
                 stack.enter_context(p)
-            os.environ.pop("STRATA_EXECV", None)
             if not (env or {}).get("HF_ENDPOINT"):
                 os.environ.pop("HF_ENDPOINT", None)
             buf = io.StringIO()
@@ -811,9 +810,7 @@ class RunScriptAndStart(unittest.TestCase):
         p = self.root / "strata-glm-ud-iq3_xxs.json"
         p.write_text(json.dumps({**self.cfg, **(cfg or {})}), encoding="utf-8")
         call = mock.Mock(return_value=0)
-        with mock.patch.object(setup, "gpus", owner_gpus), mock.patch.object(setup.subprocess, "call", call), \
-                mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("STRATA_EXECV", None)
+        with mock.patch.object(setup, "gpus", owner_gpus), mock.patch.object(setup, "exec_server", call):
             code, out = quiet(setup.start, p, port, gpu, keep)
         self.assertEqual(code, 0)
         return call.call_args[0][0], out, json.loads(p.read_text(encoding="utf-8"))

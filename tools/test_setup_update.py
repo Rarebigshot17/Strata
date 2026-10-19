@@ -34,7 +34,7 @@ class Update(unittest.TestCase):
         with mock.patch.object(setup, "python_packages") as pip, \
                 mock.patch.object(setup, "update_installed_engine") as eng, \
                 mock.patch.object(setup, "start") as start, \
-                mock.patch("subprocess.call") as call, \
+                mock.patch.object(setup, "exec_server") as call, \
                 contextlib.redirect_stdout(out):
             rc = setup.update_install(have, a)
         return rc, pip, eng, start, call, out.getvalue()
@@ -129,10 +129,8 @@ class SettingsLine(unittest.TestCase):
             p.write_text(json.dumps({**self.CFG, "exe": str(exe), "gpu": 0, "args": args}), encoding="utf-8")
             out = io.StringIO()
             with mock.patch.object(setup, "gpus", lambda: []), \
-                    mock.patch.object(setup.subprocess, "call", return_value=0), \
-                    mock.patch.dict(setup.os.environ, {}, clear=False), \
+                    mock.patch.object(setup, "exec_server", return_value=0), \
                     contextlib.redirect_stdout(out):
-                setup.os.environ.pop("STRATA_EXECV", None)
                 setup.start(p, None)
         text = " ".join(out.getvalue().split())
         self.assertIn("Settings (strata-glm-ud-iq3_xxs.json): --ctx 131072 --park-mib 8192", text)

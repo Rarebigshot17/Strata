@@ -129,8 +129,7 @@ ends after `QUIT` or when its input closes. Read from the code (not tried on a G
 run's profile is not written:
 
 - **Ctrl+C** also reaches the engine, which runs in the server's process group and has no signal handler, so it ends
-  at once. When `./setup.sh` started the server, setup also ends the server itself a quarter of a second after
-  Ctrl+C.
+  at once.
 - **Closing the terminal** sends SIGHUP, which neither the server nor the engine handles: both end at once.
 
 To keep the profile, stop the server process alone: `kill <the server's PID>` (SIGTERM takes the server's Ctrl+C path,
@@ -209,7 +208,6 @@ For setup:
 | `CC`, `CXX`, `CUDAHOSTCXX` | The host compilers of the build. `CUDAHOSTCXX` (nvcc's host compiler) defaults to `CXX`. |
 | `STRATA_UV=1` | `./setup.sh` makes `.venv` with uv. On NixOS this is the default when uv is installed. |
 | `XDG_CONFIG_HOME` | Where setup keeps `strata-glm/settings.json` (default `~/.config`). |
-| `STRATA_EXECV=1` | Setup replaces itself with the server instead of starting it as a child. The Docker image sets it. |
 
 For the server (more in [DETAILS.md](DETAILS.md#settings)):
 
@@ -615,7 +613,7 @@ docker run -d --name strata --gpus all \
   engine's log is inside the container: `docker exec strata tail -f /opt/strata/strata-glm-ud-iq3_xxs.log`.
 - **RAM:** setup reads the host's RAM from `/proc/meminfo`, not a container memory limit. Do not set a limit below what
   the size needs.
-- **Stopping:** the server is PID 1 (`STRATA_EXECV=1`) and stops the engine on SIGTERM. Give it time:
+- **Stopping:** the server is PID 1 (setup replaces itself with it) and stops the engine on SIGTERM. Give it time:
   `docker stop -t 90 strata` (an example value; the stop time is not measured).
 
 ## Building and starting by hand
