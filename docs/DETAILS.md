@@ -125,7 +125,7 @@ temperature.
 - OpenAI: `max_completion_tokens` or `max_tokens`; Anthropic: `max_tokens`; Responses: `max_output_tokens` (a
   positive whole number). The thinking counts as output.
 - Unset, 0 or -1 means "as long as the context allows": the rest of the context after the prompt.
-  `/v1/completions` is the exception: unset means 256 tokens.
+  `/v1/completions` is the exception: unset or 0 means 256 tokens there (-1 still means the rest).
 - A request whose prompt plus its output cap does not fit the context (less 8 tokens of margin) is refused with a 400
   that says how much would fit; requests are never cut. With `"fit_max_tokens": true` in the run config (or
   `--fit-max-tokens`) the cap is shortened to the room left instead. A prompt that leaves no room at all is always a
@@ -149,7 +149,7 @@ Any other value is a 400.
 | API | Thinking off | Thinking on |
 | --- | --- | --- |
 | OpenAI chat | `"reasoning_effort": "none"`, `"thinking": {"type": "disabled"}` (Z.ai's form), or `"chat_template_kwargs": {"enable_thinking": false}` | `"reasoning_effort": "high"` (or `low`, `medium`), `"reasoning": {"effort": ...}`, `"thinking": {"type": "enabled"}` |
-| Anthropic | `"thinking": {"type": "disabled"}` | `"output_config": {"effort": ...}`, or `"thinking": {"type": "enabled", "budget_tokens": N}` |
+| Anthropic | `"thinking": {"type": "disabled"}`, or `"output_config": {"effort": "none"}` | `"output_config": {"effort": ...}`, or `"thinking": {"type": "enabled", "budget_tokens": N}` |
 | Responses | `"reasoning": {"effort": "none"}` | `"reasoning": {"effort": ...}` |
 
 - A request that says nothing gets the shared settings' level, then the run config's `"reasoning_effort"`, then the
@@ -164,8 +164,8 @@ Any other value is a 400.
   Strata falls back to, `serve/chat_template.jinja`; the server uses the template inside the model's GGUF, which is
   still to be checked on the real file).
 
-**The reasoning budget.** `"reasoning_budget_tokens": N` in a request (any route), in the shared settings or in the
-run config caps the thinking at N tokens; a request's own value wins, and 0 means no budget. When the thinking reaches
+**The reasoning budget.** `"reasoning_budget_tokens": N` in a request (chat, Anthropic or Responses), in the shared
+settings or in the run config caps the thinking at N tokens; a request's own value wins, and 0 means no budget. When the thinking reaches
 N, the server ends it at a clean point (no tag or character cut in half) with a short wrap-up and `</think>`:
 
 ```text
@@ -179,7 +179,7 @@ capped at M minus a reserve of M/4 (at least 512 tokens, at most M/2), and the s
 reaches its output cap while still thinking has no answer (`finish_reason` `"length"`); the server window then
 suggests a budget.
 
-Three opt-in guards in the run config, all off by default except the first:
+Three guards in the run config; the first is on by default, the other two are opt-in:
 
 - `"repeat_stop_tokens": N` (default 256; 0 is off): a reply that repeats one token N times in a row is ended there as
   `"length"`.
@@ -223,7 +223,8 @@ ends with `</think>`. The server reads these tags only from the model's own spec
 every one of them as a special token (`output_tags` in `serve/server.py`; `ORDINARY_LT` and `OUTPUT_TAGS` in
 `serve/frontend.py`). The same text spelled with ordinary tokens - a call the model copies from a tool result, a web
 page or the user - stays text and is never run, and an ordinary `</think>` does not end the thinking. This matters for
-an agent that runs shell commands: a command written into a fetched page cannot become a call by being repeated.
+an agent that runs shell commands: a call written into a fetched page does not run because the model repeats its
+text; only a call the model writes itself, with its own tokens, is a call.
 GLM's GGUF files are expected to list these tags as special tokens; on the real file this is still to be checked
 ([GLM53_SERVER_PORT.md](GLM53_SERVER_PORT.md), "Known risks"). Should one of them not be a special token, the
 server reads all of them from the text instead, and that protection is gone.
@@ -527,7 +528,7 @@ server always sends these defaults. The `"sampling"` block takes `temperature` (
 ```
 
 A bad value stops the start with a line that names it; an unknown key is named and ignored. The server window lists
-the defaults it took. `GET /props` shows the defaults in effect, under llama.cpp's names.
+the block's values at the start. `GET /props` shows the defaults in effect, under llama.cpp's names.
 
 ### Run config keys the server reads
 
@@ -597,8 +598,8 @@ instead, see [LLAMA_SWAP.md](LLAMA_SWAP.md).
 `--open`. The other options: `--host`, `--port` (default 8101), `--gpu` (one card or a list, as nvidia-smi numbers
 them), `--chat-template FILE`, `--api-key` (also `STRATA_API_KEY`), `--mcp-config FILE`, `--lazy`, `--api-monitor`,
 `--idle-unload SECONDS`, `--min-free-vram-mib N`, `--before-load CMD` and `--fit-max-tokens`. Each has a run config
-key, except `--port`, which the start script passes (`--open` has `"open_browser"`). `--engine mock` runs a scripted stand-in for the model (`--script TEXT`), for trying clients
-without a GPU.
+key, except `--port`, which the start script passes (`--open` has `"open_browser"`). `--engine mock` runs a scripted
+stand-in for the model (`--script TEXT`), for trying clients without a GPU.
 
 ### Environment variables
 
@@ -643,8 +644,8 @@ conversation is about 0.15 GB of KDA state plus about 11 KB per token (the MLA c
 layers, and the indexer's pooled keys); a checkpoint is about 0.15 GB. So `--park-mib 8192` holds one conversation of
 up to roughly 700,000 tokens, or several shorter ones. A conversation that does not fit is not parked (the engine log
 says `... more than --park-mib; not kept`): when another client takes a turn, it is lost with its checkpoints, and
-its next request reads its prompt again from the start. A 1,048,576-token conversation needs `--park-mib` of about 12,000 or more to be parked, which
-must fit in the RAM beside the experts.
+its next request reads its prompt again from the start. A 1,048,576-token conversation needs `--park-mib` of about
+12,000 or more to be parked, and that RAM must be free beside the experts.
 
 None of this changes the answers: `tools/glm53_park_check.py` checks each resumed reply against a fresh engine's,
 token for token (on the CPU reference engine with small random models).
