@@ -157,8 +157,9 @@ and `false` mean "off". Any other value is a 400.
 - A request that says nothing gets the shared settings' level, then the run config's `"reasoning_effort"`, then the
   template's default (on). An Anthropic request that says nothing thinks too, unless the run config has
   `"anthropic_thinking": "on_request"` (Anthropic's own rule: thinking only when asked).
-- Anthropic's `budget_tokens` only turns thinking on here (it picks an effort level, which GLM's template does not
-  have). It does not cap the thinking: `reasoning_budget_tokens` does (below).
+- Anthropic's `"thinking": {"type": "enabled", "budget_tokens": N}` turns thinking on and caps it at N tokens: it
+  is the request's own reasoning budget (below). A `reasoning_budget_tokens` in the same request wins over it; a
+  `budget_tokens` that is not a whole number is a 400.
 - The thinking comes back as `reasoning_content` (OpenAI, in the stream's deltas and the message), as `thinking`
   blocks (Anthropic, with an empty `signature`) or as a `reasoning` output item (Responses). Send it back with the
   conversation as the API does. GLM's template keeps the thinking of the turns after the last user message and drops
@@ -166,10 +167,11 @@ and `false` mean "off". Any other value is a 400.
   Strata falls back to, `serve/chat_template.jinja`; the server uses the template inside the model's GGUF, which is
   still to be checked on the real file).
 
-**The reasoning budget.** `"reasoning_budget_tokens": N` in a request (chat, Anthropic or Responses), in the shared
-settings or in the run config caps the thinking at N tokens; a request's own value wins, and 0 means no budget. When
-the thinking reaches N, the server ends it at a clean point (no tag or character cut in half) with a short wrap-up and
-`</think>`:
+**The reasoning budget.** `"reasoning_budget_tokens": N` in a request (chat, Anthropic or Responses), Anthropic's
+`thinking.budget_tokens`, the shared settings' or the run config's caps the thinking at N tokens, in that order: a
+request's own value wins, and a `reasoning_budget_tokens` of 0 means no budget (the ones after it do not apply). A
+`budget_tokens` of 0 or less sets none: the next one applies. When the thinking reaches N, the server ends it at a
+clean point (no tag or character cut in half) with a short wrap-up and `</think>`:
 
 ```text
 I have thought about this long enough; time to give my answer.</think>
@@ -414,7 +416,8 @@ model. Codex with Strata's GLM engine has not been tried yet.
 - **Claude Code**: `ANTHROPIC_BASE_URL=http://127.0.0.1:8101`, `ANTHROPIC_AUTH_TOKEN` set to the API key (any text
   without one), and `ANTHROPIC_MODEL` set to a model name Claude Code accepts; Strata answers whatever the name. The
   upstream project saw it send an effort (`output_config.effort`) with every request; any level but `none` means
-  "think" here. `"reasoning_budget_tokens"` in the run config caps the thinking.
+  "think" here. A `thinking.budget_tokens` it sends caps the thinking, and `"reasoning_budget_tokens"` in the run
+  config caps it for requests that send none.
 - **OpenCode** and other OpenAI-compatible agents: base URL `http://127.0.0.1:8101/v1`; set the client's context
   limit to the context chosen in setup, and keep its output limit well under it (or set `"fit_max_tokens": true`).
 - **Zed's llama.cpp provider** reads `/props` and offers tools from `chat_template_caps`. Its generic OpenAI provider
