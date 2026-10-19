@@ -641,6 +641,20 @@ def anthropic_to_messages(req: dict, think_unasked: bool = True) -> tuple[list[d
 
 
 # ------------------------------------------------------------------------------------------------ output parser
+# The tags OutputParser reads in a reply (<tool_response> and </tool_response> are the template's, never the model's)
+OUTPUT_TAGS = (THINK_START, THINK_END, CALL_START, CALL_END, KEY_START, KEY_END, VALUE_START, VALUE_END)
+# A "<" written by an ordinary token, as the server hands it to OutputParser when the tokenizer has every one of
+# OUTPUT_TAGS as a special token (server.output_tags): the model writes its own tags as those tokens, so the same text
+# spelled with ordinary tokens - a call or a </think> copied from a tool result, a web page or the user, whose tags
+# #537 put in the prompt as ordinary text - never forms a tag.  A lone surrogate, which decoded text never holds;
+# every event gives it back as "<".
+ORDINARY_LT = "\udc3c"
+
+
+def _restore(text: str) -> str:
+    return text.replace(ORDINARY_LT, "<")
+
+
 @dataclass
 class ToolCall:
     name: str
@@ -889,7 +903,7 @@ class CallReader:
                 k = t.find(KEY_END)
                 if k < 0:
                     return out
-                self.key, self.text, self.stage = t[:k].strip(), t[k + len(KEY_END):], "value"
+                self.key, self.text, self.stage = _restore(t[:k].strip()), t[k + len(KEY_END):], "value"
             elif self.stage == "value":
                 s = t.lstrip()
                 if s.startswith(VALUE_START):
@@ -907,10 +921,10 @@ class CallReader:
                 at, how = value_end(t, self.seek)
                 if how == "end":
                     piece, self.text = t[:at], t[at + len(VALUE_END):]
-                    value = "".join(self.part) + piece
+                    value = _restore("".join(self.part) + piece)
                     if self.stage == "str":
                         self.args[self.key] = value
-                        out.append(_escape(piece) + '"')
+                        out.append(_escape(_restore(piece)) + '"')
                     else:
                         self.args[self.key] = self._typed(self.key, value)
                         out.append(json.dumps(self.args[self.key], ensure_ascii=False))
@@ -923,7 +937,7 @@ class CallReader:
                     self.part.append(t[:safe])
                     self.text = t[safe:]
                     if self.stage == "str":
-                        out.append(_escape(t[:safe]))
+                        out.append(_escape(_restore(t[:safe])))
                 self.seek = 0 if how == "wait" else max(0, at - safe)
                 return out
             else:                        # done, prose
@@ -940,7 +954,8 @@ class CallReader:
         elif self.stage == "raw":
             at, how = value_end(self.text, self.seek)
             cut = at if how == "wait" else len(self.text) - _partial(self.text, (VALUE_END,))
-            tail = json.dumps(self._typed(self.key, "".join(self.part) + self.text[:cut]), ensure_ascii=False)
+            tail = json.dumps(self._typed(self.key, _restore("".join(self.part) + self.text[:cut])),
+                              ensure_ascii=False)
         self.stage = "done"
         return [tail + "}"]
 
@@ -1016,7 +1031,7 @@ class OutputParser:
 
     def _track(self, text: str) -> str:
         """Follow the text that has gone out: the open code fence, the current line, and the backticks of the current
-        paragraph.  Returns the text."""
+        paragraph.  Returns the text, as the client gets it (ORDINARY_LT given back as "<")."""
         # Most token fragments stay on the current line. Fence and paragraph
         # bookkeeping happens only when a newline completes that line.
         if "\n" not in text:
@@ -1029,7 +1044,7 @@ class OutputParser:
                         self._line_blocks = []
                     self._line_blocks.append("".join(self._line_parts))
                     self._line_parts.clear()
-            return text
+            return _restore(text)
         parts = text.split("\n")
         for k, part in enumerate(parts):
             if k < len(parts) - 1:
@@ -1049,7 +1064,7 @@ class OutputParser:
             else:
                 if part:
                     self._line_parts.append(part)
-        return text
+        return _restore(text)
 
     def _in_code(self) -> bool:
         """The text so far leaves the next character inside a code fence or inline code."""
@@ -1221,7 +1236,7 @@ class OutputParser:
                 i = self.buf.find(CALL_END)
                 if i < 0:
                     return out
-                call = json_tool_call(self.buf[:i], self.schemas)
+                call = json_tool_call(_restore(self.buf[:i]), self.schemas)
                 if call is None:
                     out.append(Event("content", self._track(self.gap + CALL_START + self.buf[:i + len(CALL_END)])))
                 else:

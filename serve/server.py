@@ -48,9 +48,9 @@ sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script as well as a module
 from gguf_reader import GGUFFile  # noqa: E402
 from strata_tokenizer import Tokenizer  # noqa: E402
-from serve.frontend import (ChatTemplate, Event, OutputParser, anthropic_to_messages, forced_call,  # noqa: E402
-                            literal_tags, mark_think_literals, openai_to_messages, tool_choice_of,
-                            unmark_think_literals)
+from serve.frontend import (ORDINARY_LT, OUTPUT_TAGS, ChatTemplate, Event, OutputParser,  # noqa: E402
+                            anthropic_to_messages, forced_call, literal_tags, mark_think_literals,
+                            openai_to_messages, tool_choice_of, unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 from serve import runconfig  # noqa: E402
 from serve import logit_bias as bias_api  # noqa: E402
@@ -1104,9 +1104,12 @@ class Detokenizer:
     every generated id cost 2 ms per token after 8K tokens and 4 ms after 16K (perf-review F-1).  A tokenizer
     without `token_bytes` (the tests' byte tokenizer) keeps the re-decode."""
 
-    def __init__(self, tok):
+    def __init__(self, tok, tags: dict[int, str] | None = None):
         self.tok, self.ids, self.sent = tok, [], 0
         self.inc = codecs.getincrementaldecoder("utf-8")(errors="replace") if hasattr(tok, "token_bytes") else None
+        # output_tags(tok) for OutputParser: a "<" that any other token writes comes out as ORDINARY_LT, so only the
+        # tags' own tokens make tags
+        self.tags = tags or {}
 
     def pending(self) -> bool:
         """A character is split across the tokens so far: its first bytes are held."""
@@ -1115,6 +1118,14 @@ class Detokenizer:
         return self.tok.decode(self.ids).endswith("\ufffd")
 
     def push(self, t: int) -> str:
+        text = self._push(t)
+        if not self.tags:
+            return text
+        # a tag's text comes last: what comes before it is a character split across the tokens before it
+        tag = self.tags.get(t, "")
+        return text[:len(text) - len(tag)].replace("<", ORDINARY_LT) + tag
+
+    def _push(self, t: int) -> str:
         if self.inc is not None:
             return self.inc.decode(self.tok.token_bytes(t))
         self.ids.append(t)
@@ -1123,6 +1134,15 @@ class Detokenizer:
             return ""
         delta, self.sent = text[self.sent:], len(text)
         return delta
+
+
+def output_tags(tok) -> dict[int, str]:
+    """The ids of GLM's tags that OutputParser reads (<think>, </think>, <tool_call>, <arg_key>, ...) -> their text,
+    when the tokenizer has every one of them as a special token (the GGUF's types 3 and 4); otherwise {}, and the
+    parser reads them from the text, as the model then writes them."""
+    special = getattr(tok, "special_tokens", None) or {}
+    tags = {special.get(tag): tag for tag in OUTPUT_TAGS}
+    return {} if None in tags else tags
 
 
 OPENAI_MAX_STOP = 4                                  # OpenAI's limit on `stop`
@@ -1945,7 +1965,8 @@ class Service:
                 budget = max(1, max_new - reserve)
         parser = RawText() if raw else OutputParser(thinking=thinking, tools=tools, stream_tools=True,
                                                     recover=self.tool_call_recovery)
-        detok, n, finish = Detokenizer(self.tok), 0, "length"
+        # GLM's tags are read from their tokens: the same text in ordinary tokens is text (see ORDINARY_LT)
+        detok, n, finish = Detokenizer(self.tok, None if raw else output_tags(self.tok)), 0, "length"
         run_tok, run_len, repeated = None, 0, False     # #606: the current run of one repeated token
         thinking_n = 0                                  # tokens written while thinking (Responses' reasoning_tokens)
         stop_list = stop_strings(sampling)
