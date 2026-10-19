@@ -3455,6 +3455,9 @@ def make_handler(svc: Service):
                     for key in ("error", "usage", "timings"):
                         if key in obj:
                             self.record[key] = obj[key]
+            if code >= 400 and isinstance(obj, dict) and "error" in obj and "type" not in obj and \
+                    route(self.path) in ("/v1/messages", "/v1/messages/count_tokens"):
+                obj = {"type": "error", **obj}             # Anthropic's error shape, which its SDKs read
             body = json.dumps(obj, ensure_ascii=False).encode()
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
@@ -4288,6 +4291,7 @@ def make_handler(svc: Service):
             """Anthropic's token count, which Claude Code asks for its context figures: the prompt this server would
             read for the same request, rendered and tokenized - the model does not run."""
             req = anthropic_budget(svc.with_shared(req, "anthropic"))   # the same 400 for a bad budget_tokens
+            svc.reasoning_budget(req)                         # ... or reasoning_budget_tokens
             messages, tools, kw = anthropic_to_messages(req, svc.anthropic_think_unasked)
             stop_strings(req)                                 # the same 400 as the request itself would get
             check_request_sampling(req)                       # ... likewise a sampling field of the wrong type

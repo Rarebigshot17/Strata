@@ -3308,6 +3308,27 @@ class ThinkingBudget(unittest.TestCase):
         code, thinking, text = self.anthropic(thinking={"type": "disabled", "budget_tokens": "lots"})
         self.assertEqual((code, thinking, text), (200, "", ThinkingEngine.ANSWER))
 
+    def test_anthropic_errors_have_anthropics_shape(self):
+        # {"type": "error", "error": {"type": ..., "message": ...}} on the Anthropic routes (its SDKs and Claude Code
+        # read it so); the OpenAI routes keep OpenAI's {"error": {...}}
+        bad = {"model": "m", "max_tokens": 400, "thinking": {"type": "enabled", "budget_tokens": "lots"},
+               "messages": [{"role": "user", "content": "2+2?"}]}
+        for path in ("/v1/messages", "/v1/messages/count_tokens", "/v1/messages?beta=true"):
+            with self.subTest(path=path):
+                code, b = self.post(path, bad)
+                self.assertEqual((code, b.get("type"), b["error"]["type"]), (400, "error", "invalid_request_error"))
+        code, b = self.openai(temperature="hot")
+        self.assertEqual(code, 400, b)
+        self.assertNotIn("type", b)
+
+    def test_count_tokens_refuses_a_bad_budget_as_the_request_would(self):
+        for path in ("/v1/messages", "/v1/messages/count_tokens"):
+            with self.subTest(path=path):
+                code, b = self.post(path, {"model": "m", "max_tokens": 400, "reasoning_budget_tokens": "lots",
+                                           "messages": [{"role": "user", "content": "2+2?"}]})
+                self.assertEqual(code, 400, b)
+                self.assertIn("reasoning_budget_tokens", b["error"]["message"])
+
     def test_the_thinking_progress_line_shows_the_budget_not_max_tokens(self):
         """#984: 'thinking: x of max 6400' read as if the budget was ignored; while a budget applies the line shows
         it."""
