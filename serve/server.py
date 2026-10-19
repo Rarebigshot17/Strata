@@ -4581,12 +4581,13 @@ def sampling_defaults_from_config(cfg: dict) -> dict:
 
 
 def sampling_unset(key: str, value) -> bool:
-    """A request's sampling value that means "not set" (see check_request_sampling): a negative top_k or
-    penalty_last_n, or a seed <= 0 (llama.cpp's and vLLM's -1).  The shared or configured value applies to it, as to a
-    field left out; without one the engine's default does (top_k off, a random seed, a 64-token window)."""
+    """A request's sampling value that means "not set" (see check_request_sampling): a negative top_k, or a
+    penalty_last_n or seed <= 0 (llama.cpp's and vLLM's -1; sampling_keys sends no window of 0, and repeat_last_n 0 is
+    unset too).  The shared or configured value applies to it, as to a field left out; without one the engine's
+    default does (top_k off, a random seed, a 64-token window)."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
-    return (key in ("top_k", "penalty_last_n") and value < 0) or (key == "seed" and value <= 0)
+    return (key == "top_k" and value < 0) or (key in ("penalty_last_n", "seed") and value <= 0)
 
 
 def check_request_sampling(req) -> None:
@@ -4597,7 +4598,7 @@ def check_request_sampling(req) -> None:
     or float) for top_k, penalty_last_n and seed.  Ranges: what the engine can use, which checks none itself - a
     finite number it can hold (no NaN or Infinity, which json.loads reads), temperature >= 0 (0 is greedy), top_p and
     min_p 0..1, a repetition penalty > 0 (it divides by it; 1 is off), top_k and penalty_last_n up to ENGINE_INT_MAX
-    and a seed up to ENGINE_SEED_MAX (top_k 0 is off; a negative top_k or penalty_last_n, or a seed <= 0, is unset).
+    and a seed up to ENGINE_SEED_MAX (top_k 0 is off; a negative top_k, or a penalty_last_n or seed <= 0, is unset).
     An absent or null field is not checked."""
     if isinstance(req, dict):      # #1819: llama.cpp's names; the OpenAI-style field wins when both are sent
         if req.get("repeat_penalty") is not None and req.get("repetition_penalty") is None:

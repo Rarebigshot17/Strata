@@ -112,7 +112,7 @@ recommendation, temperature 1.0 and top_p 0.95 ([Settings](#sampling-defaults)).
 | `min_p` | 0 to 1 | 0 is off |
 | `repetition_penalty` (also `repeat_penalty`) | a number > 0 | 1 is off |
 | `frequency_penalty`, `presence_penalty` | finite numbers | 0 is off |
-| `penalty_last_n` (also `repeat_last_n`) | a whole number up to 2,147,483,647 | the window of the three penalties; 64 when a penalty is on and no window is given (a negative value counts as left out) |
+| `penalty_last_n` (also `repeat_last_n`) | a whole number up to 2,147,483,647 | the window of the three penalties; 64 when a penalty is on and no window is given (0 or a negative value counts as left out) |
 | `seed` | a whole number from 1 to 2^64-1 | the same seed and request give the same draw; 0 or negative (-1) counts as left out: the shared or configured seed, else random |
 | `logit_bias` | token id -> -100..100 | a per-request token bias, checked before the answer starts on every route ([LOGIT_BIAS.md](LOGIT_BIAS.md)) |
 
