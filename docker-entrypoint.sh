@@ -105,7 +105,8 @@ key, host = cfg.get("api_key"), str(cfg.get("host") or "127.0.0.1")
 sys.exit(1 if (key.strip() if isinstance(key, str) else key) or host in ("127.0.0.1", "localhost", "::1") else 0)
 PY
 }
-if [ -z "$API_KEY" ] && open_without_key "$link"; then
+# STRATA_API_KEY is the server's own variable for the key (the server inherits this environment).
+if [ -z "$API_KEY" ] && [ -z "${STRATA_API_KEY:-}" ] && open_without_key "$link"; then
   echo "WARNING: no API key. The server listens on every interface of the container, so anyone who reaches its" >&2
   echo "  published port can use the model. Publish it on this host only (-p 127.0.0.1:$PORT:$PORT), or set" >&2
   echo "  -e API_KEY=<secret> before publishing it to a network: -p $PORT:$PORT publishes it on every interface" >&2

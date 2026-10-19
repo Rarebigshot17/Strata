@@ -128,7 +128,8 @@ class Entrypoint(unittest.TestCase):
         self.assertIn(f"Config: {self.data}/config/strata-glm-iq4_xs.json", out)
 
     def entry(self, **extra):
-        env = dict(os.environ, STRATA_DATA=str(self.data), MODEL="UD-IQ3_XXS", REINSTALL="0", **extra)
+        env = {k: v for k, v in os.environ.items() if k != "STRATA_API_KEY"}
+        env.update(STRATA_DATA=str(self.data), MODEL="UD-IQ3_XXS", REINSTALL="0", **extra)
         r = subprocess.run([SH, str(self.script)], env=env, capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
         return r
@@ -142,6 +143,7 @@ class Entrypoint(unittest.TestCase):
         self.assertIn("WARNING: no API key", err)
         self.assertIn("-p 127.0.0.1:8101:8101", err)
         self.assertIn("-e API_KEY=", err)
+        self.assertNotIn("no API key", self.entry(STRATA_API_KEY="k9").stderr)    # the server's own variable
         cfg.write_text('{"args": ["x"], "host": "0.0.0.0", "api_key": "k0"}\n')     # set up with a key
         self.assertNotIn("no API key", self.entry().stderr)
         cfg.write_text('{"args": ["x"], "host": "127.0.0.1"}\n')                    # nothing outside reaches it
