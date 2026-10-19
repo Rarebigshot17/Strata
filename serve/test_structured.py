@@ -237,15 +237,30 @@ class Structured(unittest.TestCase):
     @unittest.skipUnless(HAVE_JSONSCHEMA, "jsonschema is not installed")
     def test_a_pattern_regex_would_write_out_is_refused(self):
         # regex (unlike re) writes a repeat out to its minimum count when it compiles a pattern, before the timeout
-        # runs: a{100000000} took 4 GB and 5 s, a{1000000} 270 MB.  Such a pattern fails the answer at once.
+        # runs: a{100000000} took 4 GB and 5 s, a{1000000} 270 MB.  Such a pattern is refused with the request.
         for pattern in ("^a{1000000}$", "^(?:a{1000}){1000}$", "^(?:(x)|y{100}){20}$" * 10):
-            for schema in ({"type": "object", "properties": {"v": {"type": "string", "pattern": pattern}}},
-                           {"type": "object", "patternProperties": {pattern: {}}}):
-                _, validator = structured.prepare_format(
-                    {"type": "json_schema", "json_schema": {"name": "big", "schema": schema}}, [])
-                with self.subTest(schema=schema), self.assertRaisesRegex(structured.StructuredOutputError,
-                                                                         "repeats too much"):
-                    structured.validated_json('{"v": "a"}', validator, "stop")
+            for schema, where in (
+                    ({"type": "object", "properties": {"v": {"type": "string", "pattern": pattern}}},
+                     "/properties/v/pattern"),
+                    ({"type": "object", "patternProperties": {pattern: {}}}, "/patternProperties"),
+                    ({"type": "object", "$defs": {"const": {"items": {"pattern": pattern}}}},
+                     "/$defs/const/items/pattern")):
+                with self.subTest(schema=schema), self.assertRaisesRegex(ValueError, "repeats too much") as c:
+                    structured.prepare_format({"type": "json_schema", "json_schema": {"name": "big", "schema": schema}},
+                                              [])
+                self.assertIn(where, str(c.exception))
+                self.assertTrue(str(c.exception).startswith("response_format"), str(c.exception))
+        # a value that only looks like a pattern (a default, an example, a property called "pattern") is no pattern
+        for schema in ({"type": "object", "default": {"pattern": "a{1000000}"}},
+                       {"type": "object", "examples": [{"pattern": "a{1000000}"}]},
+                       {"type": "object", "properties": {"pattern": {"type": "string", "const": "a{1000000}"}}}):
+            with self.subTest(schema=schema):
+                structured.prepare_format({"type": "json_schema", "json_schema": {"name": "ok", "schema": schema}}, [])
+        # the answer's check stays a second line: a pattern it would write out fails the answer at once
+        validator = structured.jsonschema_modules()[0].validator_for({})(
+            {"type": "object", "properties": {"v": {"pattern": "^a{1000000}$"}}})
+        with self.assertRaisesRegex(structured.StructuredOutputError, "repeats too much"):
+            structured.validated_json('{"v": "a"}', validator, "stop")
         schema = {"type": "object", "properties": {"id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
                                                     "essay": {"type": "string", "pattern": "^[\\s\\S]{2000,}$"}}}
         _, validator = structured.prepare_format({"type": "json_schema", "json_schema": {"name": "ok", "schema": schema}},
@@ -253,6 +268,26 @@ class Structured(unittest.TestCase):
         structured.validated_json(json.dumps({"id": "0" * 64, "essay": "x" * 2000}), validator, "stop")
         with self.assertRaisesRegex(structured.StructuredOutputError, "does not match"):
             structured.validated_json(json.dumps({"id": "0" * 64, "essay": "x" * 1999}), validator, "stop")
+
+    @unittest.skipUnless(HAVE_JSONSCHEMA, "jsonschema is not installed")
+    def test_a_pattern_too_big_to_check_is_a_400_on_every_route(self):
+        # it was found only when the answer was checked: a 502 after the whole answer had been written
+        schema = object_schema({"code": {"type": "string", "pattern": "^a{1000000}$"}})
+        fmt = {"type": "json_schema", "json_schema": {"name": "big", "schema": schema}}
+        with mock.patch.object(self.svc, "load") as load:
+            for stream in (False, True):
+                with self.subTest(stream=stream):
+                    code, reply = self.chat('{"code": "a"}', response_format=fmt, stream=stream)
+                    self.assertEqual(code, 400, reply)
+                    self.assertIn("response_format", reply["error"]["message"])
+                    self.assertIn("/properties/code/pattern", reply["error"]["message"])
+                    code, reply = self.request("/v1/responses", {
+                        "input": "Photobooth.", "stream": stream,
+                        "text": {"format": {"type": "json_schema", "name": "big", "schema": schema}}})
+                    self.assertEqual(code, 400, reply)
+                    self.assertEqual(reply["error"]["param"], "text.format")
+                    self.assertIn("/properties/code/pattern", reply["error"]["message"])
+            load.assert_not_called()
 
     def test_the_server_does_not_import_jsonschema_at_start(self):
         import subprocess

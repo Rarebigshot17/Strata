@@ -271,8 +271,9 @@ The schema is checked with the Python package `jsonschema` when it is installed 
 "jsonschema>=4.23,<5"`; setup does not install it). Without it, only "one JSON object" is checked, and the server
 says so once. A schema's `pattern` and `patternProperties` run with the `regex` package under two limits
 (`serve/structured.py`): together they may take 2 s on one answer, and a pattern may have at most 10,000 parts with
-its repeats written out (`a{100000}` has 100,000). A pattern over either limit fails the answer's check with a 502;
-the size limit is only checked then, after the model has written the answer.
+its repeats written out (`a{100000}` has 100,000). A pattern over the size limit is a 400 when the request arrives,
+on both routes that take a JSON format (the message says where in the schema it is); one that takes longer than 2 s
+fails the answer's check with a 502.
 
 On `/v1/chat/completions`, a JSON format together with tools or MCP is a 400. On `/v1/responses` it may come with
 tools: the schema applies to the final answer, and a turn that calls a tool is passed on as written.

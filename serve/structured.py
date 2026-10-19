@@ -62,9 +62,45 @@ def _pattern_size(node) -> int:
 @functools.lru_cache(maxsize=16)       # not regex's own cache: it keeps 500 patterns
 def _compiled(pattern):
     if _pattern_size(_re_parser.parse(pattern)) > PATTERN_SIZE_MAX:
-        raise ValueError(f"the response_format pattern {pattern[:80]!r} repeats too much to be checked (more than "
+        raise ValueError(f"the pattern {pattern[:80]!r} repeats too much to be checked (more than "
                          f"{PATTERN_SIZE_MAX} parts with its repeats written out)")
     return regex.compile(pattern, cache_pattern=False)
+
+
+_DATA_KEYS = ("const", "enum", "default", "examples")       # values, not schemas: a "pattern" in them is no pattern
+_NAMED_SCHEMAS = ("properties", "patternProperties", "$defs", "definitions", "dependentSchemas")
+
+
+def _check_patterns(node, path="") -> None:
+    """Every pattern of a schema (`pattern`, and `patternProperties`' names) is parsed and its size checked when the
+    request arrives: a ValueError (a 400 that names where it is) instead of a 502 once the whole answer is written.
+    `path`: where `node` is in the schema, as a JSON pointer."""
+    def check(pattern, where):
+        try:
+            _compiled(pattern)
+        except (re.error, regex.error) as exc:
+            raise ValueError(f"response_format schema at {where}: {pattern[:80]!r} is not a regular expression "
+                             f"({exc})") from None
+        except (ValueError, RecursionError, OverflowError) as exc:
+            raise ValueError(f"response_format schema at {where}: {exc}") from None
+
+    if isinstance(node, list):
+        for i, value in enumerate(node):
+            _check_patterns(value, f"{path}/{i}")
+        return
+    if not isinstance(node, dict):
+        return
+    for key, value in node.items():
+        where = f"{path}/{key}"
+        if key == "pattern" and isinstance(value, str):
+            check(value, where)
+        elif key in _NAMED_SCHEMAS and isinstance(value, dict):
+            for name, sub in value.items():      # names, not keywords: a property may be called "const"
+                if key == "patternProperties":
+                    check(name, where)
+                _check_patterns(sub, f"{where}/{name}")
+        elif key not in _DATA_KEYS:
+            _check_patterns(value, where)
 
 
 class _TimedRe:
@@ -186,6 +222,7 @@ def prepare_format(response_format, messages, with_tools=False):
             validator = cls(schema, registry=Registry(retrieve=no_remote))
         except SchemaError as exc:
             raise ValueError(f"invalid response_format schema: {exc.message}") from exc
+        _check_patterns(schema)                # the patterns run on the answer: one too big to run is a 400 now
     directive = ("OUTPUT FORMAT REQUIREMENT: Return exactly one JSON object matching the JSON Schema below. "
                  "No Markdown, headings, code fences, commentary, or text outside the JSON. "
                  "Use every required field, correct types, and only allowed fields. "
