@@ -3322,8 +3322,8 @@ def make_handler(svc: Service):
                 print(f"[strata] 503: {e}", flush=True)
                 self._json(503, responses_error_body(str(e), "server_error") if path == "/v1/responses"
                            else {"error": {"type": "server_error", "message": str(e)}})
-            except ValueError as e:
-                print(f"[strata] 400 invalid request: {e}", flush=True)
+            except (ValueError, OverflowError, RecursionError) as e:   # also valid JSON Python cannot take: 1e999
+                print(f"[strata] 400 invalid request: {e}", flush=True)  # (infinity) as a whole number, deep nesting
                 if path == "/v1/responses":
                     self._json(400, responses_error_body(str(e)))
                 else:
@@ -3469,7 +3469,7 @@ def make_handler(svc: Service):
                     new, changed = runconfig.apply(cfg, req.get("set") if isinstance(req, dict) else None)
                     if changed:
                         bak = runconfig.save(svc.config_path, new)
-            except ValueError as e:
+            except (ValueError, OverflowError, RecursionError) as e:   # as in _post: 1e999, deep nesting
                 self._json(400, {"error": {"type": "invalid_request_error", "message": str(e)}})
                 return
             except OSError as e:
@@ -3501,7 +3501,7 @@ def make_handler(svc: Service):
                                                          'or {"defaults": null} to clear them'}})
                     return
                 shared = svc.set_shared(req["defaults"])
-            except ValueError as e:
+            except (ValueError, OverflowError, RecursionError) as e:   # as in _post: 1e999, deep nesting
                 self._json(400, {"error": {"type": "invalid_request_error", "message": str(e)}})
                 return
             print("[strata] other apps now use the Chat settings: " + ", ".join(f"{k}={v}" for k, v in shared.items())

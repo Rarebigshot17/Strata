@@ -282,5 +282,35 @@ class ResponsesHangUp(Http):
         self.assertFalse([c for c in printed.call_args_list if "malformed" in str(c)])
 
 
+class ExtremeJson(Http):
+    """Valid JSON that Python cannot take as it is (1e999 is infinity; thousands of nested arrays exceed the
+    recursion limit) is a 400, not a connection closed without an answer."""
+
+    def test_infinite_numbers_and_deep_nesting_are_400(self):
+        hi = [{"role": "user", "content": "hi"}]
+        cases = [("/v1/chat/completions", b'{"messages": %s, "max_tokens": 1e999}' % json.dumps(hi).encode()),
+                 ("/v1/completions", b'{"prompt": "hi", "max_tokens": 1e999}'),
+                 ("/v1/messages", b'{"messages": %s, "max_tokens": 1e999}' % json.dumps(hi).encode()),
+                 ("/v1/chat/completions", b"[" * 100000 + b"]" * 100000),
+                 ("/settings", b'{"defaults": {"top_k": 1e999}}'),
+                 ("/settings", b'{"defaults": ' + b"[" * 100000 + b"]" * 100000 + b"}")]
+        for path, body in cases:
+            with self.subTest(path=path, body=body[:40]):
+                with mock.patch("builtins.print"):
+                    code, _, out = self.call(path, body)
+                self.assertEqual(code, 400, out)
+                self.assertIn("error", json.loads(out))
+
+    def test_the_run_config_view_too(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.svc.config_path = os.path.join(tmp, "strata.json")
+            with open(self.svc.config_path, "w", encoding="utf-8") as f:
+                json.dump({"model": "m.gguf"}, f)
+            for body in (b'{"set": {"ctx": 1e999}}', b'{"set": ' + b"[" * 100000 + b"]" * 100000 + b"}"):
+                with self.subTest(body=body[:30]), mock.patch("builtins.print"):
+                    code, _, out = self.call("/config", body)
+                    self.assertEqual(code, 400, out)
+
+
 if __name__ == "__main__":
     unittest.main()
