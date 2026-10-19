@@ -411,14 +411,15 @@ class LiteralThinkTags(unittest.TestCase):
         ids = self.ids(*messages("X"))
         self.assertEqual((ids.count(self.open), ids.count(self.close)), (1, 1))
 
-    def test_an_assistant_reply_with_its_call_written_inline(self):
-        # a client that replays the model's raw text sends the call's tags the model wrote: they stay the call's tokens
+    def test_call_text_in_an_assistant_reply(self):
+        # a call left in an assistant's content is one the server read as text (a quote, ordinary tokens copied from
+        # a tool result, an undeclared name): it stays text in the next prompt, never a call the model made
         call = call_text("write", path="a.md")
         msgs = [{"role": "user", "content": "go"}, {"role": "assistant", "content": "Saving </think> it." + call},
                 {"role": "user", "content": "again"}]
         ids = self.ids(msgs)
-        # the prompt's <think>, the history's </think> (the template's: the quoted one is text) and the call's tags
-        self.assertEqual(self.counts(ids), [1, 1, 1, 1, 1, 1, 1, 1, 0, 0])
+        # the prompt's <think> and the history's </think> (the template's: the quoted one is text)
+        self.assertEqual(self.counts(ids), [1, 1, 0, 0, 0, 0, 0, 0, 0, 0])
         self.assertIn("Saving </think> it." + call, self.tok.decode(ids))
 
     def test_a_client_that_sends_the_reasoning_inline(self):

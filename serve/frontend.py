@@ -317,9 +317,6 @@ def images_of(messages: list[dict]) -> list[str]:
 # as ordinary text.
 GLM_TAGS = (THINK_START, THINK_END, CALL_START, CALL_END, KEY_START, KEY_END, VALUE_START, VALUE_END, RESPONSE_START,
             RESPONSE_END)
-# The tags of a call.  An assistant message's content keeps them: a client replaying the model's raw call text sends
-# the tokens the model wrote.
-CALL_TAGS = (CALL_START, CALL_END, KEY_START, KEY_END, VALUE_START, VALUE_END)
 MARK0 = 0xF0E01              # the first mark (plane 15's private use area)
 LITERAL_TAGS = {tag: chr(MARK0 + k) for k, tag in enumerate(GLM_TAGS)}
 LITERAL_MARKS = {v: k for k, v in LITERAL_TAGS.items()}
@@ -372,23 +369,22 @@ def _has_tag(v, tags: dict[str, str] = LITERAL_TAGS) -> bool:
 def mark_think_literals(messages: list[dict], tools: list[dict] | None, tags: dict[str, str] = LITERAL_TAGS):
     """#537: (messages, tools) with every special-token text in their text swapped for its mark (LITERAL_TAGS, or
     `tags`: literal_tags() adds the tokenizer's special tokens), and whether there was one (False: no change, the same
-    objects back - a prompt without them renders as it always did).  An assistant message's content keeps its call
-    tags, and one that opens with a whole <think>...</think> block (clients that send the reasoning inline) keeps
-    that block's two tags as the model's markers: the template reads them to split the reasoning off."""
+    objects back - a prompt without them renders as it always did).  Call text in an assistant message's content is
+    marked too: a call the server read is never left there, so what is there is what it read as text (a quote, ordinary
+    tokens copied from a tool result).  An assistant message that opens with a whole <think>...</think> block (clients
+    that send the reasoning inline) keeps that block's two tags as the model's markers: the template reads them to
+    split the reasoning off."""
     if not _has_tag(messages, tags) and not _has_tag(tools, tags):
         return messages, tools, False
-    own = {t: v for t, v in tags.items() if t not in CALL_TAGS}     # what an assistant's content keeps as written
     out = []
     for m in messages:
-        assistant = m.get("role") == "assistant"
-        marked = {k: v if k == "role" else _mark_deep(v, own if assistant and k == "content" else tags)
-                  for k, v in m.items()}
+        marked = {k: v if k == "role" else _mark_deep(v, tags) for k, v in m.items()}
         content = m.get("content")
-        if assistant and isinstance(content, str) and content.lstrip().startswith(THINK_START) \
+        if m.get("role") == "assistant" and isinstance(content, str) and content.lstrip().startswith(THINK_START) \
                 and THINK_END in content:
             i, j = content.index(THINK_START) + len(THINK_START), content.index(THINK_END)
-            marked["content"] = (content[:i] + _mark(content[i:j], own) + THINK_END +
-                                 _mark(content[j + len(THINK_END):], own))
+            marked["content"] = (content[:i] + _mark(content[i:j], tags) + THINK_END +
+                                 _mark(content[j + len(THINK_END):], tags))
         out.append(marked)
     return out, _mark_deep(tools, tags), True
 
