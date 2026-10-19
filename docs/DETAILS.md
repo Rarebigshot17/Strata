@@ -480,8 +480,10 @@ configured) and **Use for other apps too** (the shared settings, below). They ar
 request the chat sends the temperature (and top-p and top-k when the temperature is above 0), the seed and max
 tokens when they are set, and `"reasoning_effort"`: `"none"` when thinking is off, `"high"` when it is on (GLM has
 no levels), so the page's choice wins over a run config or shared setting. What it does not send falls back to the
-defaults below. **Use for other apps too** shares the same fields, thinking included. The About tab holds the API key
-(also kept in this browser) and the theme.
+defaults below. **Use for other apps too** shares the same fields, but thinking only when it is off: a shared "on"
+would make other apps' small calls think too (an Anthropic client's, which `anthropic_thinking` `"on_request"` keeps
+from thinking), so with thinking on the other apps keep their own choice. The About tab holds the API key (also kept
+in this browser) and the theme.
 
 ### Shared settings for other clients
 

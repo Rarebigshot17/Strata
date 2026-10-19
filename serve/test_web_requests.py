@@ -25,28 +25,37 @@ def function_source(js: str, name: str) -> str:
 
 @unittest.skipUnless(NODE, "needs node")
 class ChatRequestFields(unittest.TestCase):
+    PAGE = {"thinking": "on", "temperature": 1.0, "top_p": 0.95, "top_k": 0, "max": "", "seed": ""}
+
     def setUp(self):
         self.js = APP.read_text(encoding="utf-8")
-        # the function whose fields "Use for other apps too" shares
-        self.name = re.search(r"defaults: on \? (\w+)\(s\)", self.js).group(1)
 
-    def fields(self, settings: dict) -> dict:
-        script = function_source(self.js, self.name) + f"\nconsole.log(JSON.stringify({self.name}({json.dumps(settings)})));"
+    def fields(self, name: str, settings: dict) -> dict:
+        script = function_source(self.js, name) + f"\nconsole.log(JSON.stringify({name}({json.dumps(settings)})));"
+        if name != "samplingFields":                    # the shared fields are built from the chat's
+            script = function_source(self.js, "samplingFields") + "\n" + script
         r = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
         return json.loads(r.stdout)
 
-    def test_thinking_on_and_off_are_both_sent(self):
+    def test_the_chat_sends_thinking_on_and_off(self):
         # "On" sends a level, so a run config or shared setting with reasoning_effort "none" does not win over the page
-        page = {"thinking": "on", "temperature": 1.0, "top_p": 0.95, "top_k": 0, "max": "", "seed": ""}
-        self.assertEqual(self.fields(page), {"temperature": 1.0, "reasoning_effort": "high", "top_p": 0.95, "top_k": 0})
-        self.assertEqual(self.fields({**page, "thinking": "none", "temperature": 0, "seed": "7", "max": "64"}),
+        self.assertEqual(self.fields("samplingFields", self.PAGE),
+                         {"temperature": 1.0, "reasoning_effort": "high", "top_p": 0.95, "top_k": 0})
+        self.assertEqual(self.fields("samplingFields",
+                                     {**self.PAGE, "thinking": "none", "temperature": 0, "seed": "7", "max": "64"}),
                          {"temperature": 0, "reasoning_effort": "none", "seed": 7, "max_tokens": 64})
-
-    def test_the_chat_sends_the_same_fields(self):
         send = function_source(self.js, "send")
-        self.assertIn(f"...{self.name}(settings)", send)
-        self.assertNotIn("reasoning_effort", send)          # only through the shared function
+        self.assertIn("...samplingFields(settings)", send)
+        self.assertNotIn("reasoning_effort", send)          # only through samplingFields
+
+    def test_other_apps_get_thinking_off_but_not_on(self):
+        # "Use for other apps too" shares the page's fields, but thinking only when it is off: a shared "on" would make
+        # an Anthropic client's small calls think too, which anthropic_thinking "on_request" keeps them from (#278)
+        name = re.search(r"defaults: on \? (\w+)\(s\)", self.js).group(1)
+        self.assertEqual(self.fields(name, self.PAGE), {"temperature": 1.0, "top_p": 0.95, "top_k": 0})
+        self.assertEqual(self.fields(name, {**self.PAGE, "thinking": "none"}),
+                         {"temperature": 1.0, "reasoning_effort": "none", "top_p": 0.95, "top_k": 0})
 
 
 if __name__ == "__main__":
