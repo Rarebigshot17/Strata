@@ -636,7 +636,9 @@ are the start of the new prompt. To keep each client's conversation anyway, the 
   without the generation prompt `<|assistant|><think>`). The next turn renders the earlier reply without its thinking,
   so it differs from the engine's state from that point on; the engine restarts from the checkpoint and reads the reply
   and the new message, not the whole conversation. A regenerated reply restarts there too. The engine keeps the two
-  latest checkpoints per conversation, and none closer than 256 tokens to the start (`--checkpoint-min`).
+  latest checkpoints per conversation, and none closer than 256 tokens to the start (`--checkpoint-min`). The engine's
+  line protocol (`GEN` with `cp=`, `end=`, `logit_bias=` and the sampling keys) is in
+  [GLM53_SERVER_PORT.md](GLM53_SERVER_PORT.md).
 - **Memory.** `--park-mib` (engine default 8192; setup writes 8192, or 4096 when less than 40 GB of RAM is left
   beside the experts) caps what parked conversations and checkpoints use. The conversation used least recently goes
   first, then the live one's older checkpoints.
