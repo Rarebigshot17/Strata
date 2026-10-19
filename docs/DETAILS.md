@@ -656,8 +656,8 @@ its next request reads its prompt again from the start. A 1,048,576-token conver
 
 On the CPU reference engine this does not change the answers: `tools/glm53_park_check.py` checks each resumed reply
 against a fresh engine's, token for token (with small random models). On the GPU engine, chunked prompts and the
-expert cache change the rounding, so a resumed reply may differ from a fresh one in its later tokens; that check has
-not run on a GPU yet.
+expert cache change the rounding, so a resumed reply may pick different tokens from a fresh one (the script is exact
+there only with `--prefill-chunk 0 --no-expert-cache`); it has not run on a GPU yet.
 
 The **Conversation cache** card in the Monitor tab shows: the parked conversations and checkpoints and the RAM they
 use against `--park-mib`; how many requests reused part of their prompt; the last request's reused tokens of its
