@@ -11,8 +11,9 @@ end on the CPU reference engine with a small random GLM model (`tools/glm53_serv
 (`tools/glm53_park_check.py`) and the CPU reference against llama.cpp (`tools/glm53_selftest.sh`). Where something
 depends on the real model's files (its chat template, its token types), the page says so.
 
-Contents: [The API](#the-api) · [Settings](#settings) · [Several clients on one engine](#several-clients-on-one-engine)
-· [Monitoring](#monitoring) · [Security](#security) · [Limits](#limits)
+Contents: [The API](#the-api) · [Settings](#settings) ·
+[Several clients on one engine](#several-clients-on-one-engine) · [Monitoring](#monitoring) · [Security](#security) ·
+[Limits](#limits)
 
 ## The API
 
@@ -165,8 +166,9 @@ Any other value is a 400.
   still to be checked on the real file).
 
 **The reasoning budget.** `"reasoning_budget_tokens": N` in a request (chat, Anthropic or Responses), in the shared
-settings or in the run config caps the thinking at N tokens; a request's own value wins, and 0 means no budget. When the thinking reaches
-N, the server ends it at a clean point (no tag or character cut in half) with a short wrap-up and `</think>`:
+settings or in the run config caps the thinking at N tokens; a request's own value wins, and 0 means no budget. When
+the thinking reaches N, the server ends it at a clean point (no tag or character cut in half) with a short wrap-up and
+`</think>`:
 
 ```text
 I have thought about this long enough; time to give my answer.</think>
@@ -771,13 +773,12 @@ Listening beyond it without an API key prints a warning: anyone on the network c
   server as if it were its own. So without an API key the server answers only requests whose `Host` is a name it knows:
   `localhost` and `*.localhost`, any IP address, the address it listens on and, when it listens beyond this machine,
   the machine's name (`name`, `name.local`) and `host.docker.internal`, and the hosts of `"trusted_origins"`, on any
-  port. Others get a 403 that names the
-  setting, and one line in the server window. To reach it under another name (a reverse proxy, a tunnel, a DNS name),
-  add `"allowed_hosts": ["strata.example.com"]` or `STRATA_ALLOWED_HOSTS` (comma-separated; `".example.com"` allows
-  that name and every name below it; `"*"` turns the check off). With an API key the check is off: such a page cannot
-  send the key. Requests without a `Host` header pass.
+  port. Others get a 403 that names the setting, and one line in the server window. To reach it under another name (a
+  reverse proxy, a tunnel, a DNS name), add `"allowed_hosts": ["strata.example.com"]` or `STRATA_ALLOWED_HOSTS`
+  (comma-separated; `".example.com"` allows that name and every name below it; `"*"` turns the check off). With an API
+  key the check is off: such a page cannot send the key. Requests without a `Host` header pass.
 - **Web pages without an API key.** A `POST` to `/v1/...` that carries an `Origin` (a browser sent it) is answered only
-  for Strata's own page, pages on `localhost` or an allowed host name, the origins in `"trusted_origins"` or
+  for Strata's own page, pages on `localhost` or on a name the server answers to, the origins in `"trusted_origins"` or
   `"cors_origins"`, and browser extensions and desktop apps (`chrome-extension://`, `moz-extension://`, `app://`),
   and only with a JSON body (else 415). Other pages and `Origin: null` get a 403. Clients that send no `Origin` (curl,
   the SDKs, other servers) are not affected. With an API key, the key decides.
@@ -810,7 +811,7 @@ For reporting a security problem, see [SECURITY.md](../SECURITY.md).
 - **Body size.** 256 MiB per request by default ([Security](#security)).
 - **Engine watchdogs.** A running request whose engine says nothing for `engine_silence_s` (300 s; longer while a
   prompt chunk is read) ends with an error, and the next request starts the engine again. An engine that is silent
-  for 90 s with no CPU time, no disk I/O and an idle GPU is ended as frozen (`STRATA_ENGINE_STALL_S`, needs psutil). A starting engine must say
-  `READY` within 900 s of its last warm-up progress (`STRATA_ENGINE_READY_S`); the warm-up that reads the experts into
-  memory before `READY` counts as progress while it moves on. How long the warm-up takes on the real model is not
-  measured yet.
+  for 90 s with no CPU time, no disk I/O and an idle GPU is ended as frozen (`STRATA_ENGINE_STALL_S`, needs psutil).
+  A starting engine must say `READY` within 900 s of its last warm-up progress (`STRATA_ENGINE_READY_S`); the warm-up
+  that reads the experts into memory before `READY` counts as progress while it moves on. How long the warm-up takes
+  on the real model is not measured yet.
