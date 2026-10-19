@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -316,12 +317,14 @@ def images_of(messages: list[dict]) -> list[str]:
 # as ordinary text.
 GLM_TAGS = (THINK_START, THINK_END, CALL_START, CALL_END, KEY_START, KEY_END, VALUE_START, VALUE_END, RESPONSE_START,
             RESPONSE_END)
-# The tags of a call.  An assistant message's content keeps them: a client replaying the model's raw call text sends
-# the tokens the model wrote.
-CALL_TAGS = (CALL_START, CALL_END, KEY_START, KEY_END, VALUE_START, VALUE_END)
 MARK0 = 0xF0E01              # the first mark (plane 15's private use area)
 LITERAL_TAGS = {tag: chr(MARK0 + k) for k, tag in enumerate(GLM_TAGS)}
 LITERAL_MARKS = {v: k for k, v in LITERAL_TAGS.items()}
+# The request's own characters in the marks' range (from ESCAPE to the end of plane 15's private use area: Nerd Font
+# icons in a tool's output are there) are written with ESCAPE before them while the marks are in: they stay what they
+# are, never a mark
+ESCAPE = chr(MARK0 - 1)
+_MARK_RANGE = re.compile("[\U000F0E00-\U000FFFFD]")
 
 
 def literal_tags(texts) -> dict[str, str]:
@@ -337,6 +340,7 @@ def literal_tags(texts) -> dict[str, str]:
 
 
 def _mark(text: str, tags: dict[str, str] = LITERAL_TAGS) -> str:
+    text = _MARK_RANGE.sub(ESCAPE + r"\g<0>", text)
     for tag, mark in tags.items():
         text = text.replace(tag, mark)
     return text
@@ -345,8 +349,8 @@ def _mark(text: str, tags: dict[str, str] = LITERAL_TAGS) -> str:
 def _mark_deep(v, tags: dict[str, str] = LITERAL_TAGS):
     if isinstance(v, str):
         return _mark(v, tags)
-    if isinstance(v, dict):
-        return {k: _mark_deep(x, tags) for k, x in v.items()}
+    if isinstance(v, dict):         # keys too: the template writes a schema's property names and a call's argument names
+        return {_mark_deep(k, tags): _mark_deep(x, tags) for k, x in v.items()}
     if isinstance(v, list):
         return [_mark_deep(x, tags) for x in v]
     return v
@@ -356,7 +360,7 @@ def _has_tag(v, tags: dict[str, str] = LITERAL_TAGS) -> bool:
     if isinstance(v, str):
         return any(tag in v for tag in tags)
     if isinstance(v, dict):
-        return any(_has_tag(x, tags) for x in v.values())
+        return any(_has_tag(k, tags) or _has_tag(x, tags) for k, x in v.items())
     if isinstance(v, list):
         return any(_has_tag(x, tags) for x in v)
     return False
@@ -365,39 +369,44 @@ def _has_tag(v, tags: dict[str, str] = LITERAL_TAGS) -> bool:
 def mark_think_literals(messages: list[dict], tools: list[dict] | None, tags: dict[str, str] = LITERAL_TAGS):
     """#537: (messages, tools) with every special-token text in their text swapped for its mark (LITERAL_TAGS, or
     `tags`: literal_tags() adds the tokenizer's special tokens), and whether there was one (False: no change, the same
-    objects back - a prompt without them renders as it always did).  An assistant message's content keeps its call
-    tags, and one that opens with a whole <think>...</think> block (clients that send the reasoning inline) keeps
-    that block's two tags as the model's markers: the template reads them to split the reasoning off."""
+    objects back - a prompt without them renders as it always did).  Call text in an assistant message's content is
+    marked too: a call the server read is never left there, so what is there is what it read as text (a quote, ordinary
+    tokens copied from a tool result).  An assistant message that opens with a whole <think>...</think> block (clients
+    that send the reasoning inline) keeps that block's two tags as the model's markers: the template reads them to
+    split the reasoning off."""
     if not _has_tag(messages, tags) and not _has_tag(tools, tags):
         return messages, tools, False
-    own = {t: v for t, v in tags.items() if t not in CALL_TAGS}     # what an assistant's content keeps as written
     out = []
     for m in messages:
-        assistant = m.get("role") == "assistant"
-        marked = {k: v if k == "role" else _mark_deep(v, own if assistant and k == "content" else tags)
-                  for k, v in m.items()}
+        marked = {k: v if k == "role" else _mark_deep(v, tags) for k, v in m.items()}
         content = m.get("content")
-        if assistant and isinstance(content, str) and content.lstrip().startswith(THINK_START) \
+        if m.get("role") == "assistant" and isinstance(content, str) and content.lstrip().startswith(THINK_START) \
                 and THINK_END in content:
             i, j = content.index(THINK_START) + len(THINK_START), content.index(THINK_END)
-            marked["content"] = (content[:i] + _mark(content[i:j], own) + THINK_END +
-                                 _mark(content[j + len(THINK_END):], own))
+            marked["content"] = (content[:i] + _mark(content[i:j], tags) + THINK_END +
+                                 _mark(content[j + len(THINK_END):], tags))
         out.append(marked)
     return out, _mark_deep(tools, tags), True
 
 
-_LITERAL_MARK_RE = re.compile("|".join(LITERAL_MARKS))
+_LITERAL_MARK_RE = re.compile(ESCAPE + ".|" + "|".join(LITERAL_MARKS), re.S)
 
 
 def unmark_think_literals(prompt: str, tags: dict[str, str] = LITERAL_TAGS) -> tuple[str, list[tuple[int, int]]]:
     """The rendered prompt with the marks turned back into the texts they stand for, and the (start, end) spans of
-    those texts in it: the server encodes them as ordinary text (the tokenizer's encode_plain_spans)."""
+    those texts in it: the server encodes them as ordinary text (the tokenizer's encode_plain_spans).  A character
+    after ESCAPE is the request's own."""
     marks = LITERAL_MARKS if tags is LITERAL_TAGS else {v: k for k, v in tags.items()}
-    mark_re = _LITERAL_MARK_RE if tags is LITERAL_TAGS else re.compile("|".join(map(re.escape, marks)))
+    mark_re = _LITERAL_MARK_RE if tags is LITERAL_TAGS else re.compile(
+        ESCAPE + ".|" + "|".join(map(re.escape, marks)), re.S)
     out, spans, pos, n = [], [], 0, 0
     for m in mark_re.finditer(prompt):
         out.append(prompt[pos:m.start()])
         n += m.start() - pos
+        if m.group(0)[0] == ESCAPE:
+            out.append(m.group(0)[1:])
+            n, pos = n + 1, m.end()
+            continue
         tag = marks[m.group(0)]
         out.append(tag)
         spans.append((n, n + len(tag)))
@@ -540,6 +549,13 @@ def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
     # OpenAI Chat Completions: "reasoning_effort"; Responses style: "reasoning": {"effort": ...}
     reasoning = req.get("reasoning") if isinstance(req.get("reasoning"), dict) else {}
     kwargs.update(effort_kwargs(req.get("reasoning_effort") or reasoning.get("effort")))
+    # Z.ai's switch for GLM on its OpenAI-compatible API (as on /v1/messages): "thinking": {"type": "disabled" |
+    # "enabled"}, over an effort (the run config's fills in for a request that sends none of the fields above)
+    thinking = req["thinking"].get("type") if isinstance(req.get("thinking"), dict) else None
+    if thinking == "disabled":
+        kwargs = {"enable_thinking": False}
+    elif thinking == "enabled" and kwargs.get("enable_thinking") is False:
+        kwargs = {}
     kwargs = merge_template_kwargs(kwargs, req.get("chat_template_kwargs"))
     return _late_system_to_user(messages), tools, kwargs
 
@@ -641,6 +657,20 @@ def anthropic_to_messages(req: dict, think_unasked: bool = True) -> tuple[list[d
 
 
 # ------------------------------------------------------------------------------------------------ output parser
+# The tags OutputParser reads in a reply (<tool_response> and </tool_response> are the template's, never the model's)
+OUTPUT_TAGS = (THINK_START, THINK_END, CALL_START, CALL_END, KEY_START, KEY_END, VALUE_START, VALUE_END)
+# A "<" written by an ordinary token, as the server hands it to OutputParser when the tokenizer has every one of
+# OUTPUT_TAGS as a special token (server.output_tags): the model writes its own tags as those tokens, so the same text
+# spelled with ordinary tokens - a call or a </think> copied from a tool result, a web page or the user, whose tags
+# #537 put in the prompt as ordinary text - never forms a tag.  A lone surrogate, which decoded text never holds;
+# every event gives it back as "<".
+ORDINARY_LT = "\udc3c"
+
+
+def _restore(text: str) -> str:
+    return text.replace(ORDINARY_LT, "<")
+
+
 @dataclass
 class ToolCall:
     name: str
@@ -703,6 +733,23 @@ def forced_call(tool_choice, tools: list[dict] | None) -> str | None:
 _JSON_FENCE = re.compile(r"```[ \t]*(?:json)?[ \t]*\r?\n\s*", re.I)
 
 
+def _not_json(text: str):
+    raise ValueError(f"{text} is not JSON")
+
+
+def _finite(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        _not_json(text)
+    return value
+
+
+def _strict_json(text: str):
+    """json.loads without NaN, Infinity and numbers that overflow to inf (1e999): json.dumps would write them back as
+    tokens that strict JSON parsers (JavaScript's JSON.parse) refuse.  ValueError for those, as for any non-JSON."""
+    return json.loads(text, parse_constant=_not_json, parse_float=_finite)
+
+
 def json_tool_call(body: str, schemas: dict) -> ToolCall | None:
     """`{"name": N, "arguments": {...}}` (or "parameters", or the arguments as a JSON string) of a declared tool -> its
     call; anything else -> None.  #2037: the object may sit in a Markdown fence (```json ... ```)."""
@@ -712,7 +759,7 @@ def json_tool_call(body: str, schemas: dict) -> ToolCall | None:
         body = body[m.end():].rstrip()
         body = body[:-3] if body.endswith("```") else body
     try:
-        obj = json.loads(body)
+        obj = _strict_json(body)
     except ValueError:
         return None
     if not isinstance(obj, dict) or not isinstance(obj.get("name"), str) or obj["name"] not in schemas:
@@ -720,7 +767,7 @@ def json_tool_call(body: str, schemas: dict) -> ToolCall | None:
     args = obj.get("arguments", obj.get("parameters", {}))
     if isinstance(args, str):
         try:
-            args = json.loads(args)
+            args = _strict_json(args)
         except ValueError:
             return None
     if args is None:
@@ -775,13 +822,39 @@ def value_end(text: str, start: int = 0) -> tuple[int, str]:
     return max(start, len(text) - len(VALUE_END) + 1), "open"
 
 
-def _string_params(tool) -> set[str]:
-    """The parameters a tool's schema types as "string": their values are kept as written."""
+def _json_types(schema, branches: bool = True) -> set[str] | None:
+    """The JSON types a parameter's schema allows: its "type" (a name or a list of names, as zod's .nullable() writes
+    it) or the types of its anyOf / oneOf branches (Pydantic's and FastMCP's `str | None`).  None: it does not say."""
+    if not isinstance(schema, dict):
+        return None
+    kind = schema.get("type")
+    if isinstance(kind, str):
+        return {kind}
+    if isinstance(kind, list) and kind and all(isinstance(k, str) for k in kind):
+        return set(kind)
+    alts = schema.get("anyOf", schema.get("oneOf")) if branches else None
+    if isinstance(alts, list) and alts:
+        types = [_json_types(b, False) for b in alts]
+        if None not in types:
+            return set().union(*types)
+    return None
+
+
+def _param_types(tool) -> dict[str, set[str]]:
+    """The JSON types of the parameters of a tool's schema, for those it says (see _json_types)."""
     params = tool.get("parameters") if isinstance(tool, dict) else None
     props = params.get("properties") if isinstance(params, dict) else None
     if not isinstance(props, dict):
-        return set()
-    return {k for k, v in props.items() if isinstance(v, dict) and v.get("type") == "string"}
+        return {}
+    return {k: t for k, t in ((k, _json_types(v)) for k, v in props.items()) if t}
+
+
+_KIND = {type(None): "null", bool: "boolean", float: "number", str: "string", list: "array", dict: "object"}
+
+
+def _kinds(value) -> set[str]:
+    """The JSON types of `value` (decoded JSON)."""
+    return {"integer", "number"} if type(value) is int else {_KIND[type(value)]}
 
 
 def _escape(text: str) -> str:
@@ -789,7 +862,7 @@ def _escape(text: str) -> str:
     return json.dumps(text)[1:-1]
 
 
-_NAME = re.compile(r"[\w.:/-]{1,256}")    # a tool name, when the request declares no tools to check it against
+_NAME = re.compile(r"[\w.:/-]{1,256}")    # a tool name, when there are no declared names to check it against
 
 
 class CallReader:
@@ -802,8 +875,9 @@ class CallReader:
     feed() returns the call's arguments as pieces of one JSON object: "{" once the name is known, then for each
     argument `"key":` and its value - a string parameter's text JSON-escaped as it arrives, any other value whole
     once it is complete - and "}" at `</tool_call>`.  Values are kept as written: a parameter the tool's schema types
-    as "string" is the text itself, any other is JSON-decoded (the text itself when it is not JSON), as the template
-    writes them (`v | tojson if v is not string else v`).  `args` holds the decoded arguments."""
+    as "string" is the text itself, any other is JSON-decoded (the text itself when it is not JSON, or for a parameter
+    that may also be a string, when it is not one of its other types), as the template writes them
+    (`v | tojson if v is not string else v`).  `args` holds the decoded arguments."""
 
     def __init__(self, schemas: dict, declared: bool = True):
         self.schemas = schemas
@@ -814,7 +888,8 @@ class CallReader:
         self.stage = "name"          # name -> between -> key -> value -> str | raw -> between ... -> done (or prose)
         self.name: str | None = None
         self.args: dict = {}
-        self.strings: set[str] = set()
+        self.types: dict[str, set[str]] = {}     # the JSON types of the tool's parameters (_param_types)
+        self.strings: set[str] = set()           # the parameters that are strings only
         self.key = ""
         self.count = 0               # arguments written so far
         self.part: list[str] = []    # the current value's text read so far
@@ -837,9 +912,15 @@ class CallReader:
         if key in self.strings:
             return value
         try:
-            return json.loads(value)
+            decoded = _strict_json(value)
         except (ValueError, RecursionError):
             return value
+        # a parameter that may be a string or another type (str | None): the decoded value only when it is one of the
+        # others ("null" is None), else the text as written ("123", {"a": 1} written to a file)
+        types = self.types.get(key, set())
+        if "string" in types and not _kinds(decoded) & (types - {"string"}):
+            return value
+        return decoded
 
     def written(self) -> str:
         return "".join(self.seen)
@@ -864,7 +945,8 @@ class CallReader:
                     if not self._is_name(name):
                         self.stage = "prose"
                         return out
-                    self.name, self.strings = name, _string_params(self.schemas.get(name))
+                    self.name, self.types = name, _param_types(self.schemas.get(name))
+                    self.strings = {k for k, t in self.types.items() if t == {"string"}}
                     self.text, self.stage = after, "between"
                     out.append("{")
                 elif KEY_START.startswith(after) or CALL_END.startswith(after):
@@ -889,7 +971,7 @@ class CallReader:
                 k = t.find(KEY_END)
                 if k < 0:
                     return out
-                self.key, self.text, self.stage = t[:k].strip(), t[k + len(KEY_END):], "value"
+                self.key, self.text, self.stage = _restore(t[:k].strip()), t[k + len(KEY_END):], "value"
             elif self.stage == "value":
                 s = t.lstrip()
                 if s.startswith(VALUE_START):
@@ -907,10 +989,10 @@ class CallReader:
                 at, how = value_end(t, self.seek)
                 if how == "end":
                     piece, self.text = t[:at], t[at + len(VALUE_END):]
-                    value = "".join(self.part) + piece
+                    value = _restore("".join(self.part) + piece)
                     if self.stage == "str":
                         self.args[self.key] = value
-                        out.append(_escape(piece) + '"')
+                        out.append(_escape(_restore(piece)) + '"')
                     else:
                         self.args[self.key] = self._typed(self.key, value)
                         out.append(json.dumps(self.args[self.key], ensure_ascii=False))
@@ -923,7 +1005,7 @@ class CallReader:
                     self.part.append(t[:safe])
                     self.text = t[safe:]
                     if self.stage == "str":
-                        out.append(_escape(t[:safe]))
+                        out.append(_escape(_restore(t[:safe])))
                 self.seek = 0 if how == "wait" else max(0, at - safe)
                 return out
             else:                        # done, prose
@@ -940,7 +1022,8 @@ class CallReader:
         elif self.stage == "raw":
             at, how = value_end(self.text, self.seek)
             cut = at if how == "wait" else len(self.text) - _partial(self.text, (VALUE_END,))
-            tail = json.dumps(self._typed(self.key, "".join(self.part) + self.text[:cut]), ensure_ascii=False)
+            tail = json.dumps(self._typed(self.key, _restore("".join(self.part) + self.text[:cut])),
+                              ensure_ascii=False)
         self.stage = "done"
         return [tail + "}"]
 
@@ -957,6 +1040,16 @@ def parse_tool_call(body: str, tools: list[dict] | None = None) -> ToolCall:
 
 
 RCALL_MAX = 32768        # the most of a `<tool_call>` inside the reasoning that is held while waiting for its end (#804)
+GAP_MAX = 64             # the most newlines held before a call that may follow (dropped if one does): more are content
+
+
+def _gap(text: str, end: int) -> int:
+    """Where the newlines right before `end` in `text` start, GAP_MAX of them at most (a run of newline tokens is held
+    in a bounded buffer, not rescanned whole on every token)."""
+    j = end
+    while j > 0 and end - j < GAP_MAX and text[j - 1] == "\n":
+        j -= 1
+    return j
 
 
 class OutputParser:
@@ -1016,7 +1109,7 @@ class OutputParser:
 
     def _track(self, text: str) -> str:
         """Follow the text that has gone out: the open code fence, the current line, and the backticks of the current
-        paragraph.  Returns the text."""
+        paragraph.  Returns the text, as the client gets it (ORDINARY_LT given back as "<")."""
         # Most token fragments stay on the current line. Fence and paragraph
         # bookkeeping happens only when a newline completes that line.
         if "\n" not in text:
@@ -1029,7 +1122,7 @@ class OutputParser:
                         self._line_blocks = []
                     self._line_blocks.append("".join(self._line_parts))
                     self._line_parts.clear()
-            return text
+            return _restore(text)
         parts = text.split("\n")
         for k, part in enumerate(parts):
             if k < len(parts) - 1:
@@ -1049,11 +1142,16 @@ class OutputParser:
             else:
                 if part:
                     self._line_parts.append(part)
-        return text
+        return _restore(text)
 
     def _in_code(self) -> bool:
         """The text so far leaves the next character inside a code fence or inline code."""
-        return bool(self.fence) or (self.ticks + self.line.count("`")) % 2 == 1
+        if self.fence:
+            # a line that closes the fence (its marker, then nothing but marker characters or blanks) ends the code
+            # before its newline: GLM writes a call right after the content, "...```<tool_call>"
+            s = self.line.lstrip()
+            return not s.startswith(self.fence * 3) or bool(s.strip(self.fence + " \t"))
+        return (self.ticks + self.line.count("`")) % 2 == 1
 
     def _in_code_at(self, text: str) -> bool:
         """The text so far followed by `text` (not gone out yet) leaves the next character in code."""
@@ -1179,13 +1277,16 @@ class OutputParser:
                     if THINK_START.startswith(s):
                         return out
                     self.opened = True
+                if not self.schemas:
+                    # no tools declared (or tool_choice "none", which reaches here as none): no call, the tags are text
+                    out.append(Event("content", self._track(self.buf)))
+                    self.buf = ""
+                    return out
                 i = self.buf.find(CALL_START)
                 if i < 0:
                     # Hold a partial tag AND the newlines before it: if a tool call follows, they are dropped,
                     # so emitting them early would make streamed and whole outputs differ.
-                    j = len(self.buf) - _partial(self.buf, (CALL_START,))
-                    while j > 0 and self.buf[j - 1] == "\n":
-                        j -= 1
+                    j = _gap(self.buf, len(self.buf) - _partial(self.buf, (CALL_START,)))
                     if j > 0:
                         out.append(Event("content", self._track(self.buf[:j])))
                         self.buf = self.buf[j:]
@@ -1197,9 +1298,7 @@ class OutputParser:
                     out.append(Event("content", self._track(self.buf[:i + len(CALL_START)])))
                     self.buf = self.buf[i + len(CALL_START):]
                     continue
-                j = i
-                while j > 0 and self.buf[j - 1] == "\n":
-                    j -= 1
+                j = _gap(self.buf, i)
                 if j > 0:
                     out.append(Event("content", self._track(self.buf[:j])))
                     self.buf, i = self.buf[j:], i - j
@@ -1211,21 +1310,22 @@ class OutputParser:
                 if kind == "json":
                     self.state = "json"
                 else:
-                    # the text after the tag decides: a declared tool's name (any name-like word when the request
-                    # declares no tools) and then <arg_key> or </tool_call> is a call; anything else is prose that
-                    # names the tag ("I'll use a <tool_call> block") - content, not a malformed call
-                    self.state, self.reader = "call", CallReader(self.schemas, declared=bool(self.schemas))
+                    # the text after the tag decides: a declared tool's name and then <arg_key> or </tool_call> is a
+                    # call; anything else is prose that names the tag ("I'll use a <tool_call> block") - content, not
+                    # a malformed call
+                    self.state, self.reader = "call", CallReader(self.schemas)
             elif self.state == "json":
                 # recover: `{"name": ..., "arguments": {...}}` inside the wrapper is the call once its </tool_call> has
                 # arrived and it names a declared tool; anything else is the text it is
                 i = self.buf.find(CALL_END)
                 if i < 0:
                     return out
-                call = json_tool_call(self.buf[:i], self.schemas)
+                call = json_tool_call(_restore(self.buf[:i]), self.schemas)
                 if call is None:
                     out.append(Event("content", self._track(self.gap + CALL_START + self.buf[:i + len(CALL_END)])))
                 else:
                     out.append(Event("tool_call", call=call))
+                    self._track(self.gap or "\n")    # the call ends its line (see the call state)
                 self.buf = self.buf[i + len(CALL_END):]
                 self.state, self.lead = "content", call is not None
             else:                                    # call
@@ -1246,6 +1346,9 @@ class OutputParser:
                 if r.stage != "done":
                     return out
                 out.append(Event("tool_call", call=ToolCall(name=r.name, arguments=r.args, id=self.scall.id)))
+                # the newlines dropped before it, or the call itself, end the line it follows: a fence closed by that
+                # line ("```<tool_call>") stays closed for the text after it
+                self._track(self.gap or "\n")
                 self.buf, self.reader, self.scall = r.text, None, None
                 self.state, self.lead = "content", True
 
