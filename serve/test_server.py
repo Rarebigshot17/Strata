@@ -180,6 +180,30 @@ class MaxTokens(unittest.TestCase):
             del os.environ["STRATA_DEBUG"]
 
 
+class EnvSwitches(unittest.TestCase):
+    """STRATA_DEBUG and STRATA_REQUEST_LINES are off for "0", "false", "no", "off" (any case) and empty, as the other
+    STRATA_ switches read those words; any other value turns them on.  "0" turned them on."""
+
+    def test_off_words_are_off(self):
+        from serve.server import _debug_req
+        tok = GlmTokenizer()
+        svc = Service(MockEngine(tok, "hello", max_context=CTX), tok, glm_template())
+        engine = StrataEngine.__new__(StrataEngine)
+        for value, on in (("1", True), ("yes", True), ("2", True), ("0", False), ("false", False), ("No", False),
+                          (" off ", False), ("", False)):
+            with self.subTest(value=value), mock.patch.dict(os.environ, {"STRATA_DEBUG": value,
+                                                                         "STRATA_REQUEST_LINES": value}):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    _debug_req("openai", {}, [{"role": "user", "content": "hi"}], None, 8, False, 3)
+                    list(svc.run(tok.encode("hi"), False, None, 8, {}, threading.Event()))
+                    engine._parse_done("DONE 30 1200 50 300 stop 0 0 1000 40 60 0 0 0.0 200 0")
+                text = out.getvalue()
+                self.assertEqual("[strata] req openai:" in text, on, text)       # STRATA_DEBUG's request line
+                self.assertEqual("[strata] raw:" in text, on, text)              # ... and the model's raw text
+                self.assertEqual("[strata] request prompt 1200" in text, on, text)   # STRATA_REQUEST_LINES
+
+
 class FitMaxTokens(unittest.TestCase):
     """PR #24: --fit-max-tokens clamps an explicit budget that overshoots the context instead of a 400."""
 

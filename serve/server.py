@@ -169,6 +169,12 @@ PP_SLACK = 3.0
 # STRATA_ENGINE_READY_S overrides it (0 = wait for ever).
 
 
+def env_on(name: str) -> bool:
+    """A STRATA_ switch in the environment: off when unset, empty or "0", "false", "no", "off" (any case), the words
+    the other switches read as off (POST /unload's wait); any other value is on."""
+    return os.environ.get(name, "").strip().lower() not in ("", "0", "false", "no", "off")
+
+
 def _timeout_env(name: str, default: float) -> float | None:
     try:
         v = float(os.environ.get(name, default))
@@ -799,7 +805,7 @@ class StrataEngine:
             self.last.update(hits=int(f[9]), lookups=int(f[10]))
         if len(f) >= 15:
             self.last["prompt_read"] = int(f[14])
-        if os.environ.get("STRATA_REQUEST_LINES"):
+        if env_on("STRATA_REQUEST_LINES"):
             print(request_line(self.last), flush=True)
 
     @staticmethod
@@ -2441,7 +2447,7 @@ class Service:
                             print("[strata] the reply reached max tokens while still thinking, so it has no "
                                   "answer: a thinking budget (reasoning_budget_tokens, in the request or in "
                                   "the run config for every request) leaves room to answer", flush=True)
-                        if os.environ.get("STRATA_DEBUG") and raw_ids:
+                        if env_on("STRATA_DEBUG") and raw_ids:
                             print(f"[strata] raw: {self.tok.decode(raw_ids)!r}", flush=True)
                     st["busy"] = False
                     st.pop("tail", None)                     # #212: the answer's end is not kept once it is done
@@ -2568,7 +2574,7 @@ def request_stats(segments: list[dict]) -> dict:
 
 def _debug_req(api, req, messages, tools, max_new, thinking, prompt_tokens):
     """One compact line per request while diagnosing blank/empty turns. Set STRATA_DEBUG=1 to enable."""
-    if not os.environ.get("STRATA_DEBUG"):
+    if not env_on("STRATA_DEBUG"):
         return
     last = messages[-1] if messages else {}
     body = last.get("content")

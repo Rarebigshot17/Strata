@@ -620,9 +620,9 @@ GPU.
 | `STRATA_HTTP_BACKLOG` | Connections the operating system may hold for the server (default 256) |
 | `STRATA_ENGINE_READY_S` | How long a starting engine may go without progress before the server ends it (default 900; 0: no limit) |
 | `STRATA_ENGINE_STALL_S` | How long an engine may stay silent with no CPU time, no disk I/O and an idle GPU before the server ends it as frozen (default 90; 0: off; needs psutil) |
-| `STRATA_REQUEST_LINES` | `1`: one line per request on the server's output (for a supervisor such as llama-swap) |
+| `STRATA_REQUEST_LINES` | `1`: one line per request on the server's output (for a supervisor such as llama-swap); `0`, `false`, `no` or `off` is off |
 | `STRATA_DROP_CACHE_ON_EXIT` | `1`: give the model files' page cache back when the server stops |
-| `STRATA_DEBUG` | `1`: one line per request and the raw model text in the server window |
+| `STRATA_DEBUG` | `1`: one line per request and the raw model text in the server window; `0`, `false`, `no` or `off` is off |
 | `STRATA_KEEP_EMPTY_TURNS` | `1`: render empty earlier assistant turns in the prompt (they are left out by default) |
 
 ## Several clients on one engine
