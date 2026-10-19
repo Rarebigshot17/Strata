@@ -1343,6 +1343,7 @@ class Service:
         self.status_lock = threading.Lock()
         self.mcp = None                                  # serve/mcp.py's McpHub when MCP servers are configured
         self.mcp_for_api = False                         # the config's "mcp_for_api": API clients may use its tools too
+        self.large_bodies = threading.BoundedSemaphore(LARGE_BODIES_AT_ONCE)   # requests holding a LARGE_BODY
         # sharing the GPU with other programs (all off by default): unload the engine after this many idle seconds,
         # only start it again when this much VRAM is free, and run this command first (e.g. to unload another
         # server's model); the next request after an unload starts the engine again
@@ -2799,6 +2800,12 @@ def anthropic_collect(events, unfinished: set | frozenset = frozenset()) -> dict
 
 # ------------------------------------------------------------------------------------------------ HTTP
 CHUNKED_BODY_MAX = 256 << 20                # #893: the most a Transfer-Encoding: chunked body may hold (read into memory)
+# A body read and parsed takes many times its size in memory (measured: 25x for a JSON array of empty objects) and is
+# held while its request waits for its turn.  A body larger than LARGE_BODY (a million-token conversation is a few MiB)
+# takes one of LARGE_BODIES_AT_ONCE places for its request's whole time; one more is answered 503 with Retry-After.
+LARGE_BODY = 16 << 20
+LARGE_BODIES_AT_ONCE = 2
+LARGE_BODY_RETRY_S = 30
 
 
 def body_limit() -> int:
@@ -2820,9 +2827,9 @@ TURN_REFUSALS = (GpuBusy, EngineStarting, EngineStuck)
 class BadBody(Exception):
     """A request body that cannot be read (a malformed or oversized chunked body): the status and the sentence."""
 
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, retry_after: int | None = None):
         super().__init__(message)
-        self.status = status
+        self.status, self.retry_after = status, retry_after
 
 
 # OpenAI clients given the server's root as their base URL (no /v1) post to these
@@ -2844,6 +2851,7 @@ def make_handler(svc: Service):
         watch_done = None                                   # #430 #431: stops this request's disconnect watcher
         body_read = False                                   # whether a handler took this request's body
         answer_started = False                              # send_response() ran: an answer (or a stream) began
+        large_body = False                                  # this request holds one of svc.large_bodies
         DRAIN_SECONDS = 5                                   # the longest an unread body is read and dropped
 
         def log_message(self, fmt, *args):
@@ -2870,6 +2878,8 @@ def make_handler(svc: Service):
             and drops it (the drain); `deadline` (monotonic) ends the read early."""
             parts, total = [], 0
             while True:
+                if keep and total > LARGE_BODY:
+                    self._take_large_body()
                 if deadline is not None:
                     wait = deadline - time.monotonic()
                     if wait <= 0:
@@ -2922,7 +2932,22 @@ def make_handler(svc: Service):
                 self.close_connection = True               # the body is not read: the connection ends with the answer
                 raise BadBody(413, f"the request body is larger than {limit >> 20} MiB "
                                    "(STRATA_MAX_BODY_MIB raises the limit)")
+            if length > LARGE_BODY:
+                self._take_large_body()
             return self.rfile.read(length)
+
+        def _take_large_body(self):
+            """A place for this request's large body (see LARGE_BODY), held until the request ends; BadBody 503 when
+            they are all taken.  The body is then read and dropped after the answer (_drain_body), not held."""
+            if self.large_body:
+                return
+            if not svc.large_bodies.acquire(blocking=False):
+                self.body_read = False
+                print(f"[strata] 503: {LARGE_BODIES_AT_ONCE} requests with bodies over {LARGE_BODY >> 20} MiB are "
+                      "already in the server", flush=True)
+                raise BadBody(503, f"too many large requests at once (over {LARGE_BODY >> 20} MiB each); try again "
+                                   "shortly", retry_after=LARGE_BODY_RETRY_S)
+            self.large_body = True
 
         def _drain_body(self):
             """An answer sent before the body was read (a 401, a 403, /load, a method with no handler) must not close
@@ -3245,7 +3270,13 @@ def make_handler(svc: Service):
             try:
                 self._post()
             except BadBody as e:                              # #893: a malformed or oversized chunked body
-                self._json(e.status, {"error": {"type": "invalid_request_error", "message": str(e)}})
+                self._json(e.status, {"error": {"type": "server_error" if e.status >= 500 else "invalid_request_error",
+                                                "message": str(e)}},
+                           headers={"Retry-After": e.retry_after} if e.retry_after else None)
+            finally:
+                if self.large_body:                           # the request and its parsed body are done
+                    self.large_body = False
+                    svc.large_bodies.release()
 
         def _post(self):
             if not self._authorized():

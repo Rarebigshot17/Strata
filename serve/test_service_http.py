@@ -421,5 +421,48 @@ class McpOnlyForTheOwnPage(Http):
         self.assertEqual(self.ask({"Origin": "https://evil.example.com"})[0], 403)   # still no other web page
 
 
+class LargeBodies(Http):
+    """A body may hold 256 MiB, and parsed it takes many times that: only a few large ones are held at once, and one
+    more is answered 503 with Retry-After instead of growing the server's memory without bound."""
+
+    def post(self, body: bytes, chunked=False):
+        c = http.client.HTTPConnection("127.0.0.1", self.httpd.server_address[1], timeout=30)
+        try:
+            if chunked:                                         # a relay that does not buffer it (#893)
+                c.request("POST", "/v1/chat/completions", (body[i:i + (1 << 20)] for i in range(0, len(body), 1 << 20)),
+                          {"Content-Type": "application/json", "Transfer-Encoding": "chunked"}, encode_chunked=True)
+            else:
+                c.request("POST", "/v1/chat/completions", body, {"Content-Type": "application/json"})
+            r = c.getresponse()
+            return r.status, r.getheader("Retry-After"), json.loads(r.read())
+        finally:
+            c.close()
+
+    def test_one_large_body_too_many_is_503(self):
+        from serve.server import LARGE_BODY
+        big = json.dumps({"messages": [{"role": "user", "content": "hi"}], "pad": "x" * (LARGE_BODY + 1)}).encode()
+        small = json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode()
+        slots = self.svc.large_bodies
+        held = 0
+        while slots.acquire(blocking=False):                    # the large bodies already in the server
+            held += 1
+        self.assertGreater(held, 0)
+        try:
+            with mock.patch("builtins.print"):
+                for chunked in (False, True):
+                    code, retry, out = self.post(big, chunked)
+                    self.assertEqual(code, 503, out)
+                    self.assertTrue(retry and int(retry) > 0)
+                self.assertEqual(self.post(small)[0], 200)      # a usual request is not counted
+        finally:
+            for _ in range(held):
+                slots.release()
+        self.assertEqual(self.post(big)[0], 200)                # with a slot free it is served
+        self.assertEqual(self.post(big, chunked=True)[0], 200)
+        for _ in range(held):                                   # and gave its slot back
+            self.assertTrue(slots.acquire(blocking=False))
+        self.assertFalse(slots.acquire(blocking=False))
+
+
 if __name__ == "__main__":
     unittest.main()
