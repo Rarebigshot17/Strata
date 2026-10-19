@@ -60,6 +60,10 @@ for line in sys.stdin:
             time.sleep(2)
             sys.exit(1)
         continue
+    if mode == 'then-kernel':                           # it carried on after ERR internal; this request's kernel
+        sys.stderr.write('glm gpu kernel rms_norm: no kernel image is available for execution on the device\n')
+        sys.stderr.flush()                              # launch fails: check() exits 1, nothing on stdout
+        sys.exit(1)
     print('T 90')
     print('T 259')
     print('DONE 2 %d 1.0 1.0 stop 0 0 0 0 0 0 0 0.0 %d 0' % (n, n))
@@ -166,6 +170,22 @@ class FatalRecovery(unittest.TestCase):
         self.assertIn('exited (code 1)', note)
         self.assertIn('glm gpu kernel rms_norm: no kernel image is available', note)
         self.assertNotIn('/old/model', note)
+
+    def test_death_note_is_not_the_answer_to_the_probe(self):
+        # the engine answered the probe after ERR internal (ERR unsupported command: PING) and carried on: when a
+        # later request ends it without a word on stdout, that answer is not why it exited
+        log = self.root / 'engine.log'
+        e = StrataEngine(str(self.script), ['--state', str(self.root / 'state'), '--mode', 'then-kernel'], log=str(log))
+        self.addCleanup(e.close)
+        with self.assertRaises(EngineError):
+            list(e.generate([1], 8, {}, threading.Event()))
+        self.assertTrue(e.alive())
+        with self.assertRaises(EngineDied):
+            list(e.generate([1], 8, {}, threading.Event()))
+        self.wait_dead(e)
+        note = e.death_note()
+        self.assertNotIn('PING', note)
+        self.assertIn('Its last log line: glm gpu kernel rms_norm', note)
 
     def test_internal_error_after_the_first_tokens(self):
         e = self.engine('late')

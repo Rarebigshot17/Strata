@@ -657,7 +657,8 @@ class StrataEngine:
             lines.put(line)
         if self.proc is proc:                           # a killed engine's pump must not mark its successor dead
             self.ended = True                           # its output closed: it is gone, even before the OS says so
-            if line and line.startswith("ERR"):         # #997 #890: why it exited, though no request may read it
+            # #997 #890: why it exited, though no request may read it - not its answer to _after_failure's probe
+            if line and line.startswith("ERR") and not line.startswith("ERR unsupported command"):
                 self.last_err = line[4:].strip()
         lines.put(None)
 
