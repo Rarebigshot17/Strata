@@ -601,8 +601,9 @@ docker run -d --name strata --gpus all \
 - **`/data`** holds the model files (120-170 GB) in `/data/models`, the expert profile and the run config
   (`/data/config/strata-glm-<size>.json`, linked into `/opt/strata`). The engine is part of the image.
 - **Port 8101.** The server listens on `0.0.0.0` inside the container and has no API key unless you set one.
-  `-p 127.0.0.1:8101:8101` publishes it to this machine only; to publish it to the network, set
-  `-e API_KEY=<secret>` too.
+  `-p 127.0.0.1:8101:8101` publishes it to this machine only; to publish it to the network (`-p 8101:8101`, which
+  Docker's rules let past ufw), set `-e API_KEY=<secret>` too. Without a key the entrypoint warns at every start.
+  `API_KEY` is passed on at every start and saved in the config, so a key added later counts without `REINSTALL`.
 - **The setup choices** are environment variables: `MODEL` (`UD-IQ3_XXS`, the default, or `IQ4_XS`), `CONTEXT`
   (tokens; empty: setup's pick for the VRAM), `PARK_MIB`, `GPUS` (`"0,2"` or `"all"`) or `GPU` (one card), `HOST`
   (default `0.0.0.0`), `PORT` (default 8101), `API_KEY`, `GGUF_DIR` (a mounted folder of shards you already have:

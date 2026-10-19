@@ -120,12 +120,47 @@ class Entrypoint(unittest.TestCase):
             self.assertIn(part, setup)
         self.assertNotIn("--context", setup)                             # unset: setup's pick for the VRAM
         start = next(line for line in out.splitlines() if line.startswith("STARTED WITH:"))
-        self.assertIn("ARGS: setup.py --port 8101 --gpu 1", start)
+        self.assertIn("ARGS: setup.py --port 8101 --gpu 1 --api-key k1", start)   # the key at every start
 
     def test_port_and_model_from_the_environment(self):
         (self.data / "config" / "strata-glm-iq4_xs.json").write_text('{"args": ["four-bit"]}\n')
         out = self.run_entry("0", MODEL="IQ4_XS", PORT="9000")
         self.assertIn(f"Config: {self.data}/config/strata-glm-iq4_xs.json", out)
+
+    def entry(self, **extra):
+        env = dict(os.environ, STRATA_DATA=str(self.data), MODEL="UD-IQ3_XXS", REINSTALL="0", **extra)
+        r = subprocess.run([SH, str(self.script)], env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r
+
+    def test_no_api_key_on_every_interface_is_warned_at_each_start(self):
+        """HOST=0.0.0.0 (the default: a published port reaches nothing else) with no key: whoever reaches the
+        published port can use the model, so every start says so and names the publish that keeps it on this host."""
+        cfg = self.data / "config" / "strata-glm-ud-iq3_xxs.json"
+        cfg.write_text('{"args": ["x"], "host": "0.0.0.0"}\n')
+        err = self.entry().stderr
+        self.assertIn("WARNING: no API key", err)
+        self.assertIn("-p 127.0.0.1:8101:8101", err)
+        self.assertIn("-e API_KEY=", err)
+        cfg.write_text('{"args": ["x"], "host": "0.0.0.0", "api_key": "k0"}\n')     # set up with a key
+        self.assertNotIn("no API key", self.entry().stderr)
+        cfg.write_text('{"args": ["x"], "host": "127.0.0.1"}\n')                    # nothing outside reaches it
+        self.assertNotIn("no API key", self.entry().stderr)
+
+    def test_api_key_counts_at_every_start(self):
+        """API_KEY added after the first start (no REINSTALL): the start passes it on, so the server has it."""
+        (self.data / "config" / "strata-glm-ud-iq3_xxs.json").write_text('{"args": ["x"], "host": "0.0.0.0"}\n')
+        r = self.entry(API_KEY="k1")
+        self.assertNotIn("no API key", r.stderr)
+        start = next(line for line in r.stdout.splitlines() if line.startswith("STARTED WITH:"))
+        self.assertIn("ARGS: setup.py --port 8101 --api-key k1", start)
+        start = next(line for line in self.entry().stdout.splitlines() if line.startswith("STARTED WITH:"))
+        self.assertNotIn("--api-key", start)                                          # none: nothing passed
+
+    def test_the_dockerfile_publishes_on_this_host_only(self):
+        text = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("-p 127.0.0.1:8101:8101", text)
+        self.assertNotIn("#     -p 8101:8101 \\", text)
 
     def test_an_unknown_model_stops(self):
         env = dict(os.environ, STRATA_DATA=str(self.data), MODEL="IQ2_XS", REINSTALL="0")

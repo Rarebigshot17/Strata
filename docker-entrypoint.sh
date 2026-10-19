@@ -20,9 +20,9 @@ STRATA_DATA="${STRATA_DATA:-/data}"
 MODEL="${MODEL:-UD-IQ3_XXS}"    # UD-IQ3_XXS (3-bit, ~120 GB) | IQ4_XS (4-bit, ~170 GB)
 CONTEXT="${CONTEXT:-}"          # tokens; empty: setup.py's pick for the GPUs' VRAM
 PARK_MIB="${PARK_MIB:-}"        # RAM for parked conversations; empty: setup.py's pick for the RAM left
-HOST="${HOST:-0.0.0.0}"
+HOST="${HOST:-0.0.0.0}"          # every interface of the container: what a published port (-p) reaches
 PORT="${PORT:-8101}"
-API_KEY="${API_KEY:-}"
+API_KEY="${API_KEY:-}"          # passed on at every start, so a key added later counts without REINSTALL
 GPUS="${GPUS:-}"                # "0,2" or "all": the cards the model's layers are shared across
 GPU="${GPU:-}"                  # one card, numbered as nvidia-smi numbers them
 GGUF_DIR="${GGUF_DIR:-}"        # a mounted folder with GGUF files you already have: no download
@@ -43,8 +43,8 @@ cfg="$STRATA_DATA/config/strata-$tag.json"
 mkdir -p "$STRATA_DATA/config"
 
 # REINSTALL is only needed to change settings for a model that is already set up
-# (context, parking RAM, host, api_key). Switching between models already on the
-# volume needs no setup pass: their config is already there.
+# (context, parking RAM, host). Switching between models already on the volume
+# needs no setup pass: their config is already there.
 #
 # CONTEXT / PARK_MIB / GPUS / GPU are passed only when set, so an unset one keeps
 # setup.py's own pick. The browser is never opened from a container.
@@ -90,11 +90,35 @@ else
   echo "Config: $cfg (from MODEL $MODEL)"
 fi
 
+# No API key while the server listens beyond the container's loopback: whoever reaches the published port can use
+# the model. -p 8101:8101 publishes it on every interface of the host (Docker's rules pass by ufw), and --network
+# host listens on them directly. Not a stop (a port published on 127.0.0.1 only is safe without a key, and the
+# container cannot see how it is published), but said at every start. The config decides: its "host" and "api_key".
+open_without_key() {
+  python3 - "$1" <<'PY'
+import json, sys
+try:
+    cfg = json.load(open(sys.argv[1], encoding="utf-8-sig"))
+except (OSError, ValueError):
+    sys.exit(0)
+key, host = cfg.get("api_key"), str(cfg.get("host") or "127.0.0.1")
+sys.exit(1 if (key.strip() if isinstance(key, str) else key) or host in ("127.0.0.1", "localhost", "::1") else 0)
+PY
+}
+if [ -z "$API_KEY" ] && open_without_key "$link"; then
+  echo "WARNING: no API key. The server listens on every interface of the container, so anyone who reaches its" >&2
+  echo "  published port can use the model. Publish it on this host only (-p 127.0.0.1:$PORT:$PORT), or set" >&2
+  echo "  -e API_KEY=<secret> before publishing it to a network: -p $PORT:$PORT publishes it on every interface" >&2
+  echo "  of the host, past ufw, and --network host listens on them directly." >&2
+fi
+
 # Later starts skip straight here: setup.py finds the installed config and
 # launches serve/server.py (OpenAI- and Anthropic-compatible API on :8101).
 # GPUS / GPU are repeated on purpose: given at the start they pin the cards
-# (GPUS is saved in the model's config, GPU is for this start only).
+# (GPUS is saved in the model's config, GPU is for this start only). API_KEY too:
+# a key given at a start is saved in the config, so one added later counts.
 set -- --port "$PORT"
 if [ -n "$GPUS" ]; then set -- "$@" --gpus "$GPUS"; fi
 if [ -n "$GPU" ]; then set -- "$@" --gpu "$GPU"; fi
+if [ -n "$API_KEY" ]; then set -- "$@" --api-key "$API_KEY"; fi
 exec .venv/bin/python setup.py "$@"
