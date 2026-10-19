@@ -99,6 +99,7 @@ def listen_problem(host: str, port: int, e: OSError) -> str:
 # sets it; 0 turns it off.
 REPEAT_STOP_TOKENS = 256
 ANSWER_RESERVE_MIN = 512      # #984: the tokens kept for the answer when a thinking budget is cut down to fit max_tokens
+WRAP_WAIT_PASSES = 16         # a reply's passes of one token past the thinking budget, waiting for a clean point
 # #123: what closes the thinking when it reaches reasoning_budget_tokens (GLM's end-of-thinking tag after it; the
 # answer follows it directly, as the template writes it)
 # #1053 (opt-in "reasoning_close_retry": true): a reply that ends on its stop token still inside <think>, with no answer
@@ -848,7 +849,8 @@ class StrataEngine:
         """Yields token ids, and None as a heartbeat every 10 s while the engine is quiet (reading a long prompt):
         the HTTP layer turns it into an SSE comment, which keeps clients' watchdogs calm and notices a client that
         has gone.  A consumer that stops early (or `cancel`) makes the engine STOP, so it does not run to max_new.
-        `checkpoint`: where the engine keeps a checkpoint of the prompt (`cp=`; Service.prepare works it out).
+        `checkpoint`: where the engine keeps a checkpoint of the prompt (`cp=`; Service.prepare works it out; 0: none,
+        None: the engine's own choice, the prompt's end).
         `end_ids`: the pass also ends after one of these, as at an end of turn (`end=`; Service._run's passes).
         `drawn`: a seeded request's draws in its earlier passes, which this one skips (`drawn=`): the engine's sampler
         starts the seed's numbers again on every GEN."""
@@ -857,7 +859,7 @@ class StrataEngine:
         bias_api.validate_request(sampling or {}, self, None)
         self.progress, self.progress_ms, self.reused = None, 0, 0
         self.prefill_tok_s_mean = None
-        cp = f" cp={int(checkpoint)}" if isinstance(checkpoint, int) and checkpoint > 0 else ""
+        cp = f" cp={int(checkpoint)}" if isinstance(checkpoint, int) and checkpoint >= 0 else ""
         end = f" end={','.join(str(int(t)) for t in end_ids)}" if end_ids else ""
         try:
             self.proc.stdin.write(f"GEN {int(max_new)}{cp}{end}{self.sampling_keys(sampling or {}, drawn)} "
@@ -2190,6 +2192,7 @@ class Service:
             # nothing to add goes on from where it is.
             tag_ids = {tag: self.tok.encode(tag, parse_special=True) for tag in (THINK_END, CALL_END)}
             tag_ids = {tag: got[0] for tag, got in tag_ids.items() if len(got) == 1}   # one token: an end id
+            waits = 0                                   # passes of one token past the budget (WRAP_WAIT_PASSES)
             for ev in opening:
                 yield "event", ev
             while True:
@@ -2199,12 +2202,18 @@ class Service:
                 thinks = parser.state in ("reasoning", "rcall")
                 if budget and parser.state == "rcall":
                     ends.update(tag_ids.values())
-                elif budget and thinks:
-                    cap = min(cap, max(1, budget - thought))   # past it: a token at a time, to a clean point
+                elif budget and thinks and thought < budget:
+                    cap, waits = min(cap, budget - thought), 0
+                elif budget and thinks and waits < WRAP_WAIT_PASSES:
+                    cap, waits = 1, waits + 1       # past it: a token at a time, to a clean point (then whole
+                    #                                 passes: a call in the thinking followed by whitespace waits on)
                 if force and thinks and THINK_END in tag_ids:
                     ends.add(tag_ids[THINK_END])
                 ends = sorted(ends)
-                gen = self.engine.generate(prompt, cap, sampling, cancel, checkpoint=checkpoint,
+                # a later pass's prompt ends inside the reply: a checkpoint there helps no next turn and would push
+                # the conversation's own out, so none (cp=0) where the request has none of its own
+                cp = checkpoint if prompt is ids or checkpoint is not None else 0
+                gen = self.engine.generate(prompt, cap, sampling, cancel, checkpoint=cp,
                                            **({"end_ids": ends} if ends else {}),
                                            **({"drawn": drawn} if drawn and seeded else {}))
                 seg, wrap, leaving = [], False, False   # this pass's tokens; the budget is reached; closed
