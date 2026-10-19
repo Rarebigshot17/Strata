@@ -99,11 +99,11 @@ def install(argv, ram=OWNER_RAM, smi=OWNER_SMI, listing=LISTING, configs=(), env
             cpu=("Test CPU", True), prepare=None, others=(), real_start=False, nvcc=(None, None)):
     """setup.main() with `argv` in a temporary Strata folder, everything outside it mocked: nvidia-smi says `smi`, the
     PC has `ram` GiB, a `cpu` (name, AVX2), `free` GB of disk and the CUDA toolkit `nvcc` ((path, version) as
-    find_nvcc returns it; none by default, so setup would install CUDA 13.0), the Hub lists `listing`, a download
-    writes an empty file, the engine build writes build/strata-glm and the start is recorded (`real_start`: setup's
-    own start() runs, and the server command it would run is recorded).  `prepare(base)` makes files beside the
-    Strata folder first, "{base}" in `argv` and in `configs` is that folder, and `others` are the earlier GLM Strata
-    folders there.
+    find_nvcc returns it, or find_nvcc itself; none by default, so setup would install CUDA 13.0), the Hub lists
+    `listing`, a download writes an empty file, the engine build writes build/strata-glm and the start is recorded
+    (`real_start`: setup's own start() runs, and the server command it would run is recorded).  `prepare(base)` makes
+    files beside the Strata folder first, "{base}" in `argv` and in `configs` is that folder, and `others` are the
+    earlier GLM Strata folders there.
     Returns (exit code, output, {config name: config}, {script name: text}, a record of the downloads, builds, starts,
     server commands, engine updates, Hub requests and the disks --check measured)."""
     with tempfile.TemporaryDirectory() as d:
@@ -128,7 +128,7 @@ def install(argv, ram=OWNER_RAM, smi=OWNER_SMI, listing=LISTING, configs=(), env
             dst.write_bytes(b"")
             setup.mark(dst)
 
-        def build_engine(archs, yes, llama, force=False):
+        def build_engine(archs, yes, llama, force=False, driver=None):
             rec["builds"].append(sorted(archs))
             (root / "build").mkdir(exist_ok=True)
             (root / "build" / "strata-glm").write_bytes(b"")
@@ -145,7 +145,9 @@ def install(argv, ram=OWNER_RAM, smi=OWNER_SMI, listing=LISTING, configs=(), env
         patches = [mock.patch.object(setup, "ROOT", root), mock.patch.object(setup, "BUILD_DIR", root / "build"),
                    mock.patch.object(setup, "out", return_value=smi),
                    mock.patch.object(setup, "ram_gib", return_value=ram),
-                   mock.patch.object(setup, "find_nvcc", return_value=nvcc),
+                   mock.patch.object(setup, "find_nvcc", nvcc if callable(nvcc) else    # one toolkit
+                                     lambda below=None: nvcc if not below or not nvcc[0] or nvcc[1] < below
+                                     else (None, None)),
                    mock.patch.object(setup, "cpu_info", return_value=cpu),
                    mock.patch.object(setup, "free_gb", return_value=free),
                    mock.patch.object(setup.shutil, "disk_usage", disk_usage),
@@ -483,9 +485,10 @@ class Gpus(unittest.TestCase):
     def test_an_old_driver_stops(self):
         code, out, _, _, _ = install(["--yes", "--no-start"], smi=OWNER_SMI.replace("580.95.05", "570.172.08"))
         self.assertEqual(code, 1)
-        self.assertIn("the NVIDIA driver is too old (570.172.08; 580 or newer is needed: setup installs CUDA 13.0 to "
-                      "build the engine)", out)
-        self.assertIn("or install a CUDA 12 toolkit (an engine built with it runs on 525 or newer)", out)
+        self.assertIn("the NVIDIA driver is too old (570.172.08; 580 or newer is needed: setup builds the engine with "
+                      "CUDA 13 when no CUDA 12 toolkit is installed)", out)
+        self.assertIn("or install a CUDA 12 toolkit, which setup builds with on a driver older than 580 (its engine "
+                      "runs on 525 or newer), and run this again", out)
 
     def test_the_driver_is_the_one_the_toolkit_needs(self):
         """CUDA 13 needs driver 580 or newer, CUDA 12.x 525 or newer (its minor version compatibility): setup builds
@@ -500,10 +503,17 @@ class Gpus(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("the NVIDIA driver is too old (520.61.05; 525 or newer is needed: the engine is built with "
                       "CUDA 12.4)", out)
+        cuda13 = ("/usr/local/cuda-13.0/bin/nvcc", (13, 0))
         code, out, _, _, _ = install(["--yes", "--no-start"], smi=OWNER_SMI.replace("580.95.05", "570.172.08"),
-                                     nvcc=("/usr/local/cuda-13.0/bin/nvcc", (13, 0)))
+                                     nvcc=cuda13)
         self.assertEqual(code, 1)
-        self.assertIn("580 or newer is needed: the engine is built with CUDA 13.0", out)
+        self.assertIn("580 or newer is needed: setup builds the engine with CUDA 13 when no CUDA 12 toolkit is "
+                      "installed", out)
+        # both toolkits: a driver older than 580 cannot run a CUDA 13 engine, so setup takes CUDA 12 without being told
+        code, out, _, _, _ = install(["--yes", "--no-start"], smi=OWNER_SMI.replace("580.95.05", "570.172.08"),
+                                     nvcc=lambda below=None: cuda12 if below == (13, 0) else cuda13)
+        self.assertEqual(code, 0, out)
+        self.assertIn("driver 570.172.08", out)
         code, out, _, _, _ = install(["--check"], smi=OWNER_SMI.replace("580.95.05", "550.54.14"), nvcc=cuda12)
         self.assertEqual(code, 0, out)
 

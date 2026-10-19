@@ -781,6 +781,17 @@ def min_driver(cuda_v) -> int:
     return MIN_DRIVER_CUDA12 if cuda_v and cuda_v[0] == 12 else MIN_DRIVER
 
 
+def toolkit_below(driver: int | None) -> tuple | None:
+    """The CUDA version a toolkit must be older than for this driver (its major number) to run the engine it builds:
+    13.0 below driver 580, so a CUDA 12 toolkit is taken beside a newer one; None for a newer or unknown driver."""
+    return (13, 0) if driver and driver < MIN_DRIVER else None
+
+
+def oldest_driver(cards) -> int | None:
+    """The major number of the oldest driver these cards report (one driver drives them all), None for no card."""
+    return min((driver_major(g) for g in cards), default=None) or None
+
+
 def find_tool(name):
     """A tool on PATH, or the one pip installed next to this Python (cmake, ninja).  A PATH copy that does not run
     (a pip launcher whose Python is gone) is skipped for the one next to this Python."""
@@ -839,12 +850,20 @@ def os_release() -> dict:
     return {k.strip(): v.strip().strip('"') for k, v in (line.split("=", 1) for line in lines if "=" in line)}
 
 
-def install_build_tools(archs, yes):
+def install_build_tools(archs, yes, driver=None):
     """The C++ compiler and the CUDA toolkit, installed for the user when they are missing (asks once): build-essential
     and CUDA 13.0 through apt on Ubuntu 22.04 / 24.04.  An installed toolkit of 12.0 or newer is used as it is (13.0
-    for an RTX 50 card, sm_120).  Returns nvcc."""
+    for an RTX 50 card, sm_120).  With a `driver` older than 580 only a CUDA 12 toolkit is taken: an engine built with
+    CUDA 13 does not run on it.  Returns nvcc."""
     need = (13, 0) if max(archs) >= 120 else (12, 0)
-    nvcc, cuda_v = find_nvcc()
+    below = toolkit_below(driver)
+    nvcc, cuda_v = find_nvcc(below)
+    if below and (nvcc is None or cuda_v < need):      # the CUDA 13.0 setup would install does not run on this driver
+        fail(f"the NVIDIA driver ({driver}) is too old for CUDA 13 ({MIN_DRIVER} or newer), and "
+             + ("an RTX 50 card (sm_120) needs CUDA 13" if need >= (13, 0) else
+                "no CUDA 12 toolkit (12.0 or newer) is installed to build the engine with"),
+             "update the driver (Ubuntu: sudo ubuntu-drivers install) and restart"
+             + ("" if need >= (13, 0) else ", or install a CUDA 12 toolkit") + ", then run it again")
     have_cc = shutil.which("g++") is not None
     missing = []
     if not have_cc:
@@ -877,7 +896,7 @@ def install_build_tools(archs, yes):
         run(["sudo", "dpkg", "-i", str(deb)])
         run(["sudo", "apt-get", "update"])
         run(["sudo", "apt-get", "install", "-y", "cuda-toolkit-13-0"])
-    nvcc, cuda_v = find_nvcc()
+    nvcc, cuda_v = find_nvcc(below)
     if shutil.which("g++") is None:
         fail("the C++ compiler did not install", "install build-essential by hand and run it again")
     if nvcc is None or cuda_v < need:
@@ -990,17 +1009,18 @@ def engine_current(archs, meta: dict | None = None) -> bool:
         {int(x) for x in archs} <= {int(x) for x in meta.get("archs", [])}
 
 
-def build_cuda(archs, rebuild=False) -> tuple | None:
+def build_cuda(archs, rebuild=False, driver=None) -> tuple | None:
     """The CUDA version the engine runs with on this PC: the toolkit build/ was compiled with while that build is
-    current for these compute capabilities (and not `rebuild`, --build), else the toolkit build_engine takes - an
-    installed one of 12.0 or newer (13.0 for an RTX 50 card) - or None when it would install CUDA 13.0 first."""
+    current for these compute capabilities (and not `rebuild`, --build), else the toolkit build_engine takes for this
+    `driver` - an installed one of 12.0 or newer (13.0 for an RTX 50 card; below 13.0 for a driver older than 580) -
+    or None when it would install CUDA 13.0 first."""
     meta = installed_build()
     if not rebuild and engine_current(archs, meta):
         v = nvcc_version(meta.get("nvcc"))
         if v:
             return v
     archs = {int(x) for x in archs} | {int(x) for x in meta.get("archs", [])}
-    nvcc, cuda_v = find_nvcc()
+    nvcc, cuda_v = find_nvcc(toolkit_below(driver))
     return cuda_v if nvcc and cuda_v and cuda_v >= ((13, 0) if max(archs, default=0) >= 120 else (12, 0)) else None
 
 
@@ -1015,17 +1035,17 @@ def write_build_stamp(archs, nvcc) -> dict:
     return meta
 
 
-def build_engine(archs, yes, llama, force=False) -> Path:
+def build_engine(archs, yes, llama, force=False, driver=None) -> Path:
     """Compile strata-glm, and strata-glm-ref (the CPU reference the GLM checks compare against), into build/ for these
     compute capabilities - unless the build there is of this source and has code for all of them (`force`: compile
     anyway).  A build whose source changed since (a `git pull`) compiles only what changed, a few minutes; it keeps
-    the compute capabilities it had."""
+    the compute capabilities it had.  `driver`: the cards' driver, which the toolkit must suit."""
     meta = installed_build()
     if not force and engine_current(archs, meta):
         ok("engine already built for this PC")
         return BUILD_DIR / EXE
     archs = sorted({int(x) for x in archs} | {int(x) for x in meta.get("archs", [])})
-    nvcc = install_build_tools(archs, yes)
+    nvcc = install_build_tools(archs, yes, driver)
     say("  Compiling the engine for " + ", ".join(f"sm_{x}" for x in archs) + (
         " (a few minutes: only what changed) ..." if (BUILD_DIR / EXE).exists() else " (10-20 minutes, once) ..."))
     cmake_build(ROOT, BUILD_DIR, TARGETS, build_defs(archs, nvcc, llama))
@@ -1052,7 +1072,7 @@ def update_installed_engine(force=False, yes=False) -> None:
     if (BUILD_DIR / EXE).exists() and not force:
         say("  The engine's source changed, or a GPU is new: compiling it again ...")
     try:
-        build_engine(archs, yes, get_llama_cpp(), force=True)
+        build_engine(archs, yes, get_llama_cpp(), force=True, driver=oldest_driver(usable))
     except (Exception, SystemExit) as e:               # a failed compile must not stop the model from starting
         warn(f"could not compile the updated engine{'' if isinstance(e, SystemExit) else f' ({e})'}: starting the "
              "installed one")
@@ -1546,16 +1566,19 @@ def check_pc(a) -> tuple:
                                                              if len(cards) > 1 else ""))
     old = min(cards, key=driver_major)
     archs = card_archs([g for g in found if gpu_problem(g) is None])   # what build_engine compiles for
-    cuda_v = build_cuda(archs, a.build)
+    cuda_v = build_cuda(archs, a.build, driver_major(old))
     need = min_driver(cuda_v)
     if driver_major(old) < need:
-        cuda12 = need == MIN_DRIVER and driver_major(old) >= MIN_DRIVER_CUDA12 and max(archs, default=0) < 120
+        sm120 = max(archs, default=0) >= 120
+        cuda12 = need == MIN_DRIVER and driver_major(old) >= MIN_DRIVER_CUDA12 and not sm120
         fail(f"the NVIDIA driver is too old ({old['driver']}; {need} or newer is needed: "
              + (f"the engine is built with CUDA {cuda_v[0]}.{cuda_v[1]})" if cuda_v else
-                "setup installs CUDA 13.0 to build the engine)"),
+                "an RTX 50 card needs CUDA 13)" if sm120 else
+                "setup builds the engine with CUDA 13 when no CUDA 12 toolkit is installed)"),
              "update it (Ubuntu: sudo ubuntu-drivers install, or https://www.nvidia.com/drivers), restart, and run "
-             "this again" + ("; or install a CUDA 12 toolkit (an engine built with it runs on 525 or newer) and run "
-                             "STRATA_NVCC=<its bin/nvcc> ./setup.sh --build" if cuda12 else ""))
+             "this again" + (f"; or install a CUDA 12 toolkit, which setup builds with on a driver older than "
+                             f"{MIN_DRIVER} (its engine runs on {MIN_DRIVER_CUDA12} or newer), and run this again"
+                             + (" with --build" if cuda_v else "") if cuda12 else ""))
     ok(f"driver {old['driver']}, compute capability " + ", ".join(sorted({cc(g) for g in cards}))
        + f" (the engine is compiled for {cuda_archs(card_archs(cards))})")
     ram = ram_gib()
@@ -1805,7 +1828,7 @@ def main() -> int:
     step(4, "the Strata engine")
     llama = get_llama_cpp()
     ok(f"llama.cpp {LLAMA_CPP_COMMIT[:7]} (ggml, gguf-py)")
-    exe = build_engine(card_archs(usable), a.yes, llama, force=a.build)
+    exe = build_engine(card_archs(usable), a.yes, llama, force=a.build, driver=oldest_driver(usable))
 
     # ---- 5. the model files
     step(5, f"downloading GLM-5.3-Flash {quant}")

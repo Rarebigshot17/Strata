@@ -80,6 +80,41 @@ class Update(unittest.TestCase):
         asked.assert_not_called()
         self.assertIn("could not compile the updated engine: starting the installed one", out.getvalue())
 
+    def test_a_rebuild_takes_a_toolkit_the_driver_runs(self):
+        """Driver 570 runs an engine built with CUDA 12 (525 or newer), not one built with CUDA 13 (580 or newer).
+        The engine compiled again after a git pull takes the CUDA 12 toolkit beside a CUDA 13 one; with CUDA 13 alone
+        it is not compiled (nor CUDA 13.0 installed) and the installed engine starts: a CUDA 13 build would not."""
+        cuda13, cuda12 = ("/usr/local/cuda-13.0/bin/nvcc", (13, 0)), ("/usr/local/cuda-12.8/bin/nvcc", (12, 8))
+        for toolkits, used in (((cuda13, cuda12), cuda12[0]), ((cuda13,), None)):
+            def find_nvcc(below=None):                 # the newest of `toolkits` older than `below`
+                return max((t for t in toolkits if below is None or t[1] < below), key=lambda t: t[1],
+                           default=(None, None))
+            with self.subTest(toolkits=toolkits), tempfile.TemporaryDirectory() as d:
+                build = Path(d) / "build"
+                build.mkdir()
+                (build / setup.EXE).write_bytes(b"")
+                (build / "BUILD.json").write_text(json.dumps({"src": "older", "archs": [86]}), encoding="utf-8")
+                p = self.config(Path(d))
+                card = {"index": 0, "name": "RTX 3090 Ti", "vram_gb": 24.0, "arch": "86", "driver": "570.172.08"}
+                out = io.StringIO()
+                with mock.patch.object(setup, "BUILD_DIR", build), mock.patch.object(setup, "python_packages"), \
+                        mock.patch.object(setup, "gpus", return_value=[card]), \
+                        mock.patch.object(setup, "get_llama_cpp", return_value=Path(d) / "llama.cpp"), \
+                        mock.patch.object(setup, "find_nvcc", find_nvcc), \
+                        mock.patch.object(setup.shutil, "which", lambda name: f"/usr/bin/{name}"), \
+                        mock.patch.object(setup, "run", side_effect=AssertionError("installer started")), \
+                        mock.patch.object(setup, "download", side_effect=AssertionError("download started")), \
+                        mock.patch.object(setup, "cmake_build") as cmake, \
+                        mock.patch.object(setup, "write_build_stamp"), contextlib.redirect_stdout(out):
+                    self.assertEqual(setup.update_install([p], mock.Mock(build=False, yes=True)), 0)
+                if used:
+                    cmake.assert_called_once()
+                    self.assertIn(f"-DCMAKE_CUDA_COMPILER={used}", cmake.call_args[0][3])
+                else:
+                    cmake.assert_not_called()
+                    self.assertIn("the NVIDIA driver (570) is too old for CUDA 13", out.getvalue())
+                    self.assertIn("starting the installed one", out.getvalue())
+
     def test_nothing_installed(self):
         rc, pip, eng, start, call, out = self.run_update([])
         self.assertEqual(rc, 0)
