@@ -16,7 +16,8 @@ unset one is 256 tokens: a plain prompt has no end of turn to stop at).
 
 The tokenizer and the chat template are the model's own, read from its GGUF (the engine's `-m`, the first shard).
 The engine boundary is `Engine.generate(prompt_ids, max_new, sampling, cancel, checkpoint) -> iterator of token ids`
-(`checkpoint`: where the engine keeps a checkpoint of the prompt, or None).
+(`checkpoint`: where the engine keeps a checkpoint of the prompt, or None; a reply's later passes also give `end_ids`,
+ids the engine ends the pass after, as at an end of turn).
 `StrataEngine` keeps one `strata-glm --serve` process resident (the weights load once) and talks to it over
 stdin/stdout (the protocol: include/strata/glm/serve_loop.hpp); `MockEngine` is a scripted stand-in that makes every
 API path testable without a GPU.
@@ -50,8 +51,8 @@ sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script as well as a module
 from gguf_reader import GGUFFile  # noqa: E402
 from strata_tokenizer import Tokenizer  # noqa: E402
-from serve.frontend import (ORDINARY_LT, OUTPUT_TAGS, ChatTemplate, Event, OutputParser,  # noqa: E402
-                            anthropic_to_messages, forced_call, literal_tags, mark_think_literals,
+from serve.frontend import (CALL_END, ORDINARY_LT, OUTPUT_TAGS, THINK_END, ChatTemplate, Event,  # noqa: E402
+                            OutputParser, anthropic_to_messages, forced_call, literal_tags, mark_think_literals,
                             openai_to_messages, tool_choice_of, unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 from serve import runconfig  # noqa: E402
@@ -233,13 +234,13 @@ class ModelFiles:
 class Engine(Protocol):
     max_context: int
     def generate(self, ids: list[int], max_new: int, sampling: dict, cancel: threading.Event,
-                 checkpoint: int | None = None) -> Iterator[int | None]: ...
+                 checkpoint: int | None = None, end_ids: list[int] | None = None) -> Iterator[int | None]: ...
 
 
 class MockEngine:
     """Replays a scripted completion (text) as token ids, one per step, then GLM's end-of-turn token (<|user|>).  Given
     a list of scripts, each request gets the next one and the last one repeats (a tool call, then the answer after
-    it)."""
+    it).  Every pass replays from the start, so `end_ids` is taken and not acted on."""
 
     def __init__(self, tokenizer, script: str | list[str], max_context: int = 32768, delay_s: float = 0.0):
         self.tok, self.max_context, self.delay = tokenizer, max_context, delay_s
@@ -250,7 +251,7 @@ class MockEngine:
         self.last_prompt: list[int] = []
         self.last_checkpoint = None
 
-    def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
+    def generate(self, ids, max_new, sampling, cancel, checkpoint=None, end_ids=None):
         self.last_prompt = list(ids)
         self.last_checkpoint = checkpoint
         if len(self.scripts) > 1:
@@ -533,9 +534,10 @@ class StrataEngine:
     pipe is enough.
 
     Per-request settings ride the same line as engine-side keys between max_new and the ids: the sampling
-    (`temperature=F top_p=F top_k=N seed=N ...`, the engine's own spelling), `logit_bias=id:bias,...` and `cp=N`, where
-    the engine checkpoints the prompt.  An absent temperature keeps the engine's default, which is greedy;
-    `temperature=0` means the same thing, so it is not forwarded.
+    (`temperature=F top_p=F top_k=N seed=N ...`, the engine's own spelling), `logit_bias=id:bias,...`, `cp=N`, where
+    the engine checkpoints the prompt, and `end=id,...`, ids that end the pass as an end of turn does (an older
+    engine ignores the key; the pass then ends where the server STOPs it).  An absent temperature keeps the
+    engine's default, which is greedy; `temperature=0` means the same thing, so it is not forwarded.
     """
     silence_s = ENGINE_SILENCE_S         # #481: main() sets the config's engine_silence_s (survives restart())
     silent_note = None                   # #481: why the server ended a silent engine (death_note says it)
@@ -826,19 +828,21 @@ class StrataEngine:
             keys += f" seed={seed}"
         return keys + bias_api.engine_key(sampling.get("logit_bias"))
 
-    def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
+    def generate(self, ids, max_new, sampling, cancel, checkpoint=None, end_ids=None):
         """Yields token ids, and None as a heartbeat every 10 s while the engine is quiet (reading a long prompt):
         the HTTP layer turns it into an SSE comment, which keeps clients' watchdogs calm and notices a client that
         has gone.  A consumer that stops early (or `cancel`) makes the engine STOP, so it does not run to max_new.
-        `checkpoint`: where the engine keeps a checkpoint of the prompt (`cp=`; Service.prepare works it out)."""
+        `checkpoint`: where the engine keeps a checkpoint of the prompt (`cp=`; Service.prepare works it out).
+        `end_ids`: the pass also ends after one of these, as at an end of turn (`end=`; Service._run's passes)."""
         if not self.alive():
             raise EngineDied("the engine is unavailable; this request was not sent")
         bias_api.validate_request(sampling or {}, self, None)
         self.progress, self.progress_ms, self.reused = None, 0, 0
         self.prefill_tok_s_mean = None
         cp = f" cp={int(checkpoint)}" if isinstance(checkpoint, int) and checkpoint > 0 else ""
+        end = f" end={','.join(str(int(t)) for t in end_ids)}" if end_ids else ""
         try:
-            self.proc.stdin.write(f"GEN {int(max_new)}{cp}{self.sampling_keys(sampling or {})} "
+            self.proc.stdin.write(f"GEN {int(max_new)}{cp}{end}{self.sampling_keys(sampling or {})} "
                                   f"{','.join(str(int(t)) for t in ids)}\n")
             self.proc.stdin.flush()
         except OSError:                                  # the pipe is gone: the engine died (not the client)
@@ -2156,15 +2160,34 @@ class Service:
             before = getattr(self.engine, "last", None)
             last_print = time.time()
             prompt, thought = ids, 0                    # thought: the reasoning tokens so far (the budget's count)
+            # The engine runs ahead of this loop: a break below that goes on with more text (the budget's wrap-up, a
+            # forced call's opening) STOPs it after it has taken in tokens this loop never read, and the next pass's
+            # prompt no longer extends its state - it reads the whole thinking again.  So while one is due, a pass
+            # ends where the break can come: at the reasoning tokens the budget has left, at the end of a call held
+            # in the thinking (its tokens do not count), at </think> for a forced call.  A pass that ended there with
+            # nothing to add goes on from where it is.
+            tag_ids = {tag: self.tok.encode(tag, parse_special=True) for tag in (THINK_END, CALL_END)}
+            tag_ids = {tag: got[0] for tag, got in tag_ids.items() if len(got) == 1}   # one token: an end id
             for ev in opening:
                 yield "event", ev
             while True:
                 segment_before = getattr(self.engine, "last", None)
                 segments_before = len(segments)     # (#879: a pass sent again leaves no segment)
-                gen = self.engine.generate(prompt, max_new - n, sampling, cancel, checkpoint=checkpoint)
+                cap, ends, start = max_new - n, set(), n
+                thinks = parser.state in ("reasoning", "rcall")
+                if budget and parser.state == "rcall":
+                    ends.update(tag_ids.values())
+                elif budget and thinks:
+                    cap = min(cap, max(1, budget - thought))   # past it: a token at a time, to a clean point
+                if force and thinks and THINK_END in tag_ids:
+                    ends.add(tag_ids[THINK_END])
+                ends = sorted(ends)
+                gen = self.engine.generate(prompt, cap, sampling, cancel, checkpoint=checkpoint,
+                                           **({"end_ids": ends} if ends else {}))
                 seg, wrap, leaving = [], False, False   # this pass's tokens; the budget is reached; closed
                 nonfinite = False               # #879: the engine ended this pass on non-finite logits
                 opens = False                   # the thinking is over: write the forced call's opening
+                ended = False                   # the engine ended the pass itself (no break here)
                 try:
                     # A value the frontend holds back (a tool call's array or object argument is sent
                     # whole, once complete) can keep the stream silent for minutes while tokens are
@@ -2221,8 +2244,10 @@ class Service:
                                 break
                         if budget and parser.state == "reasoning":
                             thought += 1
-                            # at a clean point: no tag held back, no character split across tokens
-                            if thought >= budget and not parser.buf and not detok.pending():
+                            # at a clean point: no tag held back, no character split across tokens, no call in
+                            # the thinking waiting for what follows it (the wrap-up's text would make it a quote)
+                            if (thought >= budget and not parser.buf and not parser.pending
+                                    and not detok.pending()):
                                 wrap = True
                                 break
                         if force:
@@ -2231,6 +2256,8 @@ class Service:
                             elif parser.state == "content" and not parser.buf and not detok.pending():
                                 opens = True
                                 break
+                    else:
+                        ended = True
                 except EngineNonFinite:
                     nonfinite = True
                 except EngineDied as e:
@@ -2283,6 +2310,10 @@ class Service:
                           "reads its prompt from the start", flush=True)
                     finish = "length"
                     break
+                if (ended and n < max_new and not cancel.is_set()
+                        and (n - start == cap or (ends and seg and seg[-1] in ends))):
+                    prompt = prompt + seg               # it ended where this loop asked: go on (its state holds
+                    continue                            # all of it but the last token, the next prompt's start)
                 if (self.reasoning_close_retry and thinking and finish == "stop" and not close_retried
                         and not answered and not wrap and not opens and parser.state == "reasoning"
                         and not parser.pending and (stops is None or stops.hit is None) and not cancel.is_set()):

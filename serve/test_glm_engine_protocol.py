@@ -207,6 +207,13 @@ class FakeEngineTests(unittest.TestCase):
         self.run_gen([1, 2])
         gen = next(x for x in self.fake.lines() if x.startswith("GEN "))
         self.assertNotIn("cp=", gen)
+        self.assertNotIn("end=", gen)
+
+    def test_end_ids_key(self):
+        list(self.fake.engine.generate([1, 2], 16, {"temperature": 1.0}, threading.Event(), checkpoint=1,
+                                       end_ids=[264, 266]))
+        gen = next(x for x in self.fake.lines() if x.startswith("GEN "))
+        self.assertTrue(gen.startswith("GEN 16 cp=1 end=264,266 temperature=1.0 "), gen)
 
     def test_err_is_a_refusal(self):
         self.fake.set_mode("err")

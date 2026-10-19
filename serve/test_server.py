@@ -3134,8 +3134,11 @@ class ThinkingBudget(unittest.TestCase):
         self.assertEqual(evs[-2]["delta"]["stop_reason"], "end_turn")
 
     def test_a_budget_the_thinking_stays_under(self):
-        code, b = self.openai(reasoning_budget_tokens=10_000)
-        self.assertEqual(b["choices"][0]["message"]["reasoning_content"], ThinkingEngine.THOUGHT)
+        # (max_tokens 3000 caps the budget at 2250, more than the whole reply: one pass; a reply longer than the
+        # budget goes on in a second pass, test_continuations.py)
+        code, b = self.openai(reasoning_budget_tokens=10_000, max_tokens=3000)
+        msg = b["choices"][0]["message"]
+        self.assertEqual((msg["reasoning_content"], msg["content"]), (ThinkingEngine.THOUGHT, ThinkingEngine.ANSWER))
         self.assertEqual(len(self.engine.prompts), 1)
 
     def test_the_config_default_and_a_request_that_turns_it_off(self):
@@ -3268,7 +3271,7 @@ class CallingEngine(MockEngine):
         super().__init__(tok, "x", max_context=CTX)
         self.prompts = []
 
-    def generate(self, ids, max_new, sampling, cancel, checkpoint=None):
+    def generate(self, ids, max_new, sampling, cancel, checkpoint=None, end_ids=None):
         self.prompts.append(list(ids))
         prompt = self.tok.decode(ids)
         if prompt.endswith(CALL_START):
@@ -3358,7 +3361,7 @@ class ForcedToolChoice(unittest.TestCase):
         # over there (nothing holds that </think> back for the character after it) and the call opens
         thought, calling = 'I will search for "2+2"', self.engine.generate
 
-        def generate(ids, max_new, sampling, cancel, checkpoint=None):
+        def generate(ids, max_new, sampling, cancel, checkpoint=None, end_ids=None):
             if self.tok.decode(ids).endswith((CALL_START, CALL_START + "search")):
                 yield from calling(ids, max_new, sampling, cancel)
                 return

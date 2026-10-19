@@ -91,9 +91,9 @@ class RequestAccounting(unittest.TestCase):
             raw = response.read().decode()
             return response.status, raw
 
-    def chat(self, path="/v1/chat/completions", stream=False, budget=20):
+    def chat(self, path="/v1/chat/completions", stream=False, budget=20, max_tokens=400):
         code, raw = self.request(path, {"model": "m", "messages": [{"role": "user", "content": "2+2?"}],
-                                       "max_tokens": 400, "reasoning_budget_tokens": budget, "stream": stream})
+                                       "max_tokens": max_tokens, "reasoning_budget_tokens": budget, "stream": stream})
         self.assertEqual(code, 200, raw)
         if stream:
             return [json.loads(line[6:]) for line in raw.splitlines() if line.startswith("data: {")]
@@ -175,7 +175,7 @@ class RequestAccounting(unittest.TestCase):
         self.assertEqual(usage["input_tokens"], len(self.engine.prompts[0]) - 5)
 
     def test_single_segment_keeps_its_own_usage_and_timings(self):
-        response = self.chat(budget=10000)
+        response = self.chat(budget=10000, max_tokens=3000)    # the budget (capped at 2250) outlasts the reply
         self.assertEqual(self.engine.attempts, 1)
         self.assertEqual(response["usage"]["prompt_tokens_details"]["cached_tokens"], 5)
         timings = response["timings"]

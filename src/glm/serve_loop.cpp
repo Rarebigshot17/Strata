@@ -410,7 +410,7 @@ int serve_loop(Evaluator& ev, const ServeOptions& opt) {
             std::string w;
             while (ss >> w) f.push_back(w);
         }
-        std::vector<int32_t> ids;
+        std::vector<int32_t> ids, ends;               // ends: end=, ids that end this request as an end of turn
         SamplingParams sp;
         int64_t cp_at = -1;
         bool bad = f.size() < 3 || !parse_ids(f.back(), ids);
@@ -420,6 +420,7 @@ int serve_loop(Evaluator& ev, const ServeOptions& opt) {
             if (eq == std::string::npos) continue;
             const std::string key = f[i].substr(0, eq), value = f[i].substr(eq + 1);
             if (key == "cp") cp_at = std::atoll(value.c_str());
+            else if (key == "end") bad = !parse_ids(value, ends);
             else sp.set(key, value);                  // unknown keys: ignored
         }
         if (bad || max_new < 0) {
@@ -507,7 +508,8 @@ int serve_loop(Evaluator& ev, const ServeOptions& opt) {
                     out.line("T %d", y);
                     ++produced;
                     hist.push_back(y);
-                    if (std::find(opt.eos_ids.begin(), opt.eos_ids.end(), y) != opt.eos_ids.end()) { finish = "stop"; break; }
+                    if (std::find(opt.eos_ids.begin(), opt.eos_ids.end(), y) != opt.eos_ids.end() ||
+                        std::find(ends.begin(), ends.end(), y) != ends.end()) { finish = "stop"; break; }
                     if (in.stopped(gen_no)) { finish = "cancel"; break; }
                     if (produced >= max_new || (int64_t) conv.tokens().size() + 1 >= opt.max_ctx) { finish = "length"; break; }
                     conv.logits = ev.eval(y);

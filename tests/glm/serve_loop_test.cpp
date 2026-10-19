@@ -2,9 +2,9 @@
 //
 // Each case runs serve_loop in a forked child whose stdin and stdout are pipes, writes the request lines, closes
 // stdin and reads everything the child printed. The fake engine predicts token (last + 1) % 32 and can be slow
-// (with or without progress) or fail, so the cases cover INFO/READY, generation, end of turn, logit_bias,
+// (with or without progress) or fail, so the cases cover INFO/READY, generation, end of turn, end=, logit_bias,
 // refusals, ERR internal, HB heartbeats (only while the engine progresses) and STOP of a queued request. A second
-// fake keeps snapshots (Conv) for the conversations: parking, checkpoints and --park-mib.
+// fake keeps snapshots (Conv) for the conversations: parking, checkpoints, --park-mib and the state after end=.
 #include "strata/glm/serve_loop.hpp"
 
 #include <fcntl.h>
@@ -124,6 +124,7 @@ struct Conv : Evaluator {
 std::vector<std::string> run_child(const std::string& input, const std::function<int()>& body, bool quiet = false) {
     int in[2], out[2];
     if (pipe(in) || pipe(out)) throw std::runtime_error("pipe");
+    std::fflush(stdout);                               // else the child prints this process's buffered lines again
     const pid_t pid = fork();
     if (pid == 0) {
         dup2(in[0], 0);
@@ -209,8 +210,8 @@ std::vector<Reply> replies(const std::vector<std::string>& lines) {
     return out;
 }
 
-std::string gen_line(int max_new, const std::vector<int32_t>& ids, long cp = -1) {
-    std::string s = "GEN " + std::to_string(max_new) + (cp >= 0 ? " cp=" + std::to_string(cp) : "") + " ";
+std::string gen_line(int max_new, const std::vector<int32_t>& ids, long cp = -1, const std::string& keys = "") {
+    std::string s = "GEN " + std::to_string(max_new) + (cp >= 0 ? " cp=" + std::to_string(cp) : "") + keys + " ";
     for (size_t i = 0; i < ids.size(); ++i) s += (i ? "," : "") + std::to_string(ids[i]);
     return s + "\n";
 }
@@ -308,6 +309,14 @@ int main() {
         expect(count(l, "ERR malformed GEN line") == 2 && !starts(l, "T "),
                "a token id beyond 32 bits is refused, not read as another id", l);
     }
+    {
+        const auto l = run("plain", "GEN 10 end=9,5 1,2\nGEN 3 end= 1,2\nGEN 3 end=4x 1,2\n");
+        const auto r = replies(l);
+        expect(r.size() == 3 && r[0].toks == std::vector<int32_t>{3, 4, 5} && starts(l, "DONE 3 2 ") &&
+                   l[l.size() - 3].find(" stop ") != std::string::npos && r[1].err == "ERR malformed GEN line" &&
+                   r[2].err == "ERR malformed GEN line",
+               "end=: the request ends after one of its ids, as at an end of turn; a malformed list is refused", l);
+    }
     std::mt19937 rng(1);
     auto random_ids = [&](size_t n) {
         std::vector<int32_t> v(n);
@@ -344,6 +353,23 @@ int main() {
         expect(r.size() == 5 && r[3].resume == 20 && r[4].err.empty() && r[4].resume == 5 &&
                    r[4].toks == Conv::answer(D2, 1),
                "... nor when the conversation it gives way to keeps its checkpoints", l);
+    }
+    {
+        // end=: the id it ended after is not in the state, so the prompt and every token it printed, and more,
+        // continue the state (the server's next pass after a forced call's </think>)
+        std::vector<int32_t> P = random_ids(30);
+        P[0] = 5;
+        const auto ans = Conv::answer(P, 8);
+        size_t k = 2;                                  // from the third token on, the first not printed before it
+        while (k < ans.size() && std::find(ans.begin(), ans.begin() + (long) k, ans[k]) != ans.begin() + (long) k) ++k;
+        const std::vector<int32_t> toks(ans.begin(), ans.begin() + (long) std::min(k + 1, ans.size()));
+        const std::vector<int32_t> P2 = cat(cat(P, toks), {7, 8});
+        const auto l = run_conv(gen_line(8, P, -1, " end=" + std::to_string(toks.back())) + gen_line(2, P2),
+                                (size_t) 1 << 30, 1000);
+        const auto r = replies(l);
+        expect(k < ans.size() && r.size() == 2 && r[0].toks == toks && r[1].err.empty() &&
+                   r[1].resume == (long) (P.size() + toks.size() - 1) && r[1].toks == Conv::answer(P2, 2),
+               "end=: the id it ended after is not taken in, and the next prompt goes on from the state", l);
     }
     {
         // conversations taking turns at random (next turns, regenerated and edited turns, cp=, a shared system
