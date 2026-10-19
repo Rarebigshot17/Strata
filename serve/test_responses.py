@@ -715,10 +715,9 @@ class CodexCompactionOverHttp(Server):
         self.assertIn("multi_agent_v1.spawn_agent", prompt[:prompt.index("<|user|>")])
         self.assertEqual(self.parser_tools[-1], None)    # the parser gets the request's tools: none
         self.assertEqual(r["tools"], [])
-        # the calls come back as for any request without tools: no namespace, no custom tool
-        outputs = [(o["type"], o["name"], o.get("namespace")) for o in r["output"]]
-        self.assertEqual(outputs, [("function_call", "multi_agent_v1.spawn_agent", None),
-                                   ("function_call", "apply_patch", None)])
+        # the calls are text, as for any request without tools: it declares none, so there is no call to run
+        outputs = [(o["type"], o.get("name"), [c.get("text") for c in o.get("content") or []]) for o in r["output"]]
+        self.assertEqual(outputs, [("message", None, [TWO_CALLS[len("</think>"):]])])
         # the same request without Codex's metadata (upstream's behaviour): the same answer, but its prompt starts
         # differently, so the engine reads it from the start
         plain, code, r2 = self.compaction({})
@@ -726,7 +725,8 @@ class CodexCompactionOverHttp(Server):
         self.assertFalse(plain.startswith(turn))
         self.assertNotIn("multi_agent_v1.spawn_agent", plain[:plain.index("<|user|>")])
         self.assertEqual(self.parser_tools[-1], None)
-        self.assertEqual([(o["type"], o["name"], o.get("namespace")) for o in r2["output"]], outputs)
+        self.assertEqual([(o["type"], o.get("name"), [c.get("text") for c in o.get("content") or []])
+                          for o in r2["output"]], outputs)
 
     def test_a_compaction_too_long_with_the_kept_tools_is_rendered_as_sent(self):
         long = "before\n" * 300                         # a long tool output: the turn fits, its compaction barely

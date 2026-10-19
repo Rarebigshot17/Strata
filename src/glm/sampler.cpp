@@ -2,6 +2,8 @@
 #include "strata/glm/sampler.hpp"
 
 #include <algorithm>
+#include <climits>
+#include <cfloat>
 #include <cmath>
 #include <cstdlib>
 #include <numeric>
@@ -10,6 +12,10 @@
 namespace strata::glm {
 
 namespace {
+
+/// An integer key's value: beyond int's range, its nearest end (a plain cast is undefined there, and on x86 gave
+/// INT_MIN: penalty_last_n=4294967296 counted no tokens at all).
+int to_int(double v) { return v != v ? 0 : (int) std::clamp(v, (double) INT_MIN, (double) INT_MAX); }
 
 /// `id:value,id:value`, the Qwen engine's rules: values -100..100, -100 a ban, no duplicate ids.
 std::string parse_bias(const std::string& text, std::vector<std::pair<int32_t, float>>& out) {
@@ -47,12 +53,12 @@ bool SamplingParams::set(const std::string& key, const std::string& value) {
     const double v = std::atof(value.c_str());
     if (key == "temperature") temperature = (float) v;
     else if (key == "top_p") top_p = (float) v;
-    else if (key == "top_k") top_k = (int) v;
+    else if (key == "top_k") top_k = to_int(v);
     else if (key == "min_p") min_p = (float) v;
     else if (key == "penalty_repeat") penalty_repeat = (float) v;
     else if (key == "penalty_freq") penalty_freq = (float) v;
     else if (key == "penalty_present") penalty_present = (float) v;
-    else if (key == "penalty_last_n") penalty_last_n = (int) v;
+    else if (key == "penalty_last_n") penalty_last_n = to_int(v);
     else if (key == "seed") {
         seed = (uint64_t) std::strtoull(value.c_str(), nullptr, 10);
         has_seed = true;
@@ -62,6 +68,13 @@ bool SamplingParams::set(const std::string& key, const std::string& value) {
 
 std::string SamplingParams::check(int64_t n_vocab) const {
     if (!bias_error.empty()) return bias_error;
+    // a draw needs finite weights: an infinite or NaN value leaves none, and a banned token can come out; a
+    // repetition penalty of 0 or below is none (a positive logit over 0 is infinite, below 0 the signs flip)
+    const std::pair<const char*, float> values[] = {{"temperature", temperature}, {"top_p", top_p}, {"min_p", min_p},
+        {"penalty_repeat", penalty_repeat}, {"penalty_freq", penalty_freq}, {"penalty_present", penalty_present}};
+    for (const auto& [key, v] : values)
+        if (!std::isfinite(v)) return std::string(key) + " must be a finite number";
+    if (penalty_repeat <= 0.0f) return "penalty_repeat must be above 0";
     int64_t banned = 0;
     for (const auto& [id, v] : logit_bias) {
         if (id < 0 || id >= n_vocab) return "logit_bias ID outside the vocabulary";
@@ -90,8 +103,12 @@ int32_t Sampler::sample(const std::vector<float>& logits_in, const std::vector<i
         for (const auto& [tok, cnt] : count) {
             if (tok < 0 || tok >= n) continue;
             float& l = logits[(size_t) tok];
+            if (l == -INFINITY) continue;                // a ban stays one (minus a -inf penalty it was NaN)
             l = l <= 0.0f ? l * p_.penalty_repeat : l / p_.penalty_repeat;
             l -= (float) cnt * p_.penalty_freq + (cnt > 0 ? p_.penalty_present : 0.0f);
+            // a huge penalty overflows: the least or the most likely token then, never +-inf or NaN (an infinite
+            // best logit gives NaN weights)
+            l = std::isnan(l) ? -FLT_MAX : std::clamp(l, -FLT_MAX, FLT_MAX);
         }
     }
 

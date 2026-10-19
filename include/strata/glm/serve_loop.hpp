@@ -2,8 +2,9 @@
 //
 // The engine stays resident and takes requests on stdin; serve/server.py drives it (docs/GLM53_SERVER_PORT.md):
 //
-//   -> GEN <max_new> [cp=<n>] [logit_bias=id:v,...] [key=value ...] <id,id,...>
-//                                                    generate after these prompt tokens (sampler.hpp's keys)
+//   -> GEN <max_new> [cp=<n>] [end=id,...] [logit_bias=id:v,...] [key=value ...] <id,id,...>
+//                                                    generate after these prompt tokens (sampler.hpp's keys); end=:
+//                                                    more ids that end the request as an end of turn does
 //   <- RESUME <n>                                    n prompt tokens were already in the state and are not read again
 //   <- PP <done> <total> <ms> <tok/s>                prompt progress, at most 4 a second and once at the end
 //   <- HB                                            still working (a long prompt chunk): only while it progresses
@@ -24,6 +25,8 @@
 // or at its end without one, when that is at least checkpoint_min tokens in: the server puts it before the
 // generation prompt, so the next turn (which re-renders the last reply) or a regenerated reply restarts there
 // rather than at 0. Least recently used conversations, then old checkpoints, are dropped beyond park_bytes.
+// A request's last printed token is never taken into the state (it ended there: max_new, an end of turn, an end= id,
+// a STOP), so a prompt of the request's prompt and every token it printed continues the state.
 #pragma once
 
 #include "strata/glm/snapshot.hpp"

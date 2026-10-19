@@ -5,6 +5,8 @@ the fake MCP server in serve/mcp_fake_server.py (no GPU, no model, no MCP SDK).
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import sys
@@ -206,6 +208,31 @@ class HttpClient(unittest.TestCase):
         self.assertIn("could not reach", self.hub.servers["down"].error)
 
 
+class SecretsInTheAddress(unittest.TestCase):
+    """An address can carry its secret (a token in the query string, a user name and password): GET /mcp, the web
+    page and the log show it without them."""
+
+    def test_unreachable(self):
+        urls = {"query": "http://127.0.0.1:9/mcp?token=sk-query-1#sk-frag-2",
+                "user": "http://alice:sk-pass-3@127.0.0.1/mcp",     # urllib: InvalidURL "nonnumeric port: 'sk-pass-3@..."
+                "bare": "example.invalid/mcp?token=sk-query-4",     # urllib: ValueError "unknown url type: '<all of it>'"
+                "spaced": " example.invalid/mcp?token=sk-query-5\n"}   # ... quoted as urllib cleans it (no spaces)
+        servers = {n: {"url": u} for n, u in urls.items()}
+        # http.client: ValueError "Invalid header value b'Bearer sk-...'" (a line break pasted into the config)
+        servers["header"] = {"url": "http://127.0.0.1:9/mcp", "headers": {"Authorization": "Bearer sk-header-6\n"}}
+        hub = McpHub(servers, {"start_timeout_s": 5})
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            hub.start(wait=True)
+        for name in servers:
+            self.assertEqual(hub.servers[name].status, "failed", name)
+        self.assertIn("could not reach http://127.0.0.1:9/mcp: ", hub.servers["query"].error)
+        self.assertIn("could not reach http://127.0.0.1/mcp: ", hub.servers["user"].error)
+        self.assertIn("example.invalid/mcp", hub.servers["bare"].error)
+        for text in (json.dumps(hub.status()), out.getvalue(), err.getvalue()):
+            self.assertNotRegex(text, "sk-|alice")
+
+
 class Config(unittest.TestCase):
     def test_both_spellings_and_the_file(self):
         with tempfile.TemporaryDirectory() as d:
@@ -265,9 +292,11 @@ class ToolLoop(unittest.TestCase):
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
 
     def post(self, body, headers=None, stream=True):
+        """As the web app's chat posts: JSON, from the page itself (its Origin is the server's own address)."""
         body = {"model": "m", "messages": [{"role": "user", "content": "check it"}], "stream": stream, **body}
         req = urllib.request.Request(self.base + "/v1/chat/completions", data=json.dumps(body).encode(),
-                                     headers={"Content-Type": "application/json", **(headers or {})})
+                                     headers={"Content-Type": "application/json", "Origin": self.base,
+                                              **(headers or {})})
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
                 text = r.read().decode()
@@ -334,7 +363,7 @@ class ToolLoop(unittest.TestCase):
         self.assertNotIn("fake__echo", self.engine.prompt_text(0))
         cs = self.chunks(text)
         self.assertFalse([c for c in cs if "strata_mcp" in c])
-        self.assertEqual(cs[-1]["choices"][0]["finish_reason"], "tool_calls")   # returned to the client as always
+        self.assertEqual(cs[-1]["choices"][0]["finish_reason"], "stop")    # no tools declared: the call is text
         self.assertEqual(len(self.engine.prompts), 1)
         self.assertNotIn('"call"', Path(self.log.name).read_text())    # nothing ran
         for req in ({"strata_mcp": "yes"}, {"strata_mcp": 1}):         # only a real true opts in
@@ -384,7 +413,7 @@ class ToolLoop(unittest.TestCase):
         self.start(call_script("fake__sleep", seconds=8), answer("never"))
         body = {"model": "m", "messages": [{"role": "user", "content": "x"}], "stream": True, "strata_mcp": True}
         req = urllib.request.Request(self.base + "/v1/chat/completions", data=json.dumps(body).encode(),
-                                     headers={"Content-Type": "application/json"})
+                                     headers={"Content-Type": "application/json", "Origin": self.base})
         r = urllib.request.urlopen(req, timeout=30)
         for raw in r:
             if b'"event": "call"' in raw:
@@ -413,6 +442,8 @@ class ToolLoop(unittest.TestCase):
         host = self.base.split("://", 1)[1]
         code, _ = self.post({"strata_mcp": True}, {"Origin": "http://" + host})
         self.assertEqual(code, 200)
+        code, _ = self.post({"strata_mcp": True}, {"Origin": ""})   # an API client (no page): not without mcp_for_api
+        self.assertEqual(code, 403)
 
     def test_get_mcp(self):
         self.start(answer("hi"))

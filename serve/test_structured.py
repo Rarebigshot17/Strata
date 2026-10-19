@@ -1,5 +1,7 @@
 """Exercise the JSON contract through HTTP, including H3's strict Story shape."""
+import importlib.util
 import json
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -10,11 +12,8 @@ from serve.frontend import ChatTemplate
 from serve import structured
 from serve.server import ByteTokenizer, MockEngine, Service, serve
 
-try:
-    import jsonschema  # noqa: F401
-    HAVE_JSONSCHEMA = True
-except ImportError:                  # optional: json_schema answers are then only checked to be one object
-    HAVE_JSONSCHEMA = False
+# optional: json_schema answers are then only checked to be one object
+HAVE_JSONSCHEMA = importlib.util.find_spec("jsonschema") is not None
 
 
 STORY = {"title": "Photobooth", "sheet": "A single continuous shot.", "cast": [],
@@ -200,6 +199,60 @@ class Structured(unittest.TestCase):
                     self.assertEqual(code, 400)
                     self.assertIn("only JSON objects", reply["error"]["message"])
             load.assert_not_called()
+
+    @unittest.skipUnless(HAVE_JSONSCHEMA, "jsonschema is not installed")
+    def test_a_slow_pattern_fails_the_request_in_time(self):
+        # The client's patterns run on the model's answer: ^(a|a)+$ doubles its time with each character (2^40
+        # steps here, years).  It is stopped after PATTERN_TIME_S instead of holding a server thread.
+        schema = object_schema({"v": {"type": "string", "pattern": "^(a|a)+$"}})
+        fmt = {"type": "json_schema", "json_schema": {"name": "slow", "schema": schema}}
+        t0 = time.monotonic()
+        code, reply = self.chat(json.dumps({"v": "a" * 40 + "!"}), response_format=fmt)
+        self.assertEqual(code, 502, reply)
+        self.assertIn("patterns took more than", reply["error"]["message"])
+        self.assertLess(time.monotonic() - t0, structured.PATTERN_TIME_S + 5)
+        _, raw = self.chat(json.dumps({"v": "a" * 40 + "!"}), response_format=fmt, stream=True)
+        self.assertIn("patterns took more than", raw)
+        self.assertEqual(self.chat('{"v": "aaaa"}', response_format=fmt)[0], 200)   # a quick pattern still works
+        code, reply = self.chat('{"v": "b"}', response_format=fmt)
+        self.assertEqual(code, 502)
+        self.assertIn("does not match", reply["error"]["message"])
+
+    @unittest.skipUnless(HAVE_JSONSCHEMA, "jsonschema is not installed")
+    def test_every_keyword_that_runs_a_pattern_is_limited(self):
+        slow = "^(a|a)+$"
+        key = "a" * 40 + "!"
+        for schema in ({"type": "object", "patternProperties": {slow: {}}},
+                       {"type": "object", "additionalProperties": False, "patternProperties": {slow: {}}},
+                       {"type": "object", "unevaluatedProperties": False, "patternProperties": {slow: {}}},
+                       {"type": "object", "properties": {"x": {"type": "array", "items": {"pattern": slow}}}}):
+            _, validator = structured.prepare_format(
+                {"type": "json_schema", "json_schema": {"name": "slow", "schema": schema}}, [])
+            with self.subTest(schema=schema), mock.patch.object(structured, "PATTERN_TIME_S", 0.2):
+                t0 = time.monotonic()
+                with self.assertRaisesRegex(structured.StructuredOutputError, "patterns took more than 0.2 s"):
+                    structured.validated_json(json.dumps({key: 1, "x": [key]}), validator, "stop")
+                self.assertLess(time.monotonic() - t0, 2)
+
+    @unittest.skipUnless(HAVE_JSONSCHEMA, "jsonschema is not installed")
+    def test_a_pattern_regex_would_write_out_is_refused(self):
+        # regex (unlike re) writes a repeat out to its minimum count when it compiles a pattern, before the timeout
+        # runs: a{100000000} took 4 GB and 5 s, a{1000000} 270 MB.  Such a pattern fails the answer at once.
+        for pattern in ("^a{1000000}$", "^(?:a{1000}){1000}$", "^(?:(x)|y{100}){20}$" * 10):
+            for schema in ({"type": "object", "properties": {"v": {"type": "string", "pattern": pattern}}},
+                           {"type": "object", "patternProperties": {pattern: {}}}):
+                _, validator = structured.prepare_format(
+                    {"type": "json_schema", "json_schema": {"name": "big", "schema": schema}}, [])
+                with self.subTest(schema=schema), self.assertRaisesRegex(structured.StructuredOutputError,
+                                                                         "repeats too much"):
+                    structured.validated_json('{"v": "a"}', validator, "stop")
+        schema = {"type": "object", "properties": {"id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                                                    "essay": {"type": "string", "pattern": "^[\\s\\S]{2000,}$"}}}
+        _, validator = structured.prepare_format({"type": "json_schema", "json_schema": {"name": "ok", "schema": schema}},
+                                                 [])
+        structured.validated_json(json.dumps({"id": "0" * 64, "essay": "x" * 2000}), validator, "stop")
+        with self.assertRaisesRegex(structured.StructuredOutputError, "does not match"):
+            structured.validated_json(json.dumps({"id": "0" * 64, "essay": "x" * 1999}), validator, "stop")
 
     def test_the_server_does_not_import_jsonschema_at_start(self):
         import subprocess

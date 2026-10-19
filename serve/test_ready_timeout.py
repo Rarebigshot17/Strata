@@ -4,7 +4,6 @@ import os
 from pathlib import Path
 import sys
 import tempfile
-import threading
 import time
 import unittest
 import json
@@ -33,6 +32,39 @@ for line in sys.stdin:
         break
     if line.startswith(('GEN', 'BGEN')):
         print('T 90\nDONE 1 1 0 1 stop', flush=True)
+'''
+
+# reads the experts into the page cache before READY, reporting on stderr as strata-glm does (every 2 s there): longer
+# than the READY bound in all, but moving on all the time
+WARMING_SLOWLY = r'''
+import sys, time
+for i in range(1, 9):
+    sys.stderr.write('warming the experts: %.1f of 8.0 GB (%d s, 1.00 GB/s)\n' % (i, i))
+    sys.stderr.flush()
+    time.sleep(0.25)
+print('READY 4096 stop', flush=True)
+for line in sys.stdin:
+    if line.startswith('QUIT'):
+        break
+'''
+
+# reports once, then only the same figure: the disk read is stuck
+WARMING_STUCK = r'''
+import sys, time
+while True:
+    sys.stderr.write('warming the experts: 1.0 of 8.0 GB (1 s, 1.00 GB/s)\n')
+    sys.stderr.flush()
+    time.sleep(0.1)
+'''
+
+# moves on at once, then says nothing more: the disk read hung early in the warm-up
+WARMING_THEN_STUCK = r'''
+import sys, time
+for i in (1, 2):
+    sys.stderr.write('warming the experts: %d.0 of 8.0 GB (%d s, 1.00 GB/s)\n' % (i, i))
+    sys.stderr.flush()
+    time.sleep(0.1)
+time.sleep(3600)
 '''
 
 
@@ -80,6 +112,34 @@ class ReadyTimeout(unittest.TestCase):
             self.assertIn('next request restarts it', body)
         self.assertLess(time.monotonic() - t0, 60)
 
+    def test_a_warm_up_that_moves_on_is_not_ended(self):
+        # a cold start from a slower disk: 150 GB at 150 MB/s is more than the bound, and the engine says how far it is
+        log = self.root / 'engine.log'
+        with mock.patch('builtins.print'):
+            eng = StrataEngine(self.make_script('warming', WARMING_SLOWLY), [], log=str(log))
+        self.addCleanup(eng.close)
+        self.assertTrue(eng.alive())
+        self.assertEqual(eng.max_context, 4096)
+
+    def test_a_warm_up_that_stops_moving_is_ended(self):
+        log = self.root / 'engine.log'
+        t0 = time.monotonic()
+        with mock.patch('builtins.print'), self.assertRaises(server.EngineDied) as c:
+            StrataEngine(self.make_script('stuck', WARMING_STUCK), [], log=str(log))
+        self.assertIn('did not report READY', str(c.exception))
+        self.assertLess(time.monotonic() - t0, 10)
+
+    def test_the_bound_runs_from_the_last_progress(self):
+        # the progress is looked for while the engine starts, not only once the bound has passed: a warm-up that
+        # moved on in the first second and then hung is ended one bound after that, not two
+        log = self.root / 'engine.log'
+        t0 = time.monotonic()
+        with mock.patch.object(server, 'ENGINE_READY_S', 2.0), mock.patch.object(StrataEngine, 'WARM_LOOK_S', 0.1), \
+                mock.patch('builtins.print'), self.assertRaises(server.EngineDied) as c:
+            StrataEngine(self.make_script('early', WARMING_THEN_STUCK), [], log=str(log))
+        self.assertIn('of its last warm-up progress (2.0 GB read)', str(c.exception))
+        self.assertLess(time.monotonic() - t0, 3.4)
+
     def test_ready_timeout_on_lazy_load_answers_the_request(self):
         # lazy start: restart()'s own bookkeeping must not crash on the missing slot_cv either (#1527)
         svc = self.service(self.make_script('silent', SILENT))
@@ -102,6 +162,36 @@ class ReadyTimeout(unittest.TestCase):
         hang.touch()                                             # and its restart never reports READY
         self.assert503(base)
         self.assertFalse(svc.engine.starting)
+
+
+class SpawnFailure(unittest.TestCase):
+    """The engine's program cannot be run (missing, not executable, being rebuilt by update.sh): the start ends
+    cleanly - the start's narrator stops, the log is closed, and the request that was loading it gets a 503 that says
+    why, not a dropped connection."""
+
+    def test_a_missing_engine_on_restart(self):
+        root = Path(tempfile.mkdtemp()); self.addCleanup(lambda: __import__('shutil').rmtree(root, True))
+        narrators = []
+        with mock.patch.object(server, 'narrate_start', lambda *a, **k: narrators.append(a[3])), \
+                mock.patch.object(StrataEngine, 'RESTART_RETRY_S', 0.0), mock.patch('builtins.print'):
+            eng = StrataEngine(str(root / 'no-such-engine'), [], log=str(root / 'engine.log'), lazy=True)
+            self.addCleanup(eng.close)
+            svc = Service(eng, ByteTokenizer(), ChatTemplate(Path(__file__).parent / 'chat_template.jinja'))
+            httpd = serve(svc, port=0)
+            self.addCleanup(httpd.server_close); self.addCleanup(httpd.shutdown)
+            req = urllib.request.Request(f'http://127.0.0.1:{httpd.server_address[1]}/v1/chat/completions',
+                                         data=json.dumps({'messages': [{'role': 'user', 'content': 'hi'}],
+                                                          'max_tokens': 8}).encode(),
+                                         headers={'Content-Type': 'application/json'})
+            with self.assertRaises(urllib.error.HTTPError) as c:
+                urllib.request.urlopen(req, timeout=30)
+        with c.exception as e:
+            self.assertEqual(e.code, 503)
+            self.assertIn('no-such-engine', e.read().decode())
+        self.assertEqual(len(narrators), 3)                      # restart's three tries
+        self.assertTrue(all(done.is_set() for done in narrators), 'a narrator still says "still starting"')
+        self.assertTrue(eng.log.closed)
+        self.assertFalse(eng.starting)
 
 
 if __name__ == '__main__':

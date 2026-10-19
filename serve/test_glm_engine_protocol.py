@@ -58,6 +58,8 @@ for line in sys.stdin:
     if line == "QUIT":
         break
     if not line.startswith("GEN "):
+        if line not in ("", "STOP"):                    # as strata-glm: an unknown command is answered
+            print("ERR unsupported command: " + line.split()[0])
         continue
     try:
         mode = open(os.environ["FAKE_MODE"], encoding="utf-8").read().strip()
@@ -205,6 +207,13 @@ class FakeEngineTests(unittest.TestCase):
         self.run_gen([1, 2])
         gen = next(x for x in self.fake.lines() if x.startswith("GEN "))
         self.assertNotIn("cp=", gen)
+        self.assertNotIn("end=", gen)
+
+    def test_end_ids_key(self):
+        list(self.fake.engine.generate([1, 2], 16, {"temperature": 1.0}, threading.Event(), checkpoint=1,
+                                       end_ids=[264, 266]))
+        gen = next(x for x in self.fake.lines() if x.startswith("GEN "))
+        self.assertTrue(gen.startswith("GEN 16 cp=1 end=264,266 temperature=1.0 "), gen)
 
     def test_err_is_a_refusal(self):
         self.fake.set_mode("err")
@@ -598,11 +607,39 @@ class SharedSettingsTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 S.clean_shared_defaults(bad)
 
+    def test_settings_not_finite(self):
+        # Python's json reads NaN and Infinity: each is refused with its field's own message
+        for key in ("temperature", "top_p", "top_k", "seed", "max_tokens", "reasoning_budget_tokens"):
+            for value in (float("nan"), float("inf"), float("-inf")):
+                with self.subTest(key=key, value=value), self.assertRaises(ValueError) as c:
+                    S.clean_shared_defaults({key: value})
+                self.assertTrue(str(c.exception).startswith(key + ":"), str(c.exception))
+
     def test_config_sampling_top_k(self):
         self.assertEqual(S.sampling_defaults_from_config({"sampling": {"top_k": 0}}), {"top_k": 0})
         self.assertEqual(S.sampling_defaults_from_config({"sampling": {"top_k": 100}}), {"top_k": 100})
         with self.assertRaises(SystemExit):
             S.sampling_defaults_from_config({"sampling": {"top_k": -2}})
+
+    def test_config_sampling_not_finite(self):
+        # json.load reads NaN and Infinity, and NaN passed every "< 0" check
+        for key in ("temperature", "repetition_penalty", "presence_penalty", "frequency_penalty", "top_k"):
+            for value in (float("nan"), float("inf")):
+                with self.subTest(key=key, value=value), self.assertRaises(SystemExit):
+                    S.sampling_defaults_from_config({"sampling": {key: value}})
+
+    def test_gen_keys_only_what_the_engine_can_hold(self):
+        # whatever the source (the Chat settings take any top_k or seed): top_k and penalty_last_n are 32-bit ints in
+        # the engine, the seed a 64-bit one, the rest 32-bit floats it divides by or adds
+        keys = S.StrataEngine.sampling_keys({"top_k": 10**12, "seed": 2**64, "repetition_penalty": 1.1,
+                                             "penalty_last_n": 2**40})
+        self.assertIn(" top_k=2147483647", keys)        # more than the vocabulary either way: off
+        self.assertIn(" penalty_last_n=2147483647", keys)
+        self.assertNotIn("seed", keys)
+        for bad in ({"repetition_penalty": float("nan")}, {"repetition_penalty": 0.0}, {"temperature": float("inf")},
+                    {"frequency_penalty": float("inf")}, {"presence_penalty": -1e39}, {"top_p": float("-inf")}):
+            with self.subTest(bad=bad):
+                self.assertEqual(S.StrataEngine.sampling_keys(bad), "")
 
 
 # ------------------------------------------------------------------------------------------------ the model's GGUF
