@@ -134,10 +134,10 @@ tail -f setup.out
 Every option: `./setup.sh --help`, or [INSTALL.md](INSTALL.md#setups-options).
 
 Setup prints `=== Step N: ... ===` for its six steps. The first build takes a while (setup says 10-20 minutes; not
-measured on this engine), then the download, then a SHA-256 check of each file. It succeeded when it ends with
-`All set.`, the line `run config: strata-glm-<size>.json; start script: run-glm-<size>.sh` and exit code 0. A line
-starting with `[X]` is the reason it stopped, with a hint below it. A line starting with `[!]` is a warning: pass it
-on to the user.
+measured on this engine), then the download, then a SHA-256 check of each file. It succeeded when it prints
+`[ok] run config: strata-glm-<size>.json; start script: run-glm-<size>.sh`, then `All set.` and the addresses, and
+exits with code 0. A line starting with `[X]` is the reason it stopped, with a hint below it. A line starting with
+`[!]` is a warning: pass it on to the user.
 
 ## 5. Start the server
 
@@ -153,8 +153,9 @@ sudo).
 The port opens only when the engine is ready. Before that, the engine reads every routed expert into memory: about
 117 GB (3-bit) or 162 GB (4-bit). At 550 MB/s, the top speed of a SATA SSD, that is about 3.5 or 5 minutes
 (calculated, not measured). `strata-server.out` shows the progress (`[strata] reading the experts into memory ...`,
-then `warming the experts: X of Y GB` about every 20 seconds). The server gives up only when the engine says
-nothing new for 900 seconds. The start is done when the output has a line `ready: http://127.0.0.1:8101/v1 ...`.
+then `warming the experts: X of Y GB` about every 20 seconds). The server gives up when the engine has not said it
+is ready within 900 seconds; each step of the warm-up's progress starts those 900 seconds again. The start is done
+when the output has a line `ready: http://127.0.0.1:8101/v1 ...`.
 
 To stop it: `kill $(cat strata-server.pid)`. That sends SIGTERM to the server alone; it stops the engine, and the
 engine saves its expert profile. Do not `kill -9` it and do not kill `strata-glm` itself: the profile of that run is
@@ -179,8 +180,8 @@ curl -s http://127.0.0.1:8101/v1/chat/completions -H "Content-Type: application/
 ```
 
 With an API key, add `-H "Authorization: Bearer <key>"` to the `/v1` requests. `"reasoning_effort": "none"` turns the
-model's thinking off for this test; without it, the answer starts with its thinking in `reasoning_content`. The engine's
-log is `strata-glm-<size>.log` in the Strata folder.
+model's thinking off for this test, so the 64 tokens go to the answer; without it, the model thinks first and its
+thinking comes back in `reasoning_content`. The engine's log is `strata-glm-<size>.log` in the Strata folder.
 
 ## 7. Connect the user's apps
 
@@ -237,8 +238,8 @@ When you are done, tell the user:
 - **What is installed:** the size, the context, the GPUs (in their order), the Strata folder, the data folder with the
   model files, the run config (`strata-glm-<size>.json`) and the log.
 - **How to start and stop it:** `./setup.sh` or `./run-glm-<size>.sh` in a terminal (Ctrl+C or closing it stops the
-  model; Ctrl+C also ends the engine at once, so that run's expert profile is not saved), or the service if you set one
-  up.
+  model; both also end the engine at once, so that run's expert profile is not saved; `kill <the server's PID>` keeps
+  it), or the service if you set one up.
 - **The addresses:** the chat page, the OpenAI base URL, the Anthropic base URL. If you set an API key: the key, and
   that it is stored in plain text in the run config.
 - **What you checked:** the `/health` answer and the test answer.
