@@ -234,6 +234,26 @@ class Structured(unittest.TestCase):
                     structured.validated_json(json.dumps({key: 1, "x": [key]}), validator, "stop")
                 self.assertLess(time.monotonic() - t0, 2)
 
+    @unittest.skipUnless(HAVE_JSONSCHEMA, "jsonschema is not installed")
+    def test_a_pattern_regex_would_write_out_is_refused(self):
+        # regex (unlike re) writes a repeat out to its minimum count when it compiles a pattern, before the timeout
+        # runs: a{100000000} took 4 GB and 5 s, a{1000000} 270 MB.  Such a pattern fails the answer at once.
+        for pattern in ("^a{1000000}$", "^(?:a{1000}){1000}$", "^(?:(x)|y{100}){20}$" * 10):
+            for schema in ({"type": "object", "properties": {"v": {"type": "string", "pattern": pattern}}},
+                           {"type": "object", "patternProperties": {pattern: {}}}):
+                _, validator = structured.prepare_format(
+                    {"type": "json_schema", "json_schema": {"name": "big", "schema": schema}}, [])
+                with self.subTest(schema=schema), self.assertRaisesRegex(structured.StructuredOutputError,
+                                                                         "repeats too much"):
+                    structured.validated_json('{"v": "a"}', validator, "stop")
+        schema = {"type": "object", "properties": {"id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                                                    "essay": {"type": "string", "pattern": "^[\\s\\S]{2000,}$"}}}
+        _, validator = structured.prepare_format({"type": "json_schema", "json_schema": {"name": "ok", "schema": schema}},
+                                                 [])
+        structured.validated_json(json.dumps({"id": "0" * 64, "essay": "x" * 2000}), validator, "stop")
+        with self.assertRaisesRegex(structured.StructuredOutputError, "does not match"):
+            structured.validated_json(json.dumps({"id": "0" * 64, "essay": "x" * 1999}), validator, "stop")
+
     def test_the_server_does_not_import_jsonschema_at_start(self):
         import subprocess
         import sys
