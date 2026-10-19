@@ -519,5 +519,35 @@ class ReadTimeout(unittest.TestCase):
                     self.assertEqual(json.loads(body)["choices"][0]["message"]["content"], "abcd" * 10)
 
 
+class Confirmed(Http):
+    """Findings of the review that the code already handles: kept as tests."""
+
+    def test_an_engine_refusal_on_responses_is_400(self):
+        """The engine's plain ERR line (raised as ValueError) is the request's fault: 400, as on the other APIs
+        (fixed in 3bdf0cd), not a 500 a client would retry."""
+        def refuse(*args, **kwargs):
+            raise ValueError("logit_bias ID 999999999 outside the vocabulary")
+            yield                                               # a generator, as the engine's
+        with mock.patch.object(self.engine, "generate", refuse), mock.patch("builtins.print"):
+            code, _, body = self.call("/v1/responses", {"input": "hi", "logit_bias": {"999999999": 5}})
+            self.assertEqual(code, 400, body)
+            self.assertEqual(json.loads(body)["error"]["type"], "invalid_request_error")
+            code, _, body = self.call("/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}]})
+            self.assertEqual(code, 400, body)
+
+    def test_the_answer_tail_and_the_request_monitor_need_the_key(self):
+        """GET /status shows the end of the answer being written and GET /api/requests (the opt-in monitor) every
+        kept request: both need the API key when one is set."""
+        self.svc.api_monitor = True
+        self.call("/v1/chat/completions", {"messages": [{"role": "user", "content": "secret"}]})
+        self.svc.api_key = "k1"
+        record = self.svc.api_requests[-1]["id"]
+        for path in ("/status", "/api/requests", "/api/requests?id=" + record):
+            with self.subTest(path=path):
+                self.assertEqual(self.call(path)[0], 401)
+                self.assertEqual(self.call(path, headers={"Authorization": "Bearer wrong"})[0], 401)
+                self.assertEqual(self.call(path, headers={"Authorization": "Bearer k1"})[0], 200)
+
+
 if __name__ == "__main__":
     unittest.main()
