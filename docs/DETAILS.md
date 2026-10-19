@@ -477,9 +477,10 @@ The Sampling drawer (the gear button in the chat) holds: **Thinking** off or on 
 until done), **Seed** (empty: random), **Show thinking**, **Use tools from MCP servers** (shown when MCP servers are
 configured) and **Use for other apps too** (the shared settings, below). They are kept in this browser. With each
 request the chat sends the temperature (and top-p and top-k when the temperature is above 0), the seed and max
-tokens when they are set, and `"reasoning_effort": "none"` when thinking is off. What it does not send falls back to
-the defaults below: with thinking **On** it sends nothing, so a run config or shared setting that turns thinking off
-applies. The About tab holds the API key (also kept in this browser) and the theme.
+tokens when they are set, and `"reasoning_effort"`: `"none"` when thinking is off, `"high"` when it is on (GLM has
+no levels), so the page's choice wins over a run config or shared setting. What it does not send falls back to the
+defaults below. **Use for other apps too** shares the same fields, thinking included. The About tab holds the API key
+(also kept in this browser) and the theme.
 
 ### Shared settings for other clients
 
