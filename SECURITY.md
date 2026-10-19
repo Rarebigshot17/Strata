@@ -28,10 +28,10 @@ others are command-line options or environment variables: [docs/DETAILS.md](docs
 - **API key.** `"api_key"` in the run config (or `--api-key`, or `STRATA_API_KEY`; several keys separated by
   commas) is required on `/v1/*`, on every endpoint that shows the model's state, requests or answers (`/status`,
   `/metrics`, `/settings`, `/mcp`, `/props`, `/slots`, `/api/requests`, `/config`) and on every `POST`. `/health`
-  and the web page's own files stay open. Clients send it as `Authorization: Bearer <key>` or `x-api-key`. It is compared in constant time. An empty `--api-key` or
-  `STRATA_API_KEY` stops the server at start; an empty `"api_key"` in the run config gets a warning and leaves the
-  server without a key. Set a key before you open the server to your network, to a
-  Docker bridge or to Tailscale, or put a tunnel in front of it.
+  and the web page's own files stay open. Clients send it as `Authorization: Bearer <key>` or `x-api-key`. It is
+  compared in constant time. An empty `--api-key` or `STRATA_API_KEY` stops the server at start; an empty
+  `"api_key"` in the run config gets a warning and leaves the server without a key. Set a key before you open the
+  server to your network, to a Docker bridge or to Tailscale, or put a tunnel in front of it.
 - **Host check (DNS rebinding).** Without an API key the server answers only requests whose `Host` is a name it
   knows: `localhost`, an IP address, the address it listens on and, when it listens beyond this PC, this PC's name
   and `host.docker.internal`. Others get 403. `"allowed_hosts"` (or `STRATA_ALLOWED_HOSTS`) adds names, and `"*"`
@@ -44,10 +44,12 @@ others are command-line options or environment variables: [docs/DETAILS.md](docs
   (or a `"trusted_origins"` origin), so a page elsewhere cannot change settings or run tools. A client that is no
   browser sends no `Origin`; it needs the API key when one is set.
 - **CORS** is off unless `"cors_origins"` lists origins, and then only for `/v1/*`.
-- **Tool calls** are read from the model's own special tokens only (when the tokenizer has GLM's tags as special
-  tokens, as the real GGUF does). A call the model copies as plain text, from a tool result, a web page or the user,
-  stays text and is never returned as a call. A request that declares no tools, or sets `tool_choice` to `"none"`,
-  gets no calls. Running a call is the client's choice: an agent that runs shell commands decides what it runs.
+- **Tool calls** are read from the model's own special tokens only, when the tokenizer has GLM's tags as special
+  tokens. A call the model copies as plain text, from a tool result, a web page or the user, then stays text and is
+  never returned as a call. GLM's tokenizer is expected to have them; the real GGUF has not been checked for it yet,
+  and without them the server reads the tags from the text and does not say so. A request that declares no tools,
+  or sets `tool_choice` to `"none"`, gets no calls. Running a call is the client's choice: an agent that runs shell
+  commands decides what it runs.
 - **MCP tools** are opt-in: only the servers you list in the run config (`"mcp_servers"`) or in `--mcp-config`, and
   only for requests from Strata's own page that ask for them. API clients get them only when the run config sets
   `"mcp_for_api": true` (the default is false). The tools run with your user's rights, and the model decides when to

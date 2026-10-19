@@ -113,13 +113,13 @@ What is left beside the experts holds Linux, the server, your other programs and
 
 | Your RAM | 3-bit: RAM left | 4-bit: RAM left | Setup recommends |
 | --- | --- | --- | --- |
-| 128 GB | about 11 GB: does not fit | does not fit | neither: it asks before it installs one anyway |
+| 128 GB | about 11 GB: does not fit | does not fit | neither fits: 3-bit is the default answer, and setup asks before it installs it |
 | 144 GB | about 27 GB: tight | does not fit | 3-bit, with less RAM for parked conversations |
 | **192 GB** | about 75 GB: fits | about 30 GB: tight | **3-bit** |
 | 256 GB | about 139 GB: fits | about 94 GB: fits | 4-bit |
 
 - **Fits:** 40 GB or more left.
-- **Tight:** 12 to 40 GB left. Setup warns and gives parked conversations 4 GB instead of 8 (`--park-mib 4096`).
+- **Tight:** 12 to 40 GB left. Setup warns and gives parked conversations 4096 MiB instead of 8192 (`--park-mib 4096`).
   Close other big programs while the model runs.
 - **Does not fit:** under 12 GB left. Linux would read experts from the disk while the model answers: very slow, or
   no start at all. Setup asks before it goes on (the answer is no unless you type y), and `--yes` alone does not
@@ -159,9 +159,11 @@ installing anything. On napster-ai (192 GB) setup recommends the 3-bit size.
   says nothing gets thinking on, unless the run config sets `reasoning_effort` (or `"anthropic_thinking":
   "on_request"` for Anthropic requests).
 - **Tool calls** are read from the model's own special tokens only. A call that the model copies as plain text, from
-  a tool result, a web page or the user's message, stays text and is never run. A request that declares no tools,
-  or sets `tool_choice` to `"none"`, gets no calls at all. This matters for an agent that runs shell commands. MCP
-  tools set up on the server run only for Strata's own web page, unless the run config says `"mcp_for_api": true`.
+  a tool result, a web page or the user's message, stays text: it is never returned as a call, and never runs as an
+  MCP tool. This needs GLM's tags to be special tokens in the model's tokenizer; that is expected, but not checked
+  on the real GGUF yet. A request that declares no tools, or sets `tool_choice` to `"none"`, gets no calls at all.
+  This matters for an agent that runs shell commands. MCP tools set up on the server run only for Strata's own web
+  page, unless the run config says `"mcp_for_api": true`.
 - **Several clients:** Strata answers one request at a time. The others wait, in the order they arrived. When a
   request belongs to another conversation, the engine parks the current conversation's state in RAM. A later turn
   of a parked conversation reads only the new tokens, not the whole conversation again. Parked conversations get
