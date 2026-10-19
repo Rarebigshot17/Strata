@@ -32,9 +32,16 @@ class RestartableEngine(MockEngine):
     def exit_code(self):
         return None
 
+    restart_s = 0.0
+
     def restart(self):
+        time.sleep(self.restart_s)
         self.running, self.unloaded = True, False
         self.starts += 1
+
+    def generate(self, ids, *args, **kwargs):
+        self.order = getattr(self, "order", []) + [self.tok.decode(ids)]
+        yield from super().generate(ids, *args, **kwargs)
 
 
 class Http(unittest.TestCase):
@@ -340,6 +347,46 @@ class CheckedBeforeLoad(Http):
         code, _, out = self.call("/v1/messages", {"messages": hi, "max_tokens": 8})   # a good one loads it
         self.assertEqual(code, 200, out)
         self.assertEqual(self.engine.starts, 1)
+
+
+class ArrivalOrder(Http):
+    reply = "abcd" * 10                                                 # 40 tokens (bytes)
+
+    def test_a_request_that_arrives_during_a_restart_keeps_its_place(self):
+        """B's turn restarts an engine that died after B's load() looked; C arrives during that restart and D
+        after it.  C must not wait in load() behind B's whole answer and then be served after D."""
+        self.engine.delay, self.engine.restart_s = 0.05, 1.0           # B's answer takes 2 s, the restart 1 s
+        done = {}
+
+        def ask(name):
+            code, _, body = self.call("/v1/chat/completions", {"messages": [{"role": "user", "content": name}],
+                                                               "reasoning_effort": "none"})
+            done[name[-1]] = code
+
+        self.assertTrue(self.svc.fifo.acquire(timeout=5))               # the request ahead holds the turn
+        threads = {"B": threading.Thread(target=ask, args=("question B",))}
+        threads["B"].start()
+        deadline = time.monotonic() + 10
+        while self.svc.fifo.waiting() < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.engine.running = False                                     # it died in the request ahead
+        with mock.patch("builtins.print"):
+            self.svc.fifo.release()                                     # B's turn: it starts the engine again
+            time.sleep(0.3)
+            threads["C"] = threading.Thread(target=ask, args=("question C",))
+            threads["C"].start()                                        # C arrives during the restart
+            while not self.engine.running and time.monotonic() < deadline:
+                time.sleep(0.01)
+            time.sleep(0.8)
+            threads["D"] = threading.Thread(target=ask, args=("question D",))
+            threads["D"].start()                                        # D arrives after it, while B answers
+            for th in threads.values():
+                th.join(30)
+        self.assertEqual(done, {"B": 200, "C": 200, "D": 200})
+        order = [next(x for x in "BCD" if f"question {x}" in prompt) for prompt in self.engine.order]
+        self.assertEqual(order, ["B", "C", "D"])
+        self.assertEqual(self.engine.starts, 1)
+        self.assertEqual((self.svc.status["queued"], self.svc.fifo.waiting(), self.svc.fifo.locked()), (0, 0, False))
 
 
 if __name__ == "__main__":

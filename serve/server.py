@@ -1498,7 +1498,21 @@ class Service:
             self.status["queued"] += 1
         counted = True
         try:
-            with self.fifo:
+            ticket, got = self.fifo.join(), False
+            try:
+                # the turn ahead may be starting the engine (Service._run restarts one that died): once it runs, this
+                # request waits for its own turn in run() - in arrival order, with keep-alives - and not here, behind
+                # that request's whole answer, while later requests overtake it
+                while not (got := self.fifo.wait(ticket, 0.5)):
+                    if self.loaded():
+                        if trace is not None:
+                            with self.status_lock:
+                                trace["queue_s"] += round(time.perf_counter() - waiting, 3)
+                        return
+            finally:
+                if not got:
+                    self.fifo.leave(ticket)
+            try:
                 with self.status_lock:
                     self.status["queued"] -= 1
                 counted = False
@@ -1514,6 +1528,8 @@ class Service:
                         with self.status_lock:
                             trace["load_s"] += round(time.perf_counter() - loading, 3)
                             trace["state"] = "queued"
+            finally:
+                self.fifo.release()
         finally:
             if counted:
                 with self.status_lock:
