@@ -17,7 +17,8 @@ unset one is 256 tokens: a plain prompt has no end of turn to stop at).
 The tokenizer and the chat template are the model's own, read from its GGUF (the engine's `-m`, the first shard).
 The engine boundary is `Engine.generate(prompt_ids, max_new, sampling, cancel, checkpoint) -> iterator of token ids`
 (`checkpoint`: where the engine keeps a checkpoint of the prompt, or None; a reply's later passes also give `end_ids`,
-ids the engine ends the pass after, as at an end of turn).
+ids the engine ends the pass after, as at an end of turn, and for a seeded request `drawn`, the draws its earlier passes
+made).
 `StrataEngine` keeps one `strata-glm --serve` process resident (the weights load once) and talks to it over
 stdin/stdout (the protocol: include/strata/glm/serve_loop.hpp); `MockEngine` is a scripted stand-in that makes every
 API path testable without a GPU.
@@ -98,6 +99,7 @@ def listen_problem(host: str, port: int, e: OSError) -> str:
 # sets it; 0 turns it off.
 REPEAT_STOP_TOKENS = 256
 ANSWER_RESERVE_MIN = 512      # #984: the tokens kept for the answer when a thinking budget is cut down to fit max_tokens
+WRAP_WAIT_PASSES = 16         # a reply's passes of one token past the thinking budget, waiting for a clean point
 # #123: what closes the thinking when it reaches reasoning_budget_tokens (GLM's end-of-thinking tag after it; the
 # answer follows it directly, as the template writes it)
 # #1053 (opt-in "reasoning_close_retry": true): a reply that ends on its stop token still inside <think>, with no answer
@@ -234,13 +236,16 @@ class ModelFiles:
 class Engine(Protocol):
     max_context: int
     def generate(self, ids: list[int], max_new: int, sampling: dict, cancel: threading.Event,
-                 checkpoint: int | None = None, end_ids: list[int] | None = None) -> Iterator[int | None]: ...
+                 checkpoint: int | None = None, end_ids: list[int] | None = None,
+                 drawn: int = 0) -> Iterator[int | None]: ...
 
 
 class MockEngine:
     """Replays a scripted completion (text) as token ids, one per step, then GLM's end-of-turn token (<|user|>).  Given
     a list of scripts, each request gets the next one and the last one repeats (a tool call, then the answer after
-    it).  Every pass replays from the start, so `end_ids` is taken and not acted on."""
+    it).  A pass whose prompt is the last one's and every token it gave (a reply's next pass, as Service._run sends
+    after a pass capped at the thinking budget or ended at an `end_ids` id) goes on in the same script, as the engine
+    goes on from its state; any other prompt is a request of its own and starts a script from the beginning."""
 
     def __init__(self, tokenizer, script: str | list[str], max_context: int = 32768, delay_s: float = 0.0):
         self.tok, self.max_context, self.delay = tokenizer, max_context, delay_s
@@ -250,19 +255,29 @@ class MockEngine:
         self.script, self.turns = self.scripts[0], 0
         self.last_prompt: list[int] = []
         self.last_checkpoint = None
+        self.at, self.given = 0, []        # where in the script the last pass started, and the tokens it gave
 
-    def generate(self, ids, max_new, sampling, cancel, checkpoint=None, end_ids=None):
+    def generate(self, ids, max_new, sampling, cancel, checkpoint=None, end_ids=None, drawn=0):
+        goes_on = bool(self.given) and list(ids) == self.last_prompt + self.given     # the last pass, gone on
         self.last_prompt = list(ids)
         self.last_checkpoint = checkpoint
-        if len(self.scripts) > 1:
-            self.script = self.scripts[min(self.turns, len(self.scripts) - 1)]
-            self.turns += 1
-        for t in self.script[:max_new]:
+        if goes_on:
+            self.at += len(self.given)
+        else:
+            self.at = 0
+            if len(self.scripts) > 1:
+                self.script = self.scripts[min(self.turns, len(self.scripts) - 1)]
+                self.turns += 1
+        self.given = []
+        for t in self.script[self.at:self.at + max_new]:
             if cancel.is_set():
                 return
             if self.delay:
                 time.sleep(self.delay)
+            self.given.append(t)
             yield t
+            if t in (end_ids or ()):
+                return
 
 
 class EngineDied(RuntimeError):
@@ -534,7 +549,8 @@ class StrataEngine:
     pipe is enough.
 
     Per-request settings ride the same line as engine-side keys between max_new and the ids: the sampling
-    (`temperature=F top_p=F top_k=N seed=N ...`, the engine's own spelling), `logit_bias=id:bias,...`, `cp=N`, where
+    (`temperature=F top_p=F top_k=N seed=N [drawn=N] ...`, the engine's own spelling; drawn: the seed's draws the
+    reply's earlier passes made, which the pass skips), `logit_bias=id:bias,...`, `cp=N`, where
     the engine checkpoints the prompt, and `end=id,...`, ids that end the pass as an end of turn does (an older
     engine ignores the key; the pass then ends where the server STOPs it).  An absent temperature keeps the
     engine's default, which is greedy; `temperature=0` means the same thing, so it is not forwarded.
@@ -787,7 +803,8 @@ class StrataEngine:
             print(request_line(self.last), flush=True)
 
     @staticmethod
-    def sampling_keys(sampling: dict) -> str:
+    def sampling_keys(sampling: dict, drawn: int = 0) -> str:
+        """`drawn`: the seed's draws a reply's earlier passes made, which this pass's sampler skips (a seed only)."""
         def num(key):                                   # a value the engine holds as a float (ENGINE_FLOAT_MAX)
             v = sampling.get(key)
             ok = isinstance(v, (int, float)) and not isinstance(v, bool) and abs(v) <= ENGINE_FLOAT_MAX
@@ -825,24 +842,27 @@ class StrataEngine:
                 keys += " penalty_last_n=64"
         seed = sampling.get("seed")
         if isinstance(seed, int) and 0 < seed <= ENGINE_SEED_MAX:
-            keys += f" seed={seed}"
+            keys += f" seed={seed}" + (f" drawn={int(drawn)}" if drawn and drawn > 0 else "")
         return keys + bias_api.engine_key(sampling.get("logit_bias"))
 
-    def generate(self, ids, max_new, sampling, cancel, checkpoint=None, end_ids=None):
+    def generate(self, ids, max_new, sampling, cancel, checkpoint=None, end_ids=None, drawn=0):
         """Yields token ids, and None as a heartbeat every 10 s while the engine is quiet (reading a long prompt):
         the HTTP layer turns it into an SSE comment, which keeps clients' watchdogs calm and notices a client that
         has gone.  A consumer that stops early (or `cancel`) makes the engine STOP, so it does not run to max_new.
-        `checkpoint`: where the engine keeps a checkpoint of the prompt (`cp=`; Service.prepare works it out).
-        `end_ids`: the pass also ends after one of these, as at an end of turn (`end=`; Service._run's passes)."""
+        `checkpoint`: where the engine keeps a checkpoint of the prompt (`cp=`; Service.prepare works it out; 0: none,
+        None: the engine's own choice, the prompt's end).
+        `end_ids`: the pass also ends after one of these, as at an end of turn (`end=`; Service._run's passes).
+        `drawn`: a seeded request's draws in its earlier passes, which this one skips (`drawn=`): the engine's sampler
+        starts the seed's numbers again on every GEN."""
         if not self.alive():
             raise EngineDied("the engine is unavailable; this request was not sent")
         bias_api.validate_request(sampling or {}, self, None)
         self.progress, self.progress_ms, self.reused = None, 0, 0
         self.prefill_tok_s_mean = None
-        cp = f" cp={int(checkpoint)}" if isinstance(checkpoint, int) and checkpoint > 0 else ""
+        cp = f" cp={int(checkpoint)}" if isinstance(checkpoint, int) and checkpoint >= 0 else ""
         end = f" end={','.join(str(int(t)) for t in end_ids)}" if end_ids else ""
         try:
-            self.proc.stdin.write(f"GEN {int(max_new)}{cp}{end}{self.sampling_keys(sampling or {})} "
+            self.proc.stdin.write(f"GEN {int(max_new)}{cp}{end}{self.sampling_keys(sampling or {}, drawn)} "
                                   f"{','.join(str(int(t)) for t in ids)}\n")
             self.proc.stdin.flush()
         except OSError:                                  # the pipe is gone: the engine died (not the client)
@@ -2160,6 +2180,10 @@ class Service:
             before = getattr(self.engine, "last", None)
             last_print = time.time()
             prompt, thought = ids, 0                    # thought: the reasoning tokens so far (the budget's count)
+            # drawn: the engine's tokens in this reply so far.  Its sampler starts a seed's numbers again on every
+            # GEN, so a seeded pass skips those its earlier passes drew (one a token): the reply is the one a single
+            # pass draws, and a pass does not draw its tokens with the numbers the reply's first ones had
+            drawn, seeded = 0, (sampling or {}).get("seed") is not None
             # The engine runs ahead of this loop: a break below that goes on with more text (the budget's wrap-up, a
             # forced call's opening) STOPs it after it has taken in tokens this loop never read, and the next pass's
             # prompt no longer extends its state - it reads the whole thinking again.  So while one is due, a pass
@@ -2168,6 +2192,7 @@ class Service:
             # nothing to add goes on from where it is.
             tag_ids = {tag: self.tok.encode(tag, parse_special=True) for tag in (THINK_END, CALL_END)}
             tag_ids = {tag: got[0] for tag, got in tag_ids.items() if len(got) == 1}   # one token: an end id
+            waits = 0                                   # passes of one token past the budget (WRAP_WAIT_PASSES)
             for ev in opening:
                 yield "event", ev
             while True:
@@ -2177,13 +2202,20 @@ class Service:
                 thinks = parser.state in ("reasoning", "rcall")
                 if budget and parser.state == "rcall":
                     ends.update(tag_ids.values())
-                elif budget and thinks:
-                    cap = min(cap, max(1, budget - thought))   # past it: a token at a time, to a clean point
+                elif budget and thinks and thought < budget:
+                    cap, waits = min(cap, budget - thought), 0
+                elif budget and thinks and waits < WRAP_WAIT_PASSES:
+                    cap, waits = 1, waits + 1       # past it: a token at a time, to a clean point (then whole
+                    #                                 passes: a call in the thinking followed by whitespace waits on)
                 if force and thinks and THINK_END in tag_ids:
                     ends.add(tag_ids[THINK_END])
                 ends = sorted(ends)
-                gen = self.engine.generate(prompt, cap, sampling, cancel, checkpoint=checkpoint,
-                                           **({"end_ids": ends} if ends else {}))
+                # a later pass's prompt ends inside the reply: a checkpoint there helps no next turn and would push
+                # the conversation's own out, so none (cp=0) where the request has none of its own
+                cp = checkpoint if prompt is ids or checkpoint is not None else 0
+                gen = self.engine.generate(prompt, cap, sampling, cancel, checkpoint=cp,
+                                           **({"end_ids": ends} if ends else {}),
+                                           **({"drawn": drawn} if drawn and seeded else {}))
                 seg, wrap, leaving = [], False, False   # this pass's tokens; the budget is reached; closed
                 nonfinite = False               # #879: the engine ended this pass on non-finite logits
                 opens = False                   # the thinking is over: write the forced call's opening
@@ -2201,6 +2233,7 @@ class Service:
                             yield "ping", None
                             continue
                         n += 1
+                        drawn += 1
                         if trace is not None and trace["first_token_s"] is None:
                             with self.status_lock:
                                 trace["first_token_s"] = round(time.perf_counter() - trace["_clock"], 3)

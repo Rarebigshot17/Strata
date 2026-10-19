@@ -13,7 +13,9 @@ whole thinking again.
 from __future__ import annotations
 
 import json
+import random
 import sys
+import threading
 import unittest
 import urllib.request
 from pathlib import Path
@@ -35,7 +37,8 @@ class LiveEngine(S.MockEngine):
     """strata-glm's state, as far as passes go: the prompt and every token it printed but the last, and `lag` tokens
     printed past the last one read before a STOP is seen.  The model writes `script` after the first prompt; after a
     prompt that leaves the script, it writes `after[tail]` for the tail that prompt's text ends with.  Every GEN is
-    recorded with its max_new, its end ids and whether its prompt extends the state."""
+    recorded with its max_new, its end ids, its checkpoint, whether its prompt extends the state and the
+    tokens it gave."""
 
     def __init__(self, tok, script: str, after: dict[str, str], lag: int):
         super().__init__(tok, "x")
@@ -47,7 +50,7 @@ class LiveEngine(S.MockEngine):
     def generate(self, ids, max_new, sampling, cancel, checkpoint=None, end_ids=None):
         if self.first is None:
             self.first = list(ids)
-        self.gens.append({"max_new": max_new, "end_ids": end_ids,
+        self.gens.append({"max_new": max_new, "end_ids": end_ids, "checkpoint": checkpoint,
                           "continues": bool(self.live) and ids[:len(self.live)] == self.live})
         made = ids[len(self.first):]
         if self.reply[:len(made)] == made:
@@ -75,12 +78,41 @@ class LiveEngine(S.MockEngine):
         finally:
             printed = min(len(out), given + self.lag)  # a STOP is seen `lag` tokens on, if it is still going
             self.live = list(ids) + out[:max(0, printed - 1)]
+            self.gens[-1]["given"] = given
+
+
+class SeededEngine(S.MockEngine):
+    """strata-glm drawing at a temperature with a seed: its Sampler starts the seed's random numbers again on every
+    GEN (after the `drawn` ones the GEN names) and takes one for each token it prints.  It thinks `thought`, then
+    writes `length` letters, each "a" or "b" by its draw, then ends the turn."""
+
+    def __init__(self, tok, thought: str, length: int):
+        super().__init__(tok, "x")
+        self.head = tok.encode(thought + "</think>", parse_special=True)
+        self.length, self.end = length, tok.encode("<|user|>", parse_special=True)[0]
+        self.first, self.gens = None, 0
+
+    def generate(self, ids, max_new, sampling, cancel, checkpoint=None, end_ids=None, drawn=0):
+        if self.first is None:
+            self.first = list(ids)
+        self.gens += 1
+        rng = random.Random(sampling["seed"])
+        for _ in range(drawn):
+            rng.random()
+        at = len(ids) - len(self.first)                # the reply's tokens before this pass
+        for k in range(max_new):
+            u, pos = rng.random(), at + k
+            t = (self.head[pos] if pos < len(self.head) else ord("ab"[u < 0.5])
+                 if pos < len(self.head) + self.length else self.end)
+            yield t
+            if t == self.end or t in (end_ids or ()):
+                return
 
 
 class Continuations(unittest.TestCase):
-    def start(self, script, after=None, lag=50):
+    def start(self, script, after=None, lag=50, engine=None):
         self.tok = GlmTokenizer()
-        self.engine = LiveEngine(self.tok, script, after or {}, lag)
+        self.engine = engine or LiveEngine(self.tok, script, after or {}, lag)
         httpd = S.serve(S.Service(self.engine, self.tok, glm_template()), port=0)
         self.addCleanup(httpd.server_close)
         self.addCleanup(httpd.shutdown)
@@ -169,6 +201,56 @@ class Continuations(unittest.TestCase):
         self.assertEqual([(g["max_new"], g["end_ids"]) for g in self.engine.gens],
                          [(20, None), (380, self.ids("</think>", "</tool_call>")), (1, None), (1, None)])
         self.assertContinued()
+
+    def test_whitespace_after_a_call_past_the_budget_is_not_a_pass_a_token(self):
+        # past the budget a call in the thinking waits for what follows it, a token a pass; a model that goes on with
+        # whitespace would make a GEN (the whole prompt again) of every token: after a few the passes are whole again
+        self.start("x" * 19 + CALL + "\n" * 60 + "<|observation|>", {S.REASONING_WRAP_UP: ANSWER + "<|user|>"})
+        c = self.chat(tools=TOOLS, reasoning_budget_tokens=20)
+        self.assertEqual((c["finish_reason"], c["calls"]), ("tool_calls", [("search", {"q": "2+2"})]))
+        gens = self.engine.gens
+        self.assertEqual([g["max_new"] for g in gens[2:]],
+                         [1] * S.WRAP_WAIT_PASSES + [400 - sum(g["given"] for g in gens[:-1])], gens)
+        self.assertContinued()
+
+    def test_later_passes_make_no_checkpoint(self):
+        # a later pass's prompt ends inside the reply, where a checkpoint is of no use to a next turn or a regenerated
+        # reply, and it would push the conversation's own out (the engine keeps two): cp=0, none.  With a checkpoint
+        # before the generation prompt every pass names that one, which the engine holds already.
+        self.start(reply_text(THOUGHT, ANSWER) + "<|user|>", {S.REASONING_WRAP_UP: ANSWER + "<|user|>"})
+        svc = S.Service(self.engine, self.tok, glm_template())
+        ids = self.tok.encode("[gMASK]<sop><|user|>2+2?<|assistant|><think>", parse_special=True)
+        list(svc.run(ids, True, None, 400, {"reasoning_budget_tokens": 20}, threading.Event()))
+        self.assertEqual([g["checkpoint"] for g in self.engine.gens], [None, 0])
+        self.start(reply_text(THOUGHT, ANSWER) + "<|user|>", {S.REASONING_WRAP_UP: ANSWER + "<|user|>"})
+        self.chat(reasoning_budget_tokens=20)
+        cps = [g["checkpoint"] for g in self.engine.gens]
+        self.assertEqual(len(cps), 2)
+        self.assertTrue(cps[0] and cps[1] == cps[0], cps)
+
+    def test_a_seeded_reply_in_two_passes_is_the_one_pass_reply(self):
+        # the pass capped at the budget ends inside the answer: the next pass's draws go on after the first pass's
+        # instead of starting the seed's again (which drew the answer's next letters with the reply's first numbers)
+        replies = []
+        for budget in (None, len(THOUGHT) + 10):
+            with self.subTest(budget=budget):
+                self.start("", engine=SeededEngine(GlmTokenizer(), THOUGHT, 40))
+                c = self.chat(temperature=1.0, seed=7, **({"reasoning_budget_tokens": budget} if budget else {}))
+                self.assertEqual(self.engine.gens, 1 if budget is None else 2)
+                replies.append((c["message"]["reasoning_content"], c["message"]["content"], c["finish_reason"]))
+        self.assertEqual(len(replies[0][1]), 40)
+        self.assertEqual(replies[1], replies[0])
+
+    def test_the_mock_engine_goes_on_where_a_pass_ended(self):
+        # serve.server --engine mock: the pass capped at a budget the thinking stays under goes on in its own script,
+        # not from the script's start (the answer written twice) or in the next request's script
+        tok = GlmTokenizer()
+        self.start("", engine=S.MockEngine(tok, [reply_text("Thinking about it.", "Hello from the mock engine."),
+                                                 reply_text("", "The next request.")]))
+        c = self.chat(reasoning_budget_tokens=30)
+        self.assertEqual((c["message"]["reasoning_content"], c["message"]["content"], c["finish_reason"]),
+                         ("Thinking about it.", "Hello from the mock engine.", "stop"))
+        self.assertEqual(self.chat()["message"]["content"], "The next request.")
 
     def test_a_reader_that_keeps_up_changes_nothing(self):
         for lag in (0, 1):

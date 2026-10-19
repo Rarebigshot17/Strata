@@ -133,6 +133,29 @@ int main() {
                     k.top_k, got != 3 && k.top_k > 10 ? "ok" : "FAIL");
         bad += !(got != 3 && k.top_k > 10);
     }
+    // drawn=: a seeded sampler that skips the draws of a reply's earlier passes draws what one sampler going on would
+    // (a draw a token, also where one candidate is left), so a reply the server makes in several passes is the one a
+    // single pass gives; without it the second pass drew with the seed's first numbers again
+    {
+        std::vector<float> l(300); std::normal_distribution<float> nd(0, 1); for (auto& v : l) v = nd(g);
+        std::vector<float> one_left = l; one_left[17] = 30.0f;     // min_p 0.05 keeps token 17 alone
+        int same = 0;
+        for (const char* top_p : {"1", "0.9"}) {
+            SamplingParams p; p.set("temperature", "1"); p.set("top_p", top_p); p.set("min_p", "0.05");
+            p.set("seed", "3");
+            auto logits = [&](int i) -> const std::vector<float>& { return i % 3 ? l : one_left; };
+            Sampler one(p); std::vector<int> a, b;
+            for (int i = 0; i < 40; ++i) a.push_back(one.sample(logits(i), {}));
+            Sampler first(p);
+            for (int i = 0; i < 25; ++i) b.push_back(first.sample(logits(i), {}));
+            SamplingParams q = p; q.set("drawn", "25"); Sampler rest(q);
+            for (int i = 25; i < 40; ++i) b.push_back(rest.sample(logits(i), {}));
+            same += a == b;
+        }
+        std::printf("drawn=25: a pass after 25 tokens draws as one sampler going on: %d of 2 %s\n", same,
+                    same == 2 ? "ok" : "FAIL");
+        bad += same != 2;
+    }
     // timing on GLM's vocabulary
     {
         std::vector<float> l(154880); std::normal_distribution<float> nd(0, 2); for (auto& v : l) v = nd(g);

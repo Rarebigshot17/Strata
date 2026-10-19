@@ -62,7 +62,8 @@ bool SamplingParams::set(const std::string& key, const std::string& value) {
     else if (key == "seed") {
         seed = (uint64_t) std::strtoull(value.c_str(), nullptr, 10);
         has_seed = true;
-    } else return false;
+    } else if (key == "drawn") drawn = (uint64_t) std::max(0, to_int(v));   // (skipping is a draw at a time)
+    else return false;
     return true;
 }
 
@@ -84,7 +85,11 @@ std::string SamplingParams::check(int64_t n_vocab) const {
     return "";
 }
 
-Sampler::Sampler(const SamplingParams& p) : p_(p), rng_(p.has_seed ? p.seed : std::random_device{}()) {}
+Sampler::Sampler(const SamplingParams& p) : p_(p), rng_(p.has_seed ? p.seed : std::random_device{}()) {
+    // a draw below takes one number from the 64-bit engine (a double needs 53 bits): skipping drawn numbers goes on
+    // from where a reply's earlier passes left the seed
+    if (p.has_seed) rng_.discard(p.drawn);
+}
 
 int32_t Sampler::sample(const std::vector<float>& logits_in, const std::vector<int32_t>& history) {
     std::vector<float> logits = logits_in;
@@ -204,6 +209,10 @@ int32_t Sampler::sample(const std::vector<float>& logits_in, const std::vector<i
             if ((r -= w[(size_t) i]) < 0) return (int32_t) i;
         }
         return last;
+    }
+    if (idx.size() == 1) {          // std::discrete_distribution takes no number for one candidate (libstdc++); a
+        rng_.discard(1);            // token always takes one, so a later pass's drawn= is the reply's token count
+        return idx[0];
     }
     std::vector<double> pr(idx.size());
     for (size_t i = 0; i < idx.size(); ++i) pr[i] = weight(idx[i], temp);

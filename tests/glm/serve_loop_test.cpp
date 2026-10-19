@@ -372,6 +372,20 @@ int main() {
                "end=: the id it ended after is not taken in, and the next prompt goes on from the state", l);
     }
     {
+        // cp=0: no checkpoint (the server's later passes of a reply, whose prompts end inside it); without cp= one is
+        // kept at the prompt's end, and a prompt that leaves the state after it resumes there
+        std::vector<int32_t> P = random_ids(20);
+        P[0] = 6;
+        const auto ans = Conv::answer(P, 3);
+        const std::vector<int32_t> P2 = cat(P, {(ans[0] + 1) % 31});     // leaves the state right after P
+        const auto with = replies(run_conv(gen_line(3, P) + gen_line(1, P2), (size_t) 1 << 30, 1));
+        const auto l = run_conv(gen_line(3, P, 0) + gen_line(1, P2), (size_t) 1 << 30, 1);
+        const auto r = replies(l);
+        expect(with.size() == 2 && with[1].resume == (long) P.size() && r.size() == 2 && r[1].err.empty() &&
+                   r[1].resume == 0 && r[1].toks == Conv::answer(P2, 1),
+               "cp=0: no checkpoint, where without cp= one is kept at the prompt's end", l);
+    }
+    {
         // conversations taking turns at random (next turns, regenerated and edited turns, cp=, a shared system
         // prompt) under budgets from none to plenty: every answer is a fresh engine's, RESUME and DONE agree, and
         // no checkpoint is restored over another conversation's state
