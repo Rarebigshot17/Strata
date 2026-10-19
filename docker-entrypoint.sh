@@ -12,48 +12,45 @@ cd /opt/strata || exit 1
 cpuinfo="${STRATA_CPUINFO:-/proc/cpuinfo}"
 if [ -r "$cpuinfo" ] && grep -q '^flags' "$cpuinfo" && ! grep -m1 '^flags' "$cpuinfo" | grep -qw avx2; then
   echo "WARNING: this host CPU has no AVX2. The engine in this image is built for CPUs with AVX2, so it may stop" >&2
-  echo "  with 'illegal instruction' (exit 132). Build the image on this machine (docker build), which compiles the" >&2
-  echo "  engine for the CPU it runs on, and see docs/INSTALL.md (Older CPUs, experimental) for the older-CPU build." >&2
+  echo "  with 'illegal instruction' (exit 132). Build the image on this machine (docker build) with" >&2
+  echo "  STRATA_PORTABLE off in the Dockerfile, which compiles the engine for the CPU it runs on." >&2
 fi
 
 STRATA_DATA="${STRATA_DATA:-/data}"
-FAMILY="${FAMILY:-qwen}"
-MODEL="${MODEL:-IQ2_XS}"
-CONTEXT="${CONTEXT:-32768}"
-VISION="${VISION:-no}"          # no | yes | cpu (the image encoder on the CPU)
+MODEL="${MODEL:-UD-IQ3_XXS}"    # UD-IQ3_XXS (3-bit, ~120 GB) | IQ4_XS (4-bit, ~170 GB)
+CONTEXT="${CONTEXT:-}"          # tokens; empty: setup.py's pick for the GPUs' VRAM
+PARK_MIB="${PARK_MIB:-}"        # RAM for parked conversations; empty: setup.py's pick for the RAM left
 HOST="${HOST:-0.0.0.0}"
-PORT="${PORT:-8080}"
+PORT="${PORT:-8101}"
 API_KEY="${API_KEY:-}"
-KV="${KV:-}"                    # int8 | q4_0 | k8v4; empty: setup.py's own default (int8)
-GPUS="${GPUS:-}"                # "0,2" or "all": one model across several cards (docs/MULTI_GPU.md)
+GPUS="${GPUS:-}"                # "0,2" or "all": the cards the model's layers are shared across
 GPU="${GPU:-}"                  # one card, numbered as nvidia-smi numbers them
-LAYER_SPLIT="${LAYER_SPLIT:-}"  # with GPUS: where each later card's layers start (default: auto)
-LOW_RAM="${LOW_RAM:-auto}"      # on: the experts come from the pack's experts.bin, not from RAM
 GGUF_DIR="${GGUF_DIR:-}"        # a mounted folder with GGUF files you already have: no download
-RESIDENT_BUDGET_GIB="${RESIDENT_BUDGET_GIB:-}"   # UD-Q4_K_XL: GiB of experts kept in RAM (default: setup's pick)
-KV_STREAMING="${KV_STREAMING:-}" # auto | on | off; empty: setup.py's own default (auto)
-CONFIG="${CONFIG:-}"            # a config file to start with (wins over MODEL's /data/config/strata-<model>.json)
+CONFIG="${CONFIG:-}"            # a config file to start with (wins over MODEL's /data/config/strata-glm-<model>.json)
 
-# setup.py starts the newest strata-*.json it finds, so link in exactly the one
-# this family and model were set up with. The config is the recorded output of
-# that setup (the pack, the profile, the quant, the KV decision), not settings
-# the entry point could rebuild from env vars. qwen has an empty family tag.
-case "$FAMILY" in qwen) prefix="" ;; *) prefix="${FAMILY}-" ;; esac
-tag="${prefix}$(printf '%s' "$MODEL" | tr 'A-Z' 'a-z')"
+case "$MODEL" in
+  UD-IQ3_XXS) size="~120 GB" ;;
+  IQ4_XS) size="~170 GB" ;;
+  *) echo "MODEL=$MODEL: use UD-IQ3_XXS (3-bit) or IQ4_XS (4-bit)." >&2; exit 1 ;;
+esac
+
+# setup.py starts the strata-glm-*.json it finds (and asks which one when it finds
+# several), so link in exactly the one this model was set up with. The config is the recorded output of that setup (the
+# shards, the context, the parking RAM), not settings the entry point could rebuild
+# from env vars. Its name is setup.py's: strata-glm-<model in lower case>.json.
+tag="glm-$(printf '%s' "$MODEL" | tr 'A-Z' 'a-z')"
 cfg="$STRATA_DATA/config/strata-$tag.json"
 mkdir -p "$STRATA_DATA/config"
 
 # REINSTALL is only needed to change settings for a model that is already set up
-# (context, vision, KV, host, api_key). Switching between models already on the
+# (context, parking RAM, host, api_key). Switching between models already on the
 # volume needs no setup pass: their config is already there.
 #
-# KV / GPUS / GPU / LAYER_SPLIT are passed only when set, so an unset one keeps
-# setup.py's own default. LOW_RAM is always passed: setup.py measures the PC's RAM
-# from /proc/meminfo, which in a container is the host's total, not the container's
-# limit, so a memory-capped container has to ask for the low-RAM mode itself.
+# CONTEXT / PARK_MIB / GPUS / GPU are passed only when set, so an unset one keeps
+# setup.py's own pick. The browser is never opened from a container.
 #
 # Which config the server starts with (#1244): CONFIG when set; else a link in /opt/strata that already points
-# into $STRATA_DATA/config/ (a pod command that picked one by linking); else MODEL's strata-<model>.json.
+# into $STRATA_DATA/config/ (a pod command that picked one by linking); else MODEL's strata-glm-<model>.json.
 link="/opt/strata/strata-$tag.json"
 keep=""
 if [ -n "$CONFIG" ]; then
@@ -71,36 +68,33 @@ elif [ "${REINSTALL:-0}" = "1" ] || [ ! -f "$cfg" ]; then
   if [ -n "$GGUF_DIR" ]; then
     echo "Setting up $tag from the GGUF files in $GGUF_DIR (the engine is already in the image)."
   else
-    echo "Setting up $tag: downloading the model (~70 GB; the engine is already in the image)."
+    echo "Setting up $tag: downloading the model ($size; the engine is already in the image)."
   fi
-  set -- --family "$FAMILY" --model "$MODEL" --context "$CONTEXT" --vision "$VISION" \
-    --data-dir "$STRATA_DATA" --host "$HOST" --api-key "$API_KEY" \
-    --port "$PORT" --no-start --low-ram "$LOW_RAM"
-  if [ -n "$KV" ]; then set -- "$@" --kv "$KV"; fi
+  set -- --model "$MODEL" --data-dir "$STRATA_DATA" --host "$HOST" --api-key "$API_KEY" \
+    --port "$PORT" --no-browser --no-start
+  if [ -n "$CONTEXT" ]; then set -- "$@" --context "$CONTEXT"; fi
+  if [ -n "$PARK_MIB" ]; then set -- "$@" --park-mib "$PARK_MIB"; fi
   if [ -n "$GPUS" ]; then set -- "$@" --gpus "$GPUS"; fi
   if [ -n "$GPU" ]; then set -- "$@" --gpu "$GPU"; fi
-  if [ -n "$LAYER_SPLIT" ]; then set -- "$@" --layer-split "$LAYER_SPLIT"; fi
   if [ -n "$GGUF_DIR" ]; then set -- "$@" --gguf-dir "$GGUF_DIR"; fi
-  if [ -n "$RESIDENT_BUDGET_GIB" ]; then set -- "$@" --resident-budget-gib "$RESIDENT_BUDGET_GIB"; fi
-  if [ -n "$KV_STREAMING" ]; then set -- "$@" --kv-streaming "$KV_STREAMING"; fi
   .venv/bin/python setup.py --setup --yes "$@"
-  [ -e "/opt/strata/strata-$tag.json" ] && { cmp -s "/opt/strata/strata-$tag.json" "$cfg" || cp -f "/opt/strata/strata-$tag.json" "$cfg"; }
+  # setup writes through a link left by an earlier start (REINSTALL=1), else a file of its own here: the volume
+  # gets that file, and the start below goes through the link to it
+  [ -e "$link" ] && { cmp -s "$link" "$cfg" || cp -f "$link" "$cfg"; }
+  ln -sfn "$cfg" "$link"
   echo "Config: $cfg (from MODEL $MODEL, just set up)"
 else
   # #1244: the copy on the volume is the one that counts, so a regular file left in /opt/strata by an earlier setup
   # (or by an image built with one) must not stand in for it: edits to /data/config would be ignored
-  ln -sfn "$cfg" "/opt/strata/strata-$tag.json"
+  ln -sfn "$cfg" "$link"
   echo "Config: $cfg (from MODEL $MODEL)"
 fi
 
 # Later starts skip straight here: setup.py finds the installed config and
-# launches serve/server.py (OpenAI- and Anthropic-compatible API on :8080).
-# GPUS / GPU / LAYER_SPLIT are repeated on purpose. Given at the start they pin the
-# cards for this model, and setup.py saves them in its config; without them a config
-# that names one card is offered once to a pair, on its own, when the host has two
-# cards that can share the model (setup.py's offer_together, docs/MULTI_GPU.md).
+# launches serve/server.py (OpenAI- and Anthropic-compatible API on :8101).
+# GPUS / GPU are repeated on purpose: given at the start they pin the cards
+# (GPUS is saved in the model's config, GPU is for this start only).
 set -- --port "$PORT"
 if [ -n "$GPUS" ]; then set -- "$@" --gpus "$GPUS"; fi
 if [ -n "$GPU" ]; then set -- "$@" --gpu "$GPU"; fi
-if [ -n "$LAYER_SPLIT" ]; then set -- "$@" --layer-split "$LAYER_SPLIT"; fi
 exec .venv/bin/python setup.py "$@"
