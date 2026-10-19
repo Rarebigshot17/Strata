@@ -3237,6 +3237,67 @@ class ThinkingBudget(unittest.TestCase):
         self.assertEqual(code, 200, b)
         self.assertTrue(b["choices"][0]["message"]["reasoning_content"].startswith(ThinkingEngine.THOUGHT[:20] + "\n"))
 
+    def anthropic(self, **extra):
+        """A whole /v1/messages answer: (status, thinking text, answer text) or (status, error body, None)."""
+        code, b = self.post("/v1/messages", {"model": "m", "max_tokens": 400,
+                                             "messages": [{"role": "user", "content": "2+2?"}], **extra})
+        if code != 200:
+            return code, b, None
+        return (code, "".join(c.get("thinking", "") for c in b["content"] if c["type"] == "thinking"),
+                "".join(c.get("text", "") for c in b["content"] if c["type"] == "text"))
+
+    def test_anthropic_budget_tokens_caps_the_thinking(self):
+        """Anthropic's thinking.budget_tokens is the most the thinking may take, as reasoning_budget_tokens is: the
+        thinking is wrapped up there and the model answers (it used to pick an effort level only, which GLM, with
+        thinking on or off, does not have)."""
+        from serve.server import REASONING_WRAP_UP
+        code, thinking, text = self.anthropic(thinking={"type": "enabled", "budget_tokens": 20})
+        self.assertEqual(code, 200, thinking)
+        self.assertEqual((thinking, text), (ThinkingEngine.THOUGHT[:20] + REASONING_WRAP_UP.split("</think>")[0],
+                                            ThinkingEngine.ANSWER))
+        self.assertEqual(len(self.engine.prompts), 2)
+        # streamed the same
+        code, raw = self.post("/v1/messages", {"model": "m", "max_tokens": 400, "stream": True,
+                                               "thinking": {"type": "enabled", "budget_tokens": 20},
+                                               "messages": [{"role": "user", "content": "2+2?"}]})
+        evs = [json.loads(line[6:]) for line in raw.splitlines() if line.startswith("data: {")]
+        streamed = "".join(e["delta"].get("thinking", "") for e in evs if e["type"] == "content_block_delta")
+        self.assertEqual(streamed, thinking)
+
+    def test_anthropic_budget_tokens_and_the_other_budgets(self):
+        # the request's own reasoning_budget_tokens wins (0: none); its budget_tokens wins over a shared or configured
+        # budget, which only fill in for a request that sets none; a budget the thinking stays under changes nothing
+        self.svc.reasoning_budget_tokens = 50
+        self.svc.set_shared({"reasoning_budget_tokens": 60})
+        cases = [({"thinking": {"type": "enabled", "budget_tokens": 20}, "reasoning_budget_tokens": 0}, None),
+                 ({"thinking": {"type": "enabled", "budget_tokens": 30}}, 30),
+                 ({"thinking": {"type": "enabled", "budget_tokens": 30}, "reasoning_budget_tokens": 25}, 25),
+                 ({"thinking": {"type": "enabled", "budget_tokens": 3000}, "max_tokens": 4000}, None),
+                 ({"thinking": {"type": "enabled"}}, 60)]
+        for extra, cut in cases:
+            with self.subTest(extra=extra):
+                code, thinking, text = self.anthropic(**extra)
+                self.assertEqual(code, 200, thinking)
+                self.assertEqual(text, ThinkingEngine.ANSWER)
+                want = ThinkingEngine.THOUGHT if cut is None else ThinkingEngine.THOUGHT[:cut]
+                self.assertTrue(thinking.startswith(want), thinking)
+                self.assertEqual(thinking == ThinkingEngine.THOUGHT, cut is None, thinking)
+
+    def test_anthropic_budget_tokens_that_is_not_a_number_is_a_400(self):
+        for bad in ("lots", 20.5, True, [20]):
+            with self.subTest(bad=bad):
+                for path in ("/v1/messages", "/v1/messages/count_tokens"):
+                    code, b = self.post(path, {"model": "m", "max_tokens": 400,
+                                               "thinking": {"type": "enabled", "budget_tokens": bad},
+                                               "messages": [{"role": "user", "content": "2+2?"}]})
+                    self.assertEqual(code, 400, b)
+                    self.assertIn("thinking.budget_tokens", b["error"]["message"])
+        self.assertEqual(self.engine.prompts, [])
+        # a whole number written as a float is a number of tokens; a disabled thinking's budget is not read
+        self.assertEqual(self.anthropic(thinking={"type": "enabled", "budget_tokens": 20.0})[0], 200)
+        code, thinking, text = self.anthropic(thinking={"type": "disabled", "budget_tokens": "lots"})
+        self.assertEqual((code, thinking, text), (200, "", ThinkingEngine.ANSWER))
+
     def test_the_thinking_progress_line_shows_the_budget_not_max_tokens(self):
         """#984: 'thinking: x of max 6400' read as if the budget was ignored; while a budget applies the line shows
         it."""

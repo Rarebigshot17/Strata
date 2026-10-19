@@ -1393,6 +1393,25 @@ def stop_strings(req: dict) -> list[str]:
     return [x for x in stop if x]
 
 
+def anthropic_budget(req: dict) -> dict:
+    """The request with Anthropic's thinking budget as its own reasoning_budget_tokens: `"thinking": {"type":
+    "enabled", "budget_tokens": N}` is the most the thinking may take, and it is wrapped up there as for
+    reasoning_budget_tokens (#123).  A reasoning_budget_tokens the request gives itself still wins; a shared or
+    configured budget fills in only for a request with neither.  A budget that is not a whole number is a ValueError (a
+    400); 0 or less is none.  (It used to pick an effort level only, and GLM's thinking is on or off.)"""
+    thinking = (req or {}).get("thinking")
+    if not isinstance(thinking, dict) or thinking.get("type") != "enabled" or thinking.get("budget_tokens") is None:
+        return req
+    n = thinking["budget_tokens"]
+    if isinstance(n, float) and n.is_integer():
+        n = int(n)
+    if isinstance(n, bool) or not isinstance(n, int):
+        raise ValueError(f"thinking.budget_tokens={thinking['budget_tokens']!r}: expected a whole number of tokens")
+    if n <= 0 or req.get("reasoning_budget_tokens") is not None:
+        return req
+    return {**req, "reasoning_budget_tokens": n}
+
+
 class StopMatcher:
     """Cuts the answer's text at the first stop string.  Text that could still be the start of a stop string is held
     back (only that tail, never more), so a stop string split across tokens or chunks is still found and never sent."""
@@ -4268,7 +4287,7 @@ def make_handler(svc: Service):
         def _count_tokens(self, req):
             """Anthropic's token count, which Claude Code asks for its context figures: the prompt this server would
             read for the same request, rendered and tokenized - the model does not run."""
-            req = svc.with_shared(req, "anthropic")
+            req = anthropic_budget(svc.with_shared(req, "anthropic"))   # the same 400 for a bad budget_tokens
             messages, tools, kw = anthropic_to_messages(req, svc.anthropic_think_unasked)
             stop_strings(req)                                 # the same 400 as the request itself would get
             check_request_sampling(req)                       # ... likewise a sampling field of the wrong type
@@ -4276,7 +4295,7 @@ def make_handler(svc: Service):
             self._json(200, {"input_tokens": len(svc.encode_prompt(messages, tools, kw))})
 
         def _anthropic(self, req):
-            req = svc.with_shared(req, "anthropic")
+            req = anthropic_budget(svc.with_shared(req, "anthropic"))   # thinking.budget_tokens caps the thinking
             messages, tools, kw = anthropic_to_messages(req, svc.anthropic_think_unasked)
             refuse_images(messages)
             if tool_choice_of(req.get("tool_choice"))[0] == "none":   # Anthropic's {"type": "none"}: no tools offered
