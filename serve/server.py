@@ -2911,8 +2911,13 @@ def make_handler(svc: Service):
                 if total > limit:
                     self.close_connection = True
                     raise BadBody(413, f"the request body is larger than {limit >> 20} MiB")
-                left = size
+                left, refused = size, None
                 while left > 0:
+                    if keep and total - left > LARGE_BODY:    # one huge chunk: refused before it is all kept
+                        try:
+                            self._take_large_body()
+                        except BadBody as e:                  # the rest of the chunk is read and dropped, so the
+                            parts, keep, refused = [], False, e   # drain goes on at the next chunk
                     piece = self.rfile.read(min(left, 1 << 20))
                     if not piece:
                         raise BadBody(400, "the chunked request body ended early")
@@ -2921,6 +2926,8 @@ def make_handler(svc: Service):
                         parts.append(piece)
                 if self.rfile.read(2) != b"\r\n":
                     raise BadBody(400, "malformed chunked request body")
+                if refused is not None:
+                    raise refused
 
         def _body(self) -> bytes:
             self.body_read = True

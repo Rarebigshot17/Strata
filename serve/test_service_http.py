@@ -16,7 +16,7 @@ import urllib.request
 from unittest import mock
 
 from serve.glm_fixtures import GlmTokenizer, glm_template
-from serve.server import ConvCacheLog, EngineDied, EngineStuck, MockEngine, Service, serve
+from serve.server import LARGE_BODIES_AT_ONCE, ConvCacheLog, EngineDied, EngineStuck, MockEngine, Service, serve
 
 
 class RestartableEngine(MockEngine):
@@ -496,6 +496,40 @@ class LargeBodies(Http):
         for _ in range(held):                                   # and gave its slot back
             self.assertTrue(slots.acquire(blocking=False))
         self.assertFalse(slots.acquire(blocking=False))
+
+    def test_one_huge_chunk_is_not_held_either(self):
+        """A chunked body sent as one chunk (a client that streams a buffer): refused once LARGE_BODY of it is in,
+        not after the whole chunk was kept - and the answer still arrives (the rest is read and dropped)."""
+        import tracemalloc
+        size = 8 << 20
+        head = (b"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
+                b"Transfer-Encoding: chunked\r\n\r\n%X\r\n" % size)
+        data = memoryview(b'{"pad": "' + b"x" * (size - 11) + b'"}')
+        slots = self.svc.large_bodies
+        while slots.acquire(blocking=False):                    # the large bodies already in the server
+            pass
+        tracemalloc.start()
+        try:
+            with mock.patch("serve.server.LARGE_BODY", 1 << 20), mock.patch("builtins.print"):
+                s = socket.create_connection(("127.0.0.1", self.httpd.server_address[1]), timeout=30)
+                try:
+                    s.sendall(head)
+                    for i in range(0, size, 1 << 16):
+                        s.sendall(data[i:i + (1 << 16)])
+                    s.sendall(b"\r\n0\r\n\r\n")
+                    answer = b""
+                    while chunk := s.recv(65536):
+                        answer += chunk
+                finally:
+                    s.close()
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+            for _ in range(LARGE_BODIES_AT_ONCE):
+                slots.release()
+        self.assertTrue(answer.startswith(b"HTTP/1.0 503"), answer[:80])
+        self.assertIn(b"Retry-After:", answer)
+        self.assertLess(peak, 4 << 20, "the server kept the chunk")
 
 
 class ReadTimeout(unittest.TestCase):
