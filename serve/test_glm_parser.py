@@ -206,6 +206,27 @@ class ToolCalls(Base):
                 text = f"<tool_call>w<arg_key>{key}</arg_key><arg_value>{value}</arg_value></tool_call>"
                 self.assertEqual(self.calls(text, thinking=False, tools=tools), [("w", {key: want})])
 
+    def test_non_finite_numbers_are_text(self):
+        # json.loads reads NaN, Infinity and 1e999 (inf), which json.dumps writes back as tokens strict JSON parsers
+        # (JavaScript's JSON.parse) refuse: such a value is its text
+        def strict(text):
+            return json.loads(text, parse_constant=lambda c: self.fail(f"{c} in {text}"))
+        for value in ("NaN", "Infinity", "-Infinity", "1e999", "-1e999", "[1, NaN]", '{"a": Infinity}'):
+            with self.subTest(value=value):
+                text = f"<tool_call>read_file<arg_key>lines</arg_key><arg_value>{value}</arg_value></tool_call>"
+                for pieces in chunkings(text, count=3):
+                    events, _ = feed(pieces, thinking=False)
+                    self.assertEqual([e.call.arguments for e in events if e.kind == "tool_call"], [{"lines": value}])
+                    self.assertEqual(strict("".join(e.text for e in events if e.kind == "tool_args")),
+                                     {"lines": value})
+                    self.assertEqual(strict(json.dumps(events[-1].call.arguments)), {"lines": value})
+                p = OutputParser(thinking=False, tools=TOOLS, stream_tools=True)
+                cut = p.feed(text[:-len("</arg_value></tool_call>")]) + p.finish("length")
+                self.assertEqual(strict("".join(e.text for e in cut if e.kind == "tool_args")), {"lines": value})
+                # recover's JSON form: not a call
+                text = '<tool_call>{"name": "read_file", "arguments": {"lines": %s}}</tool_call>' % value
+                self.assertEqual(self.parse(text, thinking=False, recover=True), [("content", text)])
+
     def test_escapes_and_unicode_stream_as_json(self):
         content = 'He said "hi" \\ path\\to\\x é\U0001F642 \x01\t end'
         text = (f"<tool_call>write_file<arg_key>path</arg_key><arg_value>a</arg_value><arg_key>content</arg_key>"

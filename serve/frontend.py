@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -717,6 +718,23 @@ def forced_call(tool_choice, tools: list[dict] | None) -> str | None:
 _JSON_FENCE = re.compile(r"```[ \t]*(?:json)?[ \t]*\r?\n\s*", re.I)
 
 
+def _not_json(text: str):
+    raise ValueError(f"{text} is not JSON")
+
+
+def _finite(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        _not_json(text)
+    return value
+
+
+def _strict_json(text: str):
+    """json.loads without NaN, Infinity and numbers that overflow to inf (1e999): json.dumps would write them back as
+    tokens that strict JSON parsers (JavaScript's JSON.parse) refuse.  ValueError for those, as for any non-JSON."""
+    return json.loads(text, parse_constant=_not_json, parse_float=_finite)
+
+
 def json_tool_call(body: str, schemas: dict) -> ToolCall | None:
     """`{"name": N, "arguments": {...}}` (or "parameters", or the arguments as a JSON string) of a declared tool -> its
     call; anything else -> None.  #2037: the object may sit in a Markdown fence (```json ... ```)."""
@@ -726,7 +744,7 @@ def json_tool_call(body: str, schemas: dict) -> ToolCall | None:
         body = body[m.end():].rstrip()
         body = body[:-3] if body.endswith("```") else body
     try:
-        obj = json.loads(body)
+        obj = _strict_json(body)
     except ValueError:
         return None
     if not isinstance(obj, dict) or not isinstance(obj.get("name"), str) or obj["name"] not in schemas:
@@ -734,7 +752,7 @@ def json_tool_call(body: str, schemas: dict) -> ToolCall | None:
     args = obj.get("arguments", obj.get("parameters", {}))
     if isinstance(args, str):
         try:
-            args = json.loads(args)
+            args = _strict_json(args)
         except ValueError:
             return None
     if args is None:
@@ -879,7 +897,7 @@ class CallReader:
         if key in self.strings:
             return value
         try:
-            decoded = json.loads(value)
+            decoded = _strict_json(value)
         except (ValueError, RecursionError):
             return value
         # a parameter that may be a string or another type (str | None): the decoded value only when it is one of the
