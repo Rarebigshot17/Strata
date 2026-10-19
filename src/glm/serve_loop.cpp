@@ -154,7 +154,7 @@ public:
 
         if (best.pos == 0) {                          // nothing to continue: a new conversation
             if (!sessions_[cur_].tokens.empty()) {
-                park_live("a new conversation");
+                park_live("a new conversation", 0);
                 sessions_.emplace_back();
                 cur_ = sessions_.size() - 1;
             }
@@ -166,7 +166,10 @@ public:
         }
         const auto t0 = Clock::now();
         if (best.sess != cur_) {                      // another conversation: park this one, bring that one back
-            park_live("another conversation");
+            size_t keep = 0;                          // the checkpoints that one keeps
+            for (const auto& cp : sessions_[best.sess].cps)
+                if ((size_t) cp->pos <= best.pos) keep += cp->bytes;
+            park_live("another conversation", keep);
             cur_ = best.sess;
             const std::shared_ptr<Snapshot> p = std::move(sessions_[cur_].park);   // the engine holds it now
             ev_.restore(*p);
@@ -196,7 +199,7 @@ public:
         if (!enabled_ || opt_.max_checkpoints <= 0) return;
         Session& lv = sessions_[cur_];
         if (!lv.cps.empty() && (size_t) lv.cps.back()->pos >= lv.tokens.size()) return;
-        auto cp = save(false);
+        auto cp = save(false, 0);                      // the newest checkpoint: evict() drops everything else first
         if (!cp) return;
         lv.cps.push_back(std::move(cp));
         while ((int) lv.cps.size() > opt_.max_checkpoints) lv.cps.erase(lv.cps.begin());
@@ -236,14 +239,16 @@ private:
         }
     };
 
-    /// A snapshot of the live state with its logits; nullptr when it alone would not fit park_bytes (it would be
-    /// dropped at once, after a copy that takes seconds for a long conversation).
-    std::shared_ptr<Snapshot> save(bool full) {
+    /// A snapshot of the live state with its logits; nullptr when it would not fit park_bytes next to the `with`
+    /// bytes that evict() keeps as long as it keeps the snapshot (it would be dropped at once, after a copy that
+    /// takes seconds for a long conversation).
+    std::shared_ptr<Snapshot> save(bool full, size_t with) {
         const size_t est = ev_.snapshot_bytes(full);
         const size_t need = est + logits.size() * sizeof(float);
-        if (est > 0 && need > opt_.park_bytes) {
-            std::fprintf(stderr, "conversations: %s of %zu tokens would take %.1f MiB, more than --park-mib; not kept\n",
-                         full ? "a conversation" : "a checkpoint", sessions_[cur_].tokens.size(), mib(need));
+        if (est > 0 && need + with > opt_.park_bytes) {
+            std::fprintf(stderr, "conversations: %s of %zu tokens would take %.1f MiB (%.1f MiB with the checkpoints "
+                         "kept along), more than --park-mib; not kept\n", full ? "a conversation" : "a checkpoint",
+                         sessions_[cur_].tokens.size(), mib(need), mib(need + with));
             return nullptr;
         }
         auto s = ev_.snapshot(full);
@@ -255,12 +260,14 @@ private:
         return s;
     }
 
-    /// The live conversation becomes a parked one (or is dropped by evict() when it cannot be).
-    void park_live(const char* why) {
+    /// The live conversation becomes a parked one (or is dropped by evict() when it cannot be). It is the most
+    /// recently used parked one, so evict() keeps it as long as it fits with its own checkpoints and the `keep`
+    /// bytes of checkpoints the next live conversation holds.
+    void park_live(const char* why, size_t keep) {
         Session& lv = sessions_[cur_];
         if (!enabled_ || lv.tokens.empty() || logits.empty()) return;
         const auto t0 = Clock::now();
-        lv.park = save(true);
+        lv.park = save(true, lv.bytes() + keep);
         if (lv.park)
             std::fprintf(stderr, "conversations: parked %zu tokens (%.3f MiB, %.0f ms) for %s\n", lv.tokens.size(),
                          mib(lv.park->bytes), ms_since(t0), why);

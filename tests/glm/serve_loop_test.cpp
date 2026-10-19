@@ -325,6 +325,21 @@ int main() {
                "a conversation that cannot stay parked with its checkpoints is not parked, and drops no other", l);
     }
     {
+        // The same when switching back to a parked conversation, whose checkpoint becomes the live one's: A (70
+        // tokens: 8128 bytes parked, 9256 with its checkpoint) fits 10000 bytes, but not next to B's checkpoint
+        // (1128). Parking A would drop D (the least recently used), then A. A is not kept; D stays.
+        std::vector<int32_t> D = random_ids(5), B = random_ids(20), A = random_ids(70);
+        D[0] = 1, B[0] = 2, A[0] = 3;
+        const std::vector<int32_t> B2 = cat(cat(B, Conv::answer(B, 1)), {4, 5, 6});
+        const std::vector<int32_t> D2 = cat(cat(D, Conv::answer(D, 1)), {7, 8});
+        const auto l =
+            run_conv(gen_line(1, D) + gen_line(1, B) + gen_line(1, A) + gen_line(1, B2) + gen_line(1, D2), 10000, 1);
+        const auto r = replies(l);
+        expect(r.size() == 5 && r[3].resume == 20 && r[4].err.empty() && r[4].resume == 5 &&
+                   r[4].toks == Conv::answer(D2, 1),
+               "... nor when the conversation it gives way to keeps its checkpoints", l);
+    }
+    {
         // conversations taking turns at random (next turns, regenerated and edited turns, cp=, a shared system
         // prompt) under budgets from none to plenty: every answer is a fresh engine's, RESUME and DONE agree, and
         // no checkpoint is restored over another conversation's state
