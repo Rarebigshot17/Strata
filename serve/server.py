@@ -57,6 +57,7 @@ from serve.frontend import (CALL_END, ORDINARY_LT, OUTPUT_TAGS, THINK_END, ChatT
                             openai_to_messages, tool_choice_of, unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 from serve import runconfig  # noqa: E402
+from serve.runconfig import env_on  # noqa: E402
 from serve import logit_bias as bias_api  # noqa: E402
 from serve.cache_drop import gguf_shards  # noqa: E402
 from serve.winjob import contain  # noqa: E402
@@ -167,12 +168,6 @@ PP_SLACK = 3.0
 # for this long is ended - every step it reports in its log counts (the layers on each GPU, the expert cache, each
 # step of the warm-up: start_progress), and the bound runs from the last one - and the next request starts it again.
 # STRATA_ENGINE_READY_S overrides it (0 = wait for ever).
-
-
-def env_on(name: str) -> bool:
-    """A STRATA_ switch in the environment: off when unset, empty or "0", "false", "no", "off" (any case), the words
-    the other switches read as off (POST /unload's wait); any other value is on."""
-    return os.environ.get(name, "").strip().lower() not in ("", "0", "false", "no", "off")
 
 
 def _timeout_env(name: str, default: float) -> float | None:
@@ -1894,13 +1889,14 @@ class Service:
         return req
 
     def start_telemetry(self):
-        """The hardware sampler behind GET /metrics (serve/telemetry.py), recording this server's tok/s too."""
+        """The hardware sampler behind GET /metrics (serve/telemetry.py), recording this server's tok/s too, on the
+        cards the engine runs on (vram_cards: every card when the config names none)."""
         if getattr(self, "telemetry", None) is None:
             from serve.telemetry import Telemetry
             self.telemetry = Telemetry(extra=lambda: {"tok_s": self._tok_s(), "tok_s_mean": self._tok_s_mean(),
                                                     "prefill_tok_s_mean": self._prefill_tok_s_mean()},
                                        gpu_index=int(getattr(self, "gpu_index", 0) or 0),
-                                       gpu_indices=getattr(self, "gpu_indices", None))
+                                       gpu_indices=self.vram_cards())
             if getattr(self, "engine", None) is not None and hasattr(self.engine, "gpu_busy"):
                 # #1317: the quick frozen-engine check does not end an engine whose GPU is busy (a long prompt chunk on a
                 # slow card keeps the GPU at work while the host thread sleeps)

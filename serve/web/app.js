@@ -985,9 +985,16 @@ function samplingFields(s) {
   if (s.max) d.max_tokens = +s.max;
   return d;
 }
+function sharedDefaults(s) {
+  // the chat's fields, but thinking only when it is off: a shared "on" would make other apps' small calls think too
+  // (an Anthropic client's, which anthropic_thinking "on_request" keeps from thinking, #278)
+  const d = samplingFields(s);
+  if (d.reasoning_effort !== "none") delete d.reasoning_effort;
+  return d;
+}
 async function saveShared(on, s) {
   const r = await fetch("settings", {method: "POST", headers: headers(true),
-                                      body: JSON.stringify({defaults: on ? samplingFields(s) : null})});
+                                      body: JSON.stringify({defaults: on ? sharedDefaults(s) : null})});
   if (!r.ok) {
     let msg = `HTTP ${r.status}`;
     try { msg = (await r.json()).error.message || msg; } catch (e) { /* not json */ }

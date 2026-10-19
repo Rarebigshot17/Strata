@@ -43,6 +43,13 @@ EDITABLE = [
 SPEC = {k: kind for k, kind, _ in EDITABLE}
 
 
+def env_on(name: str) -> bool:
+    """A STRATA_ switch in the environment: off when unset, empty or "0", "false", "no", "off" (any case), the words
+    the other switches read as off (POST /unload's wait); any other value is on.  (Here so serve/mcp.py and the server
+    read their switches alike.)"""
+    return os.environ.get(name, "").strip().lower() not in ("", "0", "false", "no", "off")
+
+
 def _arg(cfg: dict, flag: str):
     a = cfg.get("args") if isinstance(cfg.get("args"), list) else []
     if flag in a[:-1]:

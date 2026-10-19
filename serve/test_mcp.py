@@ -233,6 +233,30 @@ class SecretsInTheAddress(unittest.TestCase):
             self.assertNotRegex(text, "sk-|alice")
 
 
+class DebugLines(unittest.TestCase):
+    """A stdio MCP server's log lines reach the server window with STRATA_DEBUG on; "0", "false", "no" and "off" are
+    off, as for the server's own STRATA_ switches."""
+
+    def lines(self, value):
+        from unittest import mock
+        from serve.mcp import StdioTransport
+        t = StdioTransport("fs", {"command": "x"})
+        t.proc = type("P", (), {"stderr": io.BytesIO(b"started\n")})()
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"STRATA_DEBUG": value}), contextlib.redirect_stdout(out):
+            t._read_stderr()
+        self.assertEqual(list(t.stderr), ["started"])     # kept for the error message either way
+        return out.getvalue()
+
+    def test_debug_on_and_off(self):
+        for value in ("1", "yes", "on"):
+            with self.subTest(value=value):
+                self.assertEqual(self.lines(value), "[mcp fs] started\n")
+        for value in ("", "0", "false", "No", "OFF"):
+            with self.subTest(value=value):
+                self.assertEqual(self.lines(value), "")
+
+
 class Config(unittest.TestCase):
     def test_both_spellings_and_the_file(self):
         with tempfile.TemporaryDirectory() as d:
