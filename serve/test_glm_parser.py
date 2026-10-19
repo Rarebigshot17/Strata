@@ -316,6 +316,20 @@ class CodeFences(Base):
             with self.subTest(body=body):
                 self.assertEqual(self.calls("ok</think>" + body + READ), [("read_file", READ_ARGS)])
 
+    def test_a_call_right_after_the_closing_fence(self):
+        # GLM's template writes a turn's content and then its call with no line break ("...```<tool_call>"), and the
+        # model writes its calls that way: the closing fence's line ends the code
+        for body in ("I'll save this:\n```bash\necho hi\n```", "~~~\nx\n~~~", "```\na\n  ````  ", "```\na\n```\n"):
+            with self.subTest(body=body):
+                self.assertEqual(self.parse("ok</think>" + body + READ, stream_tools=False),
+                                 [("reasoning", "ok"), ("content", body.rstrip("\n")),
+                                  ("tool_call", "read_file", READ_ARGS)])
+                self.assertEqual(self.calls("plan:\n" + body + READ + "</think>"), [("read_file", READ_ARGS)])
+        # a fence's opening line, or a line that does not close it, is still code
+        for body in ("```bash\necho hi\n```bash", "```\na\n``` x", "~~~\na\n```", "```"):
+            with self.subTest(body=body):
+                self.assertEqual(self.parse("ok</think>" + body + READ), [("reasoning", "ok"), ("content", body + READ)])
+
     def test_the_answer_starts_outside_code(self):
         # an open fence in the reasoning does not carry over into the answer
         self.assertEqual(self.calls("```\nnot closed</think>" + READ), [("read_file", READ_ARGS)])

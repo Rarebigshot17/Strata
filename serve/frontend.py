@@ -1068,7 +1068,12 @@ class OutputParser:
 
     def _in_code(self) -> bool:
         """The text so far leaves the next character inside a code fence or inline code."""
-        return bool(self.fence) or (self.ticks + self.line.count("`")) % 2 == 1
+        if self.fence:
+            # a line that closes the fence (its marker, then nothing but marker characters or blanks) ends the code
+            # before its newline: GLM writes a call right after the content, "...```<tool_call>"
+            s = self.line.lstrip()
+            return not s.startswith(self.fence * 3) or bool(s.strip(self.fence + " \t"))
+        return (self.ticks + self.line.count("`")) % 2 == 1
 
     def _in_code_at(self, text: str) -> bool:
         """The text so far followed by `text` (not gone out yet) leaves the next character in code."""
