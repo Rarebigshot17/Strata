@@ -1,5 +1,6 @@
-# Kubernetes (Prometheus Operator): Strata behind a Service whose port is named "http".
-# The API key lives in a Secret (key "key"), sent as a bearer token.
+# Kubernetes (Prometheus Operator): Strata behind a Service whose port (8101 in the container) is named "http".
+# GET /metrics answers Prometheus in the text format (docs/DETAILS.md#monitoring).
+# The API key lives in a Secret (key "key"), sent as a bearer token; without an API key, remove the authorization block.
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:

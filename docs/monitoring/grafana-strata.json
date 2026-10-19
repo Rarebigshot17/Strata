@@ -423,7 +423,7 @@
    "id": 8,
    "type": "timeseries",
    "title": "Prompt tokens served from the cache",
-   "description": "Strata: the prompt cache and parked conversations; vLLM: its prefix-cache blocks.",
+   "description": "Strata: prompt tokens the engine resumed from a parked conversation or a checkpoint instead of reading them again; vLLM: its prefix-cache blocks.",
    "datasource": {
     "type": "prometheus",
     "uid": "${DS_PROMETHEUS}"
@@ -466,52 +466,6 @@
    }
   },
   {
-   "id": 9,
-   "type": "timeseries",
-   "title": "MTP drafts accepted",
-   "description": "",
-   "datasource": {
-    "type": "prometheus",
-    "uid": "${DS_PROMETHEUS}"
-   },
-   "gridPos": {
-    "h": 7,
-    "w": 12,
-    "x": 12,
-    "y": 22
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "${DS_PROMETHEUS}"
-     },
-     "expr": "sum by (model_name) (rate(vllm:spec_decode_num_accepted_tokens_total{model_name=~\"$model\",instance=~\"$instance\"}[15m])) / sum by (model_name) (rate(vllm:spec_decode_num_draft_tokens_total{model_name=~\"$model\",instance=~\"$instance\"}[15m]))",
-     "legendFormat": "{{model_name}}"
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "unit": "percentunit",
-     "custom": {
-      "fillOpacity": 10,
-      "showPoints": "never"
-     }
-    },
-    "overrides": []
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom"
-    },
-    "tooltip": {
-     "mode": "multi"
-    }
-   }
-  },
-  {
    "id": 10,
    "type": "timeseries",
    "title": "Requests finished per minute",
@@ -523,8 +477,8 @@
    "gridPos": {
     "h": 7,
     "w": 12,
-    "x": 0,
-    "y": 29
+    "x": 12,
+    "y": 22
    },
    "targets": [
     {
@@ -568,8 +522,8 @@
    },
    "gridPos": {
     "h": 7,
-    "w": 12,
-    "x": 12,
+    "w": 24,
+    "x": 0,
     "y": 29
    },
    "targets": [
@@ -666,55 +620,6 @@
    }
   },
   {
-   "id": 14,
-   "type": "timeseries",
-   "title": "Batch slots by state",
-   "description": "\"parallel\": N / --batch only.",
-   "datasource": {
-    "type": "prometheus",
-    "uid": "${DS_PROMETHEUS}"
-   },
-   "gridPos": {
-    "h": 7,
-    "w": 12,
-    "x": 12,
-    "y": 37
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "${DS_PROMETHEUS}"
-     },
-     "expr": "sum by (state) (strata:live_slots{model_name=~\"$model\",instance=~\"$instance\"})",
-     "legendFormat": "{{state}}"
-    }
-   ],
-   "fieldConfig": {
-    "defaults": {
-     "unit": "none",
-     "custom": {
-      "fillOpacity": 60,
-      "showPoints": "never",
-      "stacking": {
-       "mode": "normal"
-      }
-     }
-    },
-    "overrides": []
-   },
-   "options": {
-    "legend": {
-     "displayMode": "list",
-     "placement": "bottom"
-    },
-    "tooltip": {
-     "mode": "multi"
-    }
-   }
-  },
-  {
    "id": 15,
    "type": "timeseries",
    "title": "Engine rates",
@@ -726,8 +631,8 @@
    "gridPos": {
     "h": 7,
     "w": 12,
-    "x": 0,
-    "y": 44
+    "x": 12,
+    "y": 37
    },
    "targets": [
     {
@@ -773,7 +678,7 @@
    "id": 16,
    "type": "timeseries",
    "title": "Expert cache hit rate (last request)",
-   "description": "Experts found in VRAM. Below ~90 % the CPU and the PCIe link compute the rest and decode slows down.",
+   "description": "Experts found in the VRAM expert cache while the last reply was written. The others are computed on the CPU from RAM.",
    "datasource": {
     "type": "prometheus",
     "uid": "${DS_PROMETHEUS}"
@@ -781,7 +686,7 @@
    "gridPos": {
     "h": 7,
     "w": 12,
-    "x": 12,
+    "x": 0,
     "y": 44
    },
    "targets": [
@@ -819,7 +724,7 @@
    "id": 17,
    "type": "timeseries",
    "title": "Engine time: prompts / decoding",
-   "description": "Seconds of work per second: 1 = busy all the time (more with requests running together).",
+   "description": "Seconds of engine work per second: 1 = busy all the time (one request runs at a time).",
    "datasource": {
     "type": "prometheus",
     "uid": "${DS_PROMETHEUS}"
@@ -827,8 +732,8 @@
    "gridPos": {
     "h": 7,
     "w": 12,
-    "x": 0,
-    "y": 51
+    "x": 12,
+    "y": 44
    },
    "targets": [
     {
@@ -885,7 +790,7 @@
    "gridPos": {
     "h": 7,
     "w": 12,
-    "x": 12,
+    "x": 0,
     "y": 51
    },
    "targets": [
@@ -931,8 +836,8 @@
    "gridPos": {
     "h": 7,
     "w": 12,
-    "x": 0,
-    "y": 58
+    "x": 12,
+    "y": 51
    },
    "targets": [
     {
@@ -985,8 +890,8 @@
    },
    "gridPos": {
     "h": 7,
-    "w": 12,
-    "x": 12,
+    "w": 24,
+    "x": 0,
     "y": 58
    },
    "targets": [

@@ -1,12 +1,16 @@
-# Scrape a Strata server's GET /metrics (Prometheus text, vLLM's names; docs/DETAILS.md).
-# Prometheus asks for text/plain, so it gets the text format; the Monitor tab keeps the JSON.
+# Scrape a Strata server's GET /metrics: the Prometheus text format with vLLM's metric names and Strata's own
+# strata:* names (serve/prometheus.py; docs/DETAILS.md#monitoring). Prometheus asks for text/plain, so it gets the
+# text format; the Monitor tab and curl without an Accept header get the JSON.
 scrape_configs:
   - job_name: strata
     metrics_path: /metrics
     scrape_interval: 15s
-    # with an API key (strata-<model>.json "api_key" or --api-key): sent as a bearer token
+    # Only needed when the server has an API key (the run config's "api_key", --api-key or STRATA_API_KEY):
+    # it is sent as a bearer token. Without a key, remove the authorization block.
     authorization:
       type: Bearer
       credentials_file: /etc/prometheus/strata-api-key
     static_configs:
-      - targets: ["127.0.0.1:8080"]
+      # Strata's port is 8101. A Prometheus on another machine needs the server to listen beyond 127.0.0.1
+      # ("host": "0.0.0.0" in the run config, with an API key), and the address it reaches it at.
+      - targets: ["127.0.0.1:8101"]
