@@ -424,6 +424,7 @@ class ConvCacheLog:
 
     def __init__(self):
         self.key, self.pos = None, 0
+        self.lock = threading.Lock()                    # /metrics polls on every request thread: one read at a time
         self.reset()
 
     def reset(self):
@@ -432,6 +433,10 @@ class ConvCacheLog:
 
     def poll(self, path, start) -> dict:
         """The state after the log's new lines; `start` is where the engine's current run began in it."""
+        with self.lock:                                 # two at once counted the same lines twice
+            return self._poll(path, start)
+
+    def _poll(self, path, start) -> dict:
         if not path or start is None:
             return dict(self.state)
         if self.key != (path, start):                   # another start of the engine: it keeps nothing from before
