@@ -2588,8 +2588,9 @@ def completion_chunks(svc: Service, req: dict, ids, max_new, cancel):
 
 
 def usage_chunk(req: dict, last: dict | None) -> dict | None:
-    """OpenAI's stream_options.include_usage: one more chunk after the last, with no choices and the request's usage,
-    for clients that read it there (the last chunk carries the usage too, as llama.cpp's server sends it)."""
+    """OpenAI's stream_options.include_usage: one more chunk after the last, with no choices and the request's usage.
+    The last chunk then goes without it, as OpenAI and llama.cpp send it: a client that adds up every chunk's usage
+    (LangChain's stream_usage) counted it twice.  Without the option the last chunk carries it, as before."""
     opts = req.get("stream_options")
     if not isinstance(opts, dict) or not opts.get("include_usage") or not last or "usage" not in last:
         return None
@@ -3619,15 +3620,16 @@ def make_handler(svc: Service):
                 return self._json(200, openai_collect(chunks, unfinished))
             self._sse()
             try:
-                last = None
+                tail = None
                 for c in chunks:
                     if c is None:
                         self.wfile.write(b": keep-alive\n\n")      # an SSE comment: clients ignore it
                     else:
+                        if "usage" in c and (tail := usage_chunk(req, c)) is not None:
+                            c = {k: v for k, v in c.items() if k != "usage"}   # include_usage: in its own chunk only
                         self.wfile.write(b"data: " + json.dumps(c, ensure_ascii=False).encode() + b"\n\n")
-                        last = c
                     self.wfile.flush()
-                if (tail := usage_chunk(req, last)) is not None:
+                if tail is not None:
                     self.wfile.write(b"data: " + json.dumps(tail, ensure_ascii=False).encode() + b"\n\n")
                 self.wfile.write(b"data: [DONE]\n\n")
             except OSError:
@@ -3666,15 +3668,16 @@ def make_handler(svc: Service):
                 return self._json(200, completion_collect(chunks))
             self._sse()
             try:
-                last = None
+                tail = None
                 for c in chunks:
                     if c is None:
                         self.wfile.write(b": keep-alive\n\n")
                     else:
+                        if "usage" in c and (tail := usage_chunk(req, c)) is not None:
+                            c = {k: v for k, v in c.items() if k != "usage"}   # include_usage: in its own chunk only
                         self.wfile.write(b"data: " + json.dumps(c, ensure_ascii=False).encode() + b"\n\n")
-                        last = c
                     self.wfile.flush()
-                if (tail := usage_chunk(req, last)) is not None:
+                if tail is not None:
                     self.wfile.write(b"data: " + json.dumps(tail, ensure_ascii=False).encode() + b"\n\n")
                 self.wfile.write(b"data: [DONE]\n\n")
             except OSError:
