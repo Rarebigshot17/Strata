@@ -1123,6 +1123,8 @@ class Detokenizer:
             return text
         # a tag's text comes last: what comes before it is a character split across the tokens before it
         tag = self.tags.get(t, "")
+        if not text.endswith(tag):
+            tag = ""
         return text[:len(text) - len(tag)].replace("<", ORDINARY_LT) + tag
 
     def _push(self, t: int) -> str:
