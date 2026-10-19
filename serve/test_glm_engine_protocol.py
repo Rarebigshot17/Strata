@@ -761,6 +761,18 @@ class MainTests(unittest.TestCase):
         self.assertIn("the engine did not start", r.stderr)
         self.assertNotIn("Traceback", r.stderr + r.stdout)
 
+    def test_the_split_line_says_how_the_engine_splits(self):
+        # strata-glm with no --split shares the layers by each card's free VRAM at start (cudaMemGetInfo), each layer
+        # weighed by its weights and its attention cache; the line printed before the start says so
+        for extra, words in (({}, "in proportion to each card's free VRAM at start"),
+                             ({"split": [24, 12]}, "in the shares --split 24,12")):
+            r = subprocess.run([sys.executable, "-m", "serve.server", "--engine", "strata", "--config",
+                                str(self.config(gpu=[0, 1], **extra)), "--port", str(free_port())],
+                               cwd=ROOT, capture_output=True, text=True, timeout=120)
+            line = next((x for x in r.stdout.splitlines() if x.startswith("[strata] GPUs [0, 1]")), r.stdout)
+            self.assertIn("the layers are split over them in this order, by size (weights and attention cache) "
+                          + words + ", the output head on the last", line)
+
     def test_tokenizer_flag_is_gone(self):
         r = subprocess.run([sys.executable, "-m", "serve.server", "--tokenizer", "pack/full/tokenizer"], cwd=ROOT,
                            capture_output=True, text=True, timeout=60)

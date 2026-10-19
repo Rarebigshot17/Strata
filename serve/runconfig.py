@@ -4,8 +4,8 @@ A short list of documented keys can be read and changed from Strata's own page (
 else in the file - the keys setup writes, the network and security keys (host, api_key, cors_origins,
 trusted_origins, allowed_hosts), the MCP servers and before_load (which run programs), sampling keys not listed
 here - is kept as it is: a change touches only the keys it names (as setup run again keeps the user's keys, #629).
-The earlier file is kept as strata-<model>.json.bak.  The server reads the config when it starts, so a change is
-used from the next start on.
+The earlier file is kept as strata-<model>.json.bak (beside the file a linked config points at).  The server reads
+the config when it starts, so a change is used from the next start on.
 """
 from __future__ import annotations
 
@@ -169,8 +169,10 @@ def apply(cfg: dict, changes: dict) -> tuple[dict, list[str]]:
 
 
 def save(path: str | Path, cfg: dict) -> Path:
-    """The config written whole (a temporary file moved over the old one), the earlier one kept as <name>.bak."""
-    path = Path(path)
+    """The config written whole (a temporary file moved over the old one), the earlier one kept as <name>.bak.  A
+    config that is a link (the Docker image links it to the /data volume, #1244) is written where it points, with its
+    .bak beside it there: moving a file over the link would replace the link, and the change would stay behind."""
+    path = Path(os.path.realpath(path))
     try:
         text = json.dumps(cfg, indent=1, allow_nan=False)                # standard JSON only
     except ValueError:

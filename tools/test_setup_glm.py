@@ -96,12 +96,14 @@ def quiet(fn, *args, **kw):
 
 
 def install(argv, ram=OWNER_RAM, smi=OWNER_SMI, listing=LISTING, configs=(), env=None, free=10000.0,
-            cpu=("Test CPU", True), prepare=None, others=(), real_start=False):
+            cpu=("Test CPU", True), prepare=None, others=(), real_start=False, nvcc=(None, None)):
     """setup.main() with `argv` in a temporary Strata folder, everything outside it mocked: nvidia-smi says `smi`, the
-    PC has `ram` GiB, a `cpu` (name, AVX2) and `free` GB of disk, the Hub lists `listing`, a download writes an empty
-    file, the engine build writes build/strata-glm and the start is recorded (`real_start`: setup's own start() runs,
-    and the server command it would run is recorded).  `prepare(base)` makes files beside the Strata folder first,
-    "{base}" in `argv` and in `configs` is that folder, and `others` are the earlier GLM Strata folders there.
+    PC has `ram` GiB, a `cpu` (name, AVX2), `free` GB of disk and the CUDA toolkit `nvcc` ((path, version) as
+    find_nvcc returns it, or find_nvcc itself; none by default, so setup would install CUDA 13.0), the Hub lists
+    `listing`, a download writes an empty file, the engine build writes build/strata-glm and the start is recorded
+    (`real_start`: setup's own start() runs, and the server command it would run is recorded).  `prepare(base)` makes
+    files beside the Strata folder first, "{base}" in `argv` and in `configs` is that folder, and `others` are the
+    earlier GLM Strata folders there.
     Returns (exit code, output, {config name: config}, {script name: text}, a record of the downloads, builds, starts,
     server commands, engine updates, Hub requests and the disks --check measured)."""
     with tempfile.TemporaryDirectory() as d:
@@ -126,7 +128,7 @@ def install(argv, ram=OWNER_RAM, smi=OWNER_SMI, listing=LISTING, configs=(), env
             dst.write_bytes(b"")
             setup.mark(dst)
 
-        def build_engine(archs, yes, llama, force=False):
+        def build_engine(archs, yes, llama, force=False, driver=None):
             rec["builds"].append(sorted(archs))
             (root / "build").mkdir(exist_ok=True)
             (root / "build" / "strata-glm").write_bytes(b"")
@@ -142,7 +144,10 @@ def install(argv, ram=OWNER_RAM, smi=OWNER_SMI, listing=LISTING, configs=(), env
 
         patches = [mock.patch.object(setup, "ROOT", root), mock.patch.object(setup, "BUILD_DIR", root / "build"),
                    mock.patch.object(setup, "out", return_value=smi),
-                   mock.patch.object(setup, "ram_gb", return_value=ram),
+                   mock.patch.object(setup, "ram_gib", return_value=ram),
+                   mock.patch.object(setup, "find_nvcc", nvcc if callable(nvcc) else    # one toolkit
+                                     lambda below=None: nvcc if not below or not nvcc[0] or nvcc[1] < below
+                                     else (None, None)),
                    mock.patch.object(setup, "cpu_info", return_value=cpu),
                    mock.patch.object(setup, "free_gb", return_value=free),
                    mock.patch.object(setup.shutil, "disk_usage", disk_usage),
@@ -155,7 +160,8 @@ def install(argv, ram=OWNER_RAM, smi=OWNER_SMI, listing=LISTING, configs=(), env
                    mock.patch.object(setup, "python_packages", lambda: None),
                    mock.patch.object(setup, "get_llama_cpp", return_value=root / "third_party" / "llama.cpp"),
                    mock.patch.object(setup, "build_engine", build_engine),
-                   mock.patch.object(setup, "update_installed_engine", lambda force=False: rec["updates"].append(force)),
+                   mock.patch.object(setup, "update_installed_engine",
+                                     lambda force=False, yes=False: rec["updates"].append(force)),
                    mock.patch.object(setup, "exec_server", call),
                    mock.patch.object(setup.time, "sleep", lambda s: None),
                    mock.patch.object(sys, "argv", ["setup.py", *argv]),
@@ -194,9 +200,28 @@ class ModelByRam(unittest.TestCase):
         self.assertEqual(setup.park_mib("IQ4_XS", 251.0), 8192)
 
     def test_too_little_ram_for_either(self):
-        self.assertEqual(setup.model_fit("UD-IQ3_XXS", 125.0), "no")          # 128 GB
-        self.assertEqual(setup.recommended_model(125.0), "UD-IQ3_XXS")        # the smallest: nothing fits
+        self.assertEqual(setup.model_fit("UD-IQ3_XXS", 94.0), "no")           # 96 GB
+        self.assertEqual(setup.recommended_model(94.0), "UD-IQ3_XXS")         # the smallest: nothing fits
         self.assertIn("do not fit", setup.fit_text("IQ4_XS", 125.0))
+
+    def test_ram_and_experts_are_compared_in_gib(self):
+        # MemTotal is in KiB: 197132288 kB is 188 GiB, what a PC with 192 GB installed reports.  The experts' sizes
+        # are decimal GB (117e9 bytes at 3-bit, 162e9 at 4-bit): 109 and 151 GiB
+        with mock.patch("builtins.open", mock.mock_open(read_data="MemTotal:       197132288 kB\n")):
+            self.assertAlmostEqual(setup.ram_gib(), 188.0, places=3)
+        self.assertAlmostEqual(setup.ram_left("UD-IQ3_XXS", 188.0), 188.0 - 117e9 / 2**30, places=6)
+        self.assertAlmostEqual(setup.ram_left("IQ4_XS", 188.0), 188.0 - 162e9 / 2**30, places=6)
+        self.assertEqual(setup.fit_text("UD-IQ3_XXS", OWNER_RAM), "~79 GiB of RAM left beside them")
+        self.assertEqual(setup.fit_text("IQ4_XS", OWNER_RAM), "only ~37 GiB of RAM left beside them")
+
+    def test_the_minimum_is_the_experts_and_12_gib(self):
+        self.assertEqual(setup.model_fit("UD-IQ3_XXS", 125.0), "tight")       # 128 GB: 16 GiB beside the experts
+        self.assertEqual(setup.model_fit("UD-IQ3_XXS", 121.5), "tight")
+        self.assertEqual(setup.model_fit("UD-IQ3_XXS", 120.5), "no")
+        self.assertEqual(setup.model_fit("IQ4_XS", 163.0), "tight")
+        self.assertEqual(setup.model_fit("IQ4_XS", 162.5), "no")
+        self.assertEqual(setup.model_fit("IQ4_XS", 191.0), "fits")
+        self.assertEqual(setup.model_fit("IQ4_XS", 190.5), "tight")
 
     def test_yes_installs_the_recommended_size(self):
         code, out, cfgs, _, rec = install(["--yes", "--no-start"])
@@ -209,19 +234,20 @@ class ModelByRam(unittest.TestCase):
     def test_the_4_bit_on_192_gb_warns_and_parks_less(self):
         code, out, cfgs, _, _ = install(["--model", "IQ4_XS", "--yes", "--no-start"])
         self.assertEqual(code, 0, out)
-        self.assertIn("leaves only ~26 GB of RAM beside its experts", out)
+        self.assertIn("leaves only ~37 GiB of RAM beside its experts", out)
         self.assertIn("--park-mib 4096", out)
         args = cfgs["strata-glm-iq4_xs.json"]["args"]
         self.assertEqual(args[args.index("--park-mib") + 1], "4096")
 
     def test_a_size_that_does_not_fit_needs_consent(self):
-        code, out, cfgs, _, _ = install(["--yes", "--no-start"], ram=125.0)   # --yes alone: no consent
+        code, out, cfgs, _, _ = install(["--yes", "--no-start"], ram=94.0)    # --yes alone: no consent
         self.assertEqual(code, 1)
-        self.assertIn("do not fit", out)
+        self.assertIn("UD-IQ3_XXS's experts (~109 GiB) do not fit beside Linux and the server in this PC's 94 GiB", out)
+        self.assertIn("UD-IQ3_XXS needs about 121 GiB of RAM; this PC has 94 GiB", out)
         self.assertEqual(cfgs, {})
-        code, out, cfgs, _, _ = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start"], ram=125.0)
+        code, out, cfgs, _, _ = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start"], ram=94.0)
         self.assertEqual(code, 0, out)                                        # --model is the consent
-        self.assertIn("installing UD-IQ3_XXS with 125 GB of RAM, as you chose", out)
+        self.assertIn("installing UD-IQ3_XXS with 94 GiB of RAM, as you chose", out)
 
 
 class Listing(unittest.TestCase):
@@ -318,14 +344,17 @@ class Listing(unittest.TestCase):
         argv = ["--model", "IQ4_XS", "--context", "131072", "--no-start"]
         code, out, cfgs, _, rec = install(argv, listing=listing)                 # asked, and no answer
         self.assertEqual(code, 1)
-        self.assertIn("UD-Q4_K_XL (200 GB, about 191 GB of experts in RAM: more than this PC's 188 GB)", out)
-        self.assertIn("UD-Q4_K_XL's experts do not fit beside Linux and the server in this PC's 188 GB", out)
+        # 200 GB of files at the 4-bit's share of experts (162 of 170): 190.6e9 bytes, 177.5 GiB of the 188 GiB
+        self.assertIn("UD-Q4_K_XL (200 GB, about 177 GiB of experts in RAM: ~11 GiB of RAM left beside them)", out)
+        self.assertIn("UD-Q4_K_XL's experts do not fit beside Linux and the server in this PC's 188 GiB", out)
+        out = install(argv, listing=listing, ram=170.0)[1]                      # less RAM than the experts
+        self.assertIn("about 177 GiB of experts in RAM: more than this PC's 170 GiB)", out)
         self.assertEqual((cfgs, rec["downloads"], rec["builds"]), ({}, [], []))
         code, out, cfgs, _, rec = install(argv + ["--yes"], listing=listing)     # --model is the consent
         self.assertEqual(code, 0, out)
         self.assertEqual(len(rec["downloads"]), 4)
-        # on 230 GB the 4-bit size fits well, but its fallback leaves less than 40 GB: less RAM for parking
-        code, out, cfgs, _, _ = install(argv + ["--yes"], listing=listing, ram=230.0)
+        # on 210 GiB the 4-bit size fits well, but its fallback leaves less than 40 GiB: less RAM for parking
+        code, out, cfgs, _, _ = install(argv + ["--yes"], listing=listing, ram=210.0)
         self.assertEqual(code, 0, out)
         self.assertNotIn("do not fit", out)
         args = cfgs["strata-glm-iq4_xs.json"]["args"]
@@ -455,7 +484,52 @@ class Gpus(unittest.TestCase):
     def test_an_old_driver_stops(self):
         code, out, _, _, _ = install(["--yes", "--no-start"], smi=OWNER_SMI.replace("580.95.05", "570.172.08"))
         self.assertEqual(code, 1)
-        self.assertIn("the NVIDIA driver is too old (570.172.08; 580 or newer", out)
+        self.assertIn("the NVIDIA driver is too old (570.172.08; 580 or newer is needed: setup builds the engine with "
+                      "CUDA 13 when no CUDA 12 toolkit is installed)", out)
+        self.assertIn("or install a CUDA 12 toolkit, which setup builds with on a driver older than 580 (its engine "
+                      "runs on 525 or newer), and run this again", out)
+
+    def test_the_driver_is_the_one_the_toolkit_needs(self):
+        """CUDA 13 needs driver 580 or newer, CUDA 12.x 525 or newer (its minor version compatibility): setup builds
+        with an installed toolkit of 12.0 or newer, so a CUDA 12 toolkit takes an older driver."""
+        cuda12 = ("/usr/local/cuda-12.4/bin/nvcc", (12, 4))
+        code, out, cfgs, _, _ = install(["--yes", "--no-start"], smi=OWNER_SMI.replace("580.95.05", "550.54.14"),
+                                        nvcc=cuda12)
+        self.assertEqual(code, 0, out)
+        self.assertIn("driver 550.54.14", out)
+        code, out, _, _, _ = install(["--yes", "--no-start"], smi=OWNER_SMI.replace("580.95.05", "520.61.05"),
+                                     nvcc=cuda12)
+        self.assertEqual(code, 1)
+        self.assertIn("the NVIDIA driver is too old (520.61.05; 525 or newer is needed: the engine is built with "
+                      "CUDA 12.4)", out)
+        cuda13 = ("/usr/local/cuda-13.0/bin/nvcc", (13, 0))
+        code, out, _, _, _ = install(["--yes", "--no-start"], smi=OWNER_SMI.replace("580.95.05", "570.172.08"),
+                                     nvcc=cuda13)
+        self.assertEqual(code, 1)
+        self.assertIn("580 or newer is needed: setup builds the engine with CUDA 13 when no CUDA 12 toolkit is "
+                      "installed", out)
+        # both toolkits: a driver older than 580 cannot run a CUDA 13 engine, so setup takes CUDA 12 without being told
+        code, out, _, _, _ = install(["--yes", "--no-start"], smi=OWNER_SMI.replace("580.95.05", "570.172.08"),
+                                     nvcc=lambda below=None: cuda12 if below == (13, 0) else cuda13)
+        self.assertEqual(code, 0, out)
+        self.assertIn("driver 570.172.08", out)
+        code, out, _, _, _ = install(["--check"], smi=OWNER_SMI.replace("580.95.05", "550.54.14"), nvcc=cuda12)
+        self.assertEqual(code, 0, out)
+
+    def test_the_toolkit_of_a_current_engine_counts(self):
+        with tempfile.TemporaryDirectory() as d:
+            build = Path(d) / "build"
+            build.mkdir()
+            (build / setup.EXE).write_bytes(b"")
+            (build / "BUILD.json").write_text(json.dumps({"src": "h", "archs": [86], "nvcc": "/cuda-12.6/bin/nvcc"}))
+            with mock.patch.object(setup, "BUILD_DIR", build), mock.patch.object(setup, "source_hash", lambda: "h"), \
+                    mock.patch.object(setup, "out", return_value="Cuda compilation tools, release 12.6, V12.6.85"), \
+                    mock.patch.object(setup, "find_nvcc", return_value=("/cuda-13.0/bin/nvcc", (13, 0))):
+                self.assertEqual(setup.build_cuda([86]), (12, 6))              # it is not compiled again
+                self.assertEqual(setup.build_cuda([86], rebuild=True), (13, 0))   # --build: the newest toolkit
+                self.assertEqual(setup.build_cuda([86, 89]), (13, 0))         # a new card: compiled again
+        self.assertEqual((setup.min_driver((12, 4)), setup.min_driver((13, 0)), setup.min_driver((13, 2))),
+                         (525, 580, 580))
 
     def test_no_gpu_stops(self):
         code, out, _, _, _ = install(["--yes", "--no-start"], smi="")
@@ -806,6 +880,21 @@ class RunScriptAndStart(unittest.TestCase):
                       f"{cfg_path} --port 8101 --open", text)
         self.assertNotIn("--open", setup.write_run_script("glm-ud-iq3_xxs", cfg_path, 8101, False).read_text())
 
+    def test_a_linked_config_is_given_to_the_server_where_it_points(self):
+        """#1244: in the Docker image the config is a link into the /data volume.  The server gets the real file, so
+        the Settings view's .bak and the Chat settings it shares with other apps (<config>.shared-settings.json) are
+        kept beside it on the volume, not in the container."""
+        real = self.root / "data" / "strata-glm-ud-iq3_xxs.json"
+        real.parent.mkdir()
+        real.write_text(json.dumps(self.cfg), encoding="utf-8")
+        link = self.root / "strata-glm-ud-iq3_xxs.json"
+        link.symlink_to(real)
+        cmd = setup.server_command(link, 8101, False)
+        self.assertEqual(cmd[cmd.index("--config") + 1], os.path.realpath(real))
+        plain = self.root / "strata-glm-iq4_xs.json"
+        cmd = setup.server_command(plain, 8101, False)
+        self.assertEqual(cmd[cmd.index("--config") + 1], str(plain))       # a file that is no link: as it is
+
     def start(self, port=None, gpu=None, keep=None, cfg=None):
         p = self.root / "strata-glm-ud-iq3_xxs.json"
         p.write_text(json.dumps({**self.cfg, **(cfg or {})}), encoding="utf-8")
@@ -998,7 +1087,11 @@ class Check(unittest.TestCase):
         code, out, cfgs, _, rec = install(["--check"])
         self.assertEqual(code, 0, out)
         self.assertIn("This PC can run GLM-5.3-Flash (UD-IQ3_XXS recommended)", out)
-        self.assertIn("IQ4_XS     4-bit: ~162 GB of experts in RAM - fits, with little RAM to spare", out)
+        self.assertIn("RAM: 188 GiB", out)
+        self.assertIn("UD-IQ3_XXS 3-bit: ~109 GiB of experts in RAM - fits (~79 GiB of RAM left beside them); "
+                      "download ~120 GB", out)
+        self.assertIn("IQ4_XS     4-bit: ~151 GiB of experts in RAM - fits, with little RAM to spare (only ~37 GiB of "
+                      "RAM left beside them); download ~170 GB", out)
         self.assertEqual((cfgs, rec["downloads"], rec["builds"], rec["urls"]), ({}, [], [], []))
         self.assertFalse((Path(rec["base"]) / "Strata-GLM-data").exists())
         self.assertFalse((Path(rec["base"]) / "settings.json").exists())
@@ -1013,10 +1106,17 @@ class Check(unittest.TestCase):
         _, _, _, _, rec = install(["--check", "--models-dir", "{base}/elsewhere/models"])
         self.assertEqual(rec["disks"], [Path(rec["base"])])                  # the drive a new folder would be on
 
+    def test_the_bug_report_form_names_setups_minimum(self):
+        form = (ROOT / ".github" / "ISSUE_TEMPLATE" / "bug_report.yml").read_text(encoding="utf-8")
+        least = {m: f"{setup.experts_gib(m) + setup.RAM_LEFT_MIN_GIB:.0f} GiB" for m in setup.MODELS}
+        self.assertEqual(least, {"UD-IQ3_XXS": "121 GiB", "IQ4_XS": "163 GiB"})
+        for m in setup.MODELS:
+            self.assertIn(least[m], form)
+
     def test_check_on_too_little_ram(self):
         code, out, _, _, _ = install(["--check"], ram=60.0)
         self.assertEqual(code, 1)
-        self.assertIn("neither size fits 60 GB of RAM", out)
+        self.assertIn("neither size fits 60 GiB of RAM", out)
 
 
 if __name__ == "__main__":

@@ -42,8 +42,12 @@ are done.
 ## While installing
 
 **"no NVIDIA GPU found (nvidia-smi did not answer)"** or **"the NVIDIA driver is too old"**.
-Install or update the NVIDIA driver (580 or newer; on Ubuntu `sudo ubuntu-drivers install`), restart the PC and run
-`./setup.sh` again. Everything already done is kept.
+Install or update the NVIDIA driver, restart the PC and run `./setup.sh` again (on Ubuntu `sudo ubuntu-drivers
+install`). Everything already done is kept. The driver setup needs is the one the CUDA toolkit it builds the engine
+with needs: 580 or newer for CUDA 13 (the one setup installs when there is none), 525 or newer for a CUDA 12 toolkit
+you have installed. With a driver from 525 to 579, setup builds with an installed CUDA 12 toolkit, also when a CUDA
+13 one is installed beside it, and it never installs CUDA 13 for that driver: install a CUDA 12 toolkit, or update
+the driver.
 
 **"GPU N (...) cannot be used: not supported - compute capability X"**.
 strata-glm needs compute capability 7.5 or newer (RTX 20 series and newer). This stops setup when `--gpu` or
@@ -72,9 +76,9 @@ a CUDA toolkit and a newer Linux that users of the upstream project reported (no
   your glibc (upstream issue #601). Use another toolkit: `STRATA_NVCC=/usr/local/cuda-12.8/bin/nvcc ./setup.sh`
   makes setup use that `nvcc` and no other.
 
-Setup takes the newest toolkit it finds; `STRATA_NVCC=<path to nvcc>` picks another. `./setup.sh --build`
-compiles the engine again in the same `build` folder; to build from scratch, delete the `build` folder and run
-setup again.
+Setup takes the newest toolkit it finds (the newest CUDA 12 one with a driver older than 580);
+`STRATA_NVCC=<path to nvcc>` picks another. `./setup.sh --build` compiles the engine again in the same `build`
+folder; to build from scratch, delete the `build` folder and run setup again.
 
 **The download stopped, or a file is wrong.**
 Run `./setup.sh` again: downloads continue where they stopped. What setup says and does:
@@ -96,14 +100,14 @@ The model files are about 120 GB (3-bit) or 170 GB (4-bit), calculated from the 
 real total from the repository's listing before it downloads. Put them on a bigger drive: `--models-dir <folder>`,
 or `--data-dir <folder>`, which is remembered for every Strata folder on this PC.
 
-**"<size>'s experts (~N GB) do not fit beside Linux and the server in this PC's N GB of RAM"**.
-Every routed expert stays in RAM: about 117 GB at 3-bit and about 162 GB at 4-bit (calculated from the model's
-shapes, not measured). Setup subtracts that from the RAM Linux reports and prints what is left beside the experts.
-On a PC with 192 GB that is about 75 GB for the 3-bit model and about 30 GB for the 4-bit one (a few GB less, since
-Linux reports a little less than the installed RAM). Below 40 GB left setup warns and gives parked conversations
-4096 MiB instead of 8192 (`--park-mib 4096`). Below 12 GB it asks "Install it anyway?" and stops unless you answer
-`y` (or pass `--model <size> --yes`): the OS would then read experts from the disk while it answers. Choose the
-3-bit model, or add RAM.
+**"<size>'s experts (~N GiB) do not fit beside Linux and the server in this PC's N GiB of RAM"**.
+Every routed expert stays in RAM: about 117 GB (109 GiB) at 3-bit and about 162 GB (151 GiB) at 4-bit (calculated
+from the model's shapes, not measured). Setup subtracts that from the RAM Linux reports, in GiB as `free -g` counts
+it, and prints what is left beside the experts. On a PC with 192 GB installed Linux reports about 188 GiB: that
+leaves about 79 GiB for the 3-bit model and about 37 GiB for the 4-bit one. Below 40 GiB left setup warns and gives
+parked conversations 4096 MiB instead of 8192 (`--park-mib 4096`). Below 12 GiB it asks "Install it anyway?" and
+stops unless you answer `y` (or pass `--model <size> --yes`): the OS would then read experts from the disk while it
+answers. Choose the 3-bit model, or add RAM.
 
 **`./update.sh` says "git pull did not succeed"**.
 A file you changed in the Strata folder stops the pull. `git status` lists them; put your changes aside

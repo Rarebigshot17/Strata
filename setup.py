@@ -52,7 +52,8 @@ REPO = "unsloth/GLM-5.3-Flash-GGUF"     # the model's GGUF files; their names ar
 HF_DEFAULT = "https://huggingface.co"
 LLAMA_CPP_COMMIT = "3cf03257f219afbe7334045ff7c6a06ac68c627d"   # ggml for the build (CMakeLists.txt pins the same)
 LLAMA_CPP_ZIP = f"https://github.com/ggml-org/llama.cpp/archive/{LLAMA_CPP_COMMIT}.zip"
-MIN_DRIVER = 580                       # the driver a CUDA 13 build runs with
+MIN_DRIVER = 580                       # the driver a CUDA 13 build runs with (setup installs CUDA 13.0)
+MIN_DRIVER_CUDA12 = 525                # the driver a CUDA 12.x build runs with (CUDA's minor version compatibility)
 MIN_ARCH = 75                          # the oldest compute capability strata-glm is compiled for (RTX 20)
 PORT = 8101                            # clear of what often runs beside it (3000, 8000, 8080)
 MODEL_NAME = "glm-5.3-flash"
@@ -65,17 +66,19 @@ BUILD_DIR = ROOT / "build"
 
 # The two sizes, by the quantization of their routed experts (docs/GLM53_PORT.md, "Memory on napster-ai").  Every
 # expert stays in RAM; the GPUs cache the most used ones.  "fallback": the files taken when the repository has none
-# of the size's own quantization.
+# of the size's own quantization.  The sizes are decimal GB (10^9 bytes), as the Hub and the disks count them; the
+# RAM is counted in GiB (2^30 bytes), as Linux reports it, so the experts are compared with it in GiB (experts_gib).
 MODELS = {
     "UD-IQ3_XXS": {"bits": "3-bit", "about": "the recommended size for a PC with about 192 GB of RAM",
                    "download_gb": 120, "experts_gb": 117},
-    "IQ4_XS": {"bits": "4-bit", "about": "better answers, but its experts need about 45 GB more RAM",
+    "IQ4_XS": {"bits": "4-bit", "about": "better answers, but its experts need about 42 GiB more RAM",
                "download_gb": 170, "experts_gb": 162, "fallback": ("UD-Q4_K_XL",)},
 }
-RAM_LEFT_GB = 40         # RAM beside the experts from which a size fits well: Linux, the server, parked conversations
-RAM_LEFT_MIN_GB = 12     # below this the OS pages the experts from the disk: very slow, or no start at all
+GIB = 2**30
+RAM_LEFT_GIB = 40        # RAM beside the experts from which a size fits well: Linux, the server, parked conversations
+RAM_LEFT_MIN_GIB = 12    # below this the OS pages the experts from the disk: very slow, or no start at all
 PARK_MIB = 8192          # the engine's RAM for parked conversations and checkpoints (its default)
-PARK_MIB_TIGHT = 4096    # with less than RAM_LEFT_GB beside the experts (the 4-bit model on 192 GB)
+PARK_MIB_TIGHT = 4096    # with less than RAM_LEFT_GIB beside the experts (the 4-bit model on 192 GB)
 CONTEXTS = [32768, 131072, 262144, 524288, 1048576]
 MAX_CONTEXT = 1048576    # GLM-5.3-Flash's trained context
 MLA_BYTES_PER_TOKEN = 11 * 512 * 2     # the attention cache in VRAM: a 512-wide f16 latent per token in 11 MLA layers
@@ -182,11 +185,12 @@ def mark(path: Path, text=""):
 
 
 # ------------------------------------------------------------------------------------------------ the PC
-def ram_gb():
+def ram_gib():
+    """The RAM Linux reports (MemTotal, the total of `free -g`), in GiB: 188 on a PC with 192 GB installed."""
     try:
         for line in open("/proc/meminfo"):
             if line.startswith("MemTotal"):
-                return int(line.split()[1]) * 1024 / 2**30
+                return int(line.split()[1]) * 1024 / GIB
     except OSError:
         pass
     return 0.0
@@ -325,20 +329,25 @@ def free_gb(path):
 
 
 # ------------------------------------------------------------------------------------------------ the model's size
+def experts_gib(model: str) -> float:
+    """The size's experts in GiB, the unit of the RAM: 109 at 3-bit, 151 at 4-bit."""
+    return MODELS[model]["experts_gb"] * 1e9 / GIB
+
+
 def ram_left(model: str, ram: float) -> float:
-    """The RAM (GB) left beside the size's experts on a PC with `ram` GB."""
-    return ram - MODELS[model]["experts_gb"]
+    """The RAM (GiB) left beside the size's experts on a PC with `ram` GiB."""
+    return ram - experts_gib(model)
 
 
 def model_fit(model: str, ram: float) -> str:
-    """"fits" (RAM_LEFT_GB or more beside the experts), "tight" (less, but more than RAM_LEFT_MIN_GB), or "no"."""
+    """"fits" (RAM_LEFT_GIB or more beside the experts), "tight" (less, but more than RAM_LEFT_MIN_GIB), or "no"."""
     left = ram_left(model, ram)
-    return "fits" if left >= RAM_LEFT_GB else "tight" if left >= RAM_LEFT_MIN_GB else "no"
+    return "fits" if left >= RAM_LEFT_GIB else "tight" if left >= RAM_LEFT_MIN_GIB else "no"
 
 
 def recommended_model(ram: float) -> str:
-    """The best size that fits well (192 GB: the 3-bit; the 4-bit leaves only ~20 GB there); the smallest when none
-    does."""
+    """The best size that fits well (192 GB installed, 188 GiB reported: the 3-bit; the 4-bit leaves only ~37 GiB
+    there); the smallest when none does."""
     return next((m for m in reversed(list(MODELS)) if model_fit(m, ram) == "fits"), next(iter(MODELS)))
 
 
@@ -352,9 +361,9 @@ def park_mib(model: str, ram: float, asked: int | None = None) -> int:
 
 def fit_text(model: str, ram: float) -> str:
     left = ram_left(model, ram)
-    return {"fits": f"~{left:.0f} GB of RAM left beside them",
-            "tight": f"only ~{left:.0f} GB of RAM left beside them",
-            "no": f"they do not fit this PC's {ram:.0f} GB of RAM"}[model_fit(model, ram)]
+    return {"fits": f"~{left:.0f} GiB of RAM left beside them",
+            "tight": f"only ~{left:.0f} GiB of RAM left beside them",
+            "no": f"they do not fit this PC's {ram:.0f} GiB of RAM"}[model_fit(model, ram)]
 
 
 def mla_gb(ctx: int) -> float:
@@ -738,8 +747,7 @@ def find_nvcc(below=None):
         if not Path(pick).exists():
             warn(f"STRATA_NVCC={pick}: no such file; looking for a CUDA toolkit as usual")
         else:
-            v = re.search(r"release (\d+)\.(\d+)", out([pick, "--version"]))
-            ver = (int(v.group(1)), int(v.group(2))) if v else None
+            ver = nvcc_version(pick)
             if ver and below is not None and ver >= below:
                 warn(f"STRATA_NVCC={pick} is CUDA {ver[0]}.{ver[1]}; this build needs one older than "
                      f"{below[0]}.{below[1]}")
@@ -754,11 +762,34 @@ def find_nvcc(below=None):
     best = (None, None)
     for c in dict.fromkeys(cands):                     # every toolkit found; the newest wins
         if c and Path(c).exists():
-            v = re.search(r"release (\d+)\.(\d+)", out([c, "--version"]))
-            ver = (int(v.group(1)), int(v.group(2))) if v else None
+            ver = nvcc_version(c)
             if ver and (below is None or ver < below) and (best[1] is None or ver > best[1]):
                 best = (c, ver)
     return best
+
+
+def nvcc_version(nvcc) -> tuple | None:
+    """An nvcc's CUDA version as (major, minor), None when it cannot be read."""
+    v = re.search(r"release (\d+)\.(\d+)", out([nvcc, "--version"]) if nvcc else "")
+    return (int(v.group(1)), int(v.group(2))) if v else None
+
+
+def min_driver(cuda_v) -> int:
+    """The oldest NVIDIA driver an engine built with this CUDA version runs on: 525 for CUDA 12.x (its minor version
+    compatibility; the engine has code for each card's own compute capability, so nothing is compiled at run time),
+    580 for CUDA 13 and for the CUDA 13.0 setup installs (None)."""
+    return MIN_DRIVER_CUDA12 if cuda_v and cuda_v[0] == 12 else MIN_DRIVER
+
+
+def toolkit_below(driver: int | None) -> tuple | None:
+    """The CUDA version a toolkit must be older than for this driver (its major number) to run the engine it builds:
+    13.0 below driver 580, so a CUDA 12 toolkit is taken beside a newer one; None for a newer or unknown driver."""
+    return (13, 0) if driver and driver < MIN_DRIVER else None
+
+
+def oldest_driver(cards) -> int | None:
+    """The major number of the oldest driver these cards report (one driver drives them all), None for no card."""
+    return min((driver_major(g) for g in cards), default=None) or None
 
 
 def find_tool(name):
@@ -819,12 +850,20 @@ def os_release() -> dict:
     return {k.strip(): v.strip().strip('"') for k, v in (line.split("=", 1) for line in lines if "=" in line)}
 
 
-def install_build_tools(archs, yes):
+def install_build_tools(archs, yes, driver=None):
     """The C++ compiler and the CUDA toolkit, installed for the user when they are missing (asks once): build-essential
     and CUDA 13.0 through apt on Ubuntu 22.04 / 24.04.  An installed toolkit of 12.0 or newer is used as it is (13.0
-    for an RTX 50 card, sm_120).  Returns nvcc."""
+    for an RTX 50 card, sm_120).  With a `driver` older than 580 only a CUDA 12 toolkit is taken: an engine built with
+    CUDA 13 does not run on it.  Returns nvcc."""
     need = (13, 0) if max(archs) >= 120 else (12, 0)
-    nvcc, cuda_v = find_nvcc()
+    below = toolkit_below(driver)
+    nvcc, cuda_v = find_nvcc(below)
+    if below and (nvcc is None or cuda_v < need):      # the CUDA 13.0 setup would install does not run on this driver
+        fail(f"the NVIDIA driver ({driver}) is too old for CUDA 13 ({MIN_DRIVER} or newer), and "
+             + ("an RTX 50 card (sm_120) needs CUDA 13" if need >= (13, 0) else
+                "no CUDA 12 toolkit (12.0 or newer) is installed to build the engine with"),
+             "update the driver (Ubuntu: sudo ubuntu-drivers install) and restart"
+             + ("" if need >= (13, 0) else ", or install a CUDA 12 toolkit") + ", then run it again")
     have_cc = shutil.which("g++") is not None
     missing = []
     if not have_cc:
@@ -857,7 +896,7 @@ def install_build_tools(archs, yes):
         run(["sudo", "dpkg", "-i", str(deb)])
         run(["sudo", "apt-get", "update"])
         run(["sudo", "apt-get", "install", "-y", "cuda-toolkit-13-0"])
-    nvcc, cuda_v = find_nvcc()
+    nvcc, cuda_v = find_nvcc(below)
     if shutil.which("g++") is None:
         fail("the C++ compiler did not install", "install build-essential by hand and run it again")
     if nvcc is None or cuda_v < need:
@@ -970,6 +1009,21 @@ def engine_current(archs, meta: dict | None = None) -> bool:
         {int(x) for x in archs} <= {int(x) for x in meta.get("archs", [])}
 
 
+def build_cuda(archs, rebuild=False, driver=None) -> tuple | None:
+    """The CUDA version the engine runs with on this PC: the toolkit build/ was compiled with while that build is
+    current for these compute capabilities (and not `rebuild`, --build), else the toolkit build_engine takes for this
+    `driver` - an installed one of 12.0 or newer (13.0 for an RTX 50 card; below 13.0 for a driver older than 580) -
+    or None when it would install CUDA 13.0 first."""
+    meta = installed_build()
+    if not rebuild and engine_current(archs, meta):
+        v = nvcc_version(meta.get("nvcc"))
+        if v:
+            return v
+    archs = {int(x) for x in archs} | {int(x) for x in meta.get("archs", [])}
+    nvcc, cuda_v = find_nvcc(toolkit_below(driver))
+    return cuda_v if nvcc and cuda_v and cuda_v >= ((13, 0) if max(archs, default=0) >= 120 else (12, 0)) else None
+
+
 def write_build_stamp(archs, nvcc) -> dict:
     """build/BUILD.json after a build: the source's hash and version, the compute capabilities, and the toolkit's
     library folders (the run config's lib_dirs: the engine loads cuBLAS and the CUDA runtime from there)."""
@@ -981,17 +1035,17 @@ def write_build_stamp(archs, nvcc) -> dict:
     return meta
 
 
-def build_engine(archs, yes, llama, force=False) -> Path:
+def build_engine(archs, yes, llama, force=False, driver=None) -> Path:
     """Compile strata-glm, and strata-glm-ref (the CPU reference the GLM checks compare against), into build/ for these
     compute capabilities - unless the build there is of this source and has code for all of them (`force`: compile
     anyway).  A build whose source changed since (a `git pull`) compiles only what changed, a few minutes; it keeps
-    the compute capabilities it had."""
+    the compute capabilities it had.  `driver`: the cards' driver, which the toolkit must suit."""
     meta = installed_build()
     if not force and engine_current(archs, meta):
         ok("engine already built for this PC")
         return BUILD_DIR / EXE
     archs = sorted({int(x) for x in archs} | {int(x) for x in meta.get("archs", [])})
-    nvcc = install_build_tools(archs, yes)
+    nvcc = install_build_tools(archs, yes, driver)
     say("  Compiling the engine for " + ", ".join(f"sm_{x}" for x in archs) + (
         " (a few minutes: only what changed) ..." if (BUILD_DIR / EXE).exists() else " (10-20 minutes, once) ..."))
     cmake_build(ROOT, BUILD_DIR, TARGETS, build_defs(archs, nvcc, llama))
@@ -1002,10 +1056,11 @@ def build_engine(archs, yes, llama, force=False) -> Path:
     return BUILD_DIR / EXE
 
 
-def update_installed_engine(force=False) -> None:
+def update_installed_engine(force=False, yes=False) -> None:
     """Before a start or with --update: the engine is compiled again when its source changed (a `git pull`), when it
     is missing, or when the PC has a GPU it has no code for.  A failed compile keeps the installed engine: the model
-    starts as before."""
+    starts as before.  `yes` (--yes) answers the one question it can ask, whether to install missing build tools,
+    with the recommended y: it never waits for an answer."""
     meta = installed_build()
     usable = [g for g in gpus() if gpu_problem(g) is None]
     archs = card_archs(usable) or [int(x) for x in meta.get("archs", [])]
@@ -1017,7 +1072,7 @@ def update_installed_engine(force=False) -> None:
     if (BUILD_DIR / EXE).exists() and not force:
         say("  The engine's source changed, or a GPU is new: compiling it again ...")
     try:
-        build_engine(archs, False, get_llama_cpp(), force=True)
+        build_engine(archs, yes, get_llama_cpp(), force=True, driver=oldest_driver(usable))
     except (Exception, SystemExit) as e:               # a failed compile must not stop the model from starting
         warn(f"could not compile the updated engine{'' if isinstance(e, SystemExit) else f' ({e})'}: starting the "
              "installed one")
@@ -1263,8 +1318,9 @@ def carry_over(old: dict, cfg: dict) -> list[str]:
 
 def write_setup_config(cfg_path: Path, cfg: dict, source: Path | None = None) -> None:
     """#629: setup's run config, written over an earlier one for the same model without losing what the user added
-    to it (carry_over), the earlier file kept as strata-<model>.json.bak when it changes.  `source`: an earlier
-    install's config to carry the keys over from when this folder has none yet (a copy set up like the last one)."""
+    to it (carry_over), the earlier file kept as strata-<model>.json.bak when it changes (beside the file a linked
+    config points at).  `source`: an earlier install's config to carry the keys over from when this folder has none
+    yet (a copy set up like the last one)."""
     old_path = cfg_path if cfg_path.is_file() else source
     old = None
     if old_path is not None and old_path.is_file():
@@ -1276,9 +1332,10 @@ def write_setup_config(cfg_path: Path, cfg: dict, source: Path | None = None) ->
             old = None
     kept = carry_over(old, cfg) if old is not None else []
     if cfg_path.is_file() and old != cfg:
-        bak = cfg_path.with_name(cfg_path.name + ".bak")
+        real = Path(os.path.realpath(cfg_path))       # a linked config (#1244): beside the file it points at
+        bak = real.with_name(real.name + ".bak")
         try:
-            shutil.copyfile(cfg_path, bak)
+            shutil.copyfile(real, bak)
             say(f"  the earlier run config is kept as {bak.name}")
         except OSError as e:
             warn(f"could not keep a copy of the earlier {cfg_path.name} ({e.strerror or e})")
@@ -1374,14 +1431,15 @@ def write_run_script(tag, cfg_path, port, open_browser=True):
 def update_install(have: list, a) -> int:
     """#475: `setup.py --update` (update.sh, after its git pull): what a plain ./setup.sh does to an install before it
     starts the model, without starting it - the Python packages and the engine (compiled again when its source
-    changed; --build: always).  No question is asked and the model files are not touched."""
+    changed; --build: always).  The model files are not touched.  No question is asked, except whether to install
+    the C++ compiler or the CUDA toolkit when they went missing; --yes answers it (y)."""
     have = [p for p in have if model_config(p)]        # #549: a strata-glm-*.json that is no model config is skipped
     if not have:
         say("  No model is installed in this Strata folder yet: run ./setup.sh to set it up - it finds an earlier")
         say("  install's model files in the data folder and reuses them.")
         return 0
     python_packages()
-    update_installed_engine(force=a.build)
+    update_installed_engine(force=a.build, yes=a.yes)
     for cfg_path in have:
         ok(f"{cfg_path.name}: up to date")
     say()
@@ -1421,8 +1479,11 @@ def model_gb(cfg: dict) -> float:
 
 
 def server_command(cfg_path: Path, port, open_browser: bool) -> list[str]:
-    """The server with this config: .venv's Python, serve/server.py with the strata engine, the port."""
-    return [sys.executable, str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config", str(cfg_path),
+    """The server with this config: .venv's Python, serve/server.py with the strata engine, the port.  A config that
+    is a link (the Docker image links it to the /data volume, #1244) is given as the file it points at: the server
+    keeps the Settings view's .bak and the Chat settings it shares (<config>.shared-settings.json) beside it."""
+    cfg = os.path.realpath(cfg_path) if Path(cfg_path).is_symlink() else str(cfg_path)
+    return [sys.executable, str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config", cfg,
             "--port", str(port)] + (["--open"] if open_browser else [])
 
 
@@ -1510,16 +1571,26 @@ def check_pc(a) -> tuple:
     ok("GPUs: " + " + ".join(gpu_name(g) for g in cards) + (" (the model's layers are shared across them)"
                                                              if len(cards) > 1 else ""))
     old = min(cards, key=driver_major)
-    if driver_major(old) < MIN_DRIVER:
-        fail(f"the NVIDIA driver is too old ({old['driver']}; {MIN_DRIVER} or newer is needed: the engine is built "
-             "with CUDA 13)", "update it (Ubuntu: sudo ubuntu-drivers install, or https://www.nvidia.com/drivers), "
-                              "restart, and run this again")
+    archs = card_archs([g for g in found if gpu_problem(g) is None])   # what build_engine compiles for
+    cuda_v = build_cuda(archs, a.build, driver_major(old))
+    need = min_driver(cuda_v)
+    if driver_major(old) < need:
+        sm120 = max(archs, default=0) >= 120
+        cuda12 = need == MIN_DRIVER and driver_major(old) >= MIN_DRIVER_CUDA12 and not sm120
+        fail(f"the NVIDIA driver is too old ({old['driver']}; {need} or newer is needed: "
+             + (f"the engine is built with CUDA {cuda_v[0]}.{cuda_v[1]})" if cuda_v else
+                "an RTX 50 card needs CUDA 13)" if sm120 else
+                "setup builds the engine with CUDA 13 when no CUDA 12 toolkit is installed)"),
+             "update it (Ubuntu: sudo ubuntu-drivers install, or https://www.nvidia.com/drivers), restart, and run "
+             "this again" + (f"; or install a CUDA 12 toolkit, which setup builds with on a driver older than "
+                             f"{MIN_DRIVER} (its engine runs on {MIN_DRIVER_CUDA12} or newer), and run this again"
+                             + (" with --build" if cuda_v else "") if cuda12 else ""))
     ok(f"driver {old['driver']}, compute capability " + ", ".join(sorted({cc(g) for g in cards}))
        + f" (the engine is compiled for {cuda_archs(card_archs(cards))})")
-    ram = ram_gb()
+    ram = ram_gib()
     fits = [m for m in MODELS if model_fit(m, ram) != "no"]
-    (ok if fits else warn)(f"RAM: {ram:.0f} GB" + ("" if fits else " - less than either size's experts need beside "
-                                                                    "Linux and the server"))
+    (ok if fits else warn)(f"RAM: {ram:.0f} GiB" + ("" if fits else " - less than either size's experts need beside "
+                                                                     "Linux and the server"))
     cpu, avx2 = cpu_info()
     if avx2:
         ok(f"CPU: {cpu} (AVX2)")
@@ -1539,12 +1610,12 @@ def check_only(a) -> int:
     say()
     for m, d in MODELS.items():
         verdict = {"fits": "fits", "tight": "fits, with little RAM to spare", "no": "does not fit"}
-        say(f"  {m:10s} {d['bits']}: ~{d['experts_gb']} GB of experts in RAM - "
+        say(f"  {m:10s} {d['bits']}: ~{experts_gib(m):.0f} GiB of experts in RAM - "
             f"{verdict[model_fit(m, ram)]} ({fit_text(m, ram)}); download ~{d['download_gb']} GB"
             + ("" if free >= d["download_gb"] + 1 else f", but only {free:.0f} GB of disk space is free"))
     if not any(model_fit(m, ram) != "no" for m in MODELS):
         # #977: every size says "does not fit", so the verdict says so too (and the exit code, for scripts)
-        say(f"\nThis PC cannot run GLM-5.3-Flash yet: neither size fits {ram:.0f} GB of RAM. --model NAME --yes "
+        say(f"\nThis PC cannot run GLM-5.3-Flash yet: neither size fits {ram:.0f} GiB of RAM. --model NAME --yes "
             "installs one anyway, slowly.")
         return 1
     say(f"\nThis PC can run GLM-5.3-Flash ({recommended_model(ram)} recommended). Run it again without --check to "
@@ -1555,8 +1626,8 @@ def check_only(a) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", choices=list(MODELS),
-                    help="UD-IQ3_XXS = 3-bit (~120 GB download, ~117 GB of experts in RAM), IQ4_XS = 4-bit (~170 GB, "
-                         "~162 GB; UD-Q4_K_XL when the repository has no IQ4_XS). Default: the one this PC's RAM fits")
+                    help="UD-IQ3_XXS = 3-bit (~120 GB download, ~109 GiB of experts in RAM), IQ4_XS = 4-bit (~170 GB, "
+                         "~151 GiB; UD-Q4_K_XL when the repository has no IQ4_XS). Default: the one this PC's RAM fits")
     ap.add_argument("--context", type=int, metavar="N",
                     help=f"the longest conversation in tokens (up to {MAX_CONTEXT}); each token takes 11 KB of VRAM "
                          "(1.5 GB at 131072)")
@@ -1641,7 +1712,7 @@ def main() -> int:
     port = a.port or PORT                              # a new install's port (issue #32: --port for an existing one)
     keep = {"host": a.host, "api_key": a.api_key, "park_mib": a.park_mib, "open_browser": a.browser}
     if have and not explicit:
-        update_installed_engine(force=a.build)
+        update_installed_engine(force=a.build, yes=a.yes)
         run_gpu = parse_gpus(a.gpus, gpus()) if a.gpus else a.gpu
         if len(have) == 1:
             return start(have[0], a.port, run_gpu, keep=keep)
@@ -1666,24 +1737,25 @@ def main() -> int:
     if not a.model:
         for i, m in enumerate(names, 1):
             d = MODELS[m]
-            say(f"  {i}) {m:10s} {d['bits']}, {d['about']}: download ~{d['download_gb']} GB, ~{d['experts_gb']} GB "
-                f"of experts in RAM ({fit_text(m, ram)})" + ("   (recommended)" if m == rec else ""))
+            say(f"  {i}) {m:10s} {d['bits']}, {d['about']}: download ~{d['download_gb']} GB, ~{experts_gib(m):.0f} "
+                f"GiB of experts in RAM ({fit_text(m, ram)})" + ("   (recommended)" if m == rec else ""))
     model = a.model or names[int(ask("Which size?", [str(i) for i in range(1, len(names) + 1)],
                                      str(names.index(rec) + 1), a.yes)) - 1]
     d = MODELS[model]
     fit = model_fit(model, ram)
     if fit == "no":
         smaller = next((m for m in names if model_fit(m, ram) != "no"), None)
-        confirm_risk(f"{model}'s experts (~{d['experts_gb']} GB) do not fit beside Linux and the server in this PC's "
-                     f"{ram:.0f} GB of RAM: the OS would page them from the disk, so it would be very slow, or not "
-                     "start at all", bool(a.model), a.yes,
-                     f"{model} needs about {d['experts_gb'] + RAM_LEFT_MIN_GB} GB of RAM; this PC has {ram:.0f} GB",
+        confirm_risk(f"{model}'s experts (~{experts_gib(model):.0f} GiB) do not fit beside Linux and the server in "
+                     f"this PC's {ram:.0f} GiB of RAM: the OS would page them from the disk, so it would be very slow, "
+                     "or not start at all", bool(a.model), a.yes,
+                     f"{model} needs about {experts_gib(model) + RAM_LEFT_MIN_GIB:.0f} GiB of RAM; this PC has "
+                     f"{ram:.0f} GiB",
                      (f"choose {smaller}, " if smaller else "add RAM, ") + f"or --model {model} --yes to install it "
                      "anyway", "  Install it anyway?")
-        warn(f"installing {model} with {ram:.0f} GB of RAM, as you chose")
+        warn(f"installing {model} with {ram:.0f} GiB of RAM, as you chose")
     park = park_mib(model, ram, a.park_mib)
     if fit == "tight" and a.park_mib is None:
-        warn(f"{model} leaves only ~{ram_left(model, ram):.0f} GB of RAM beside its experts: parked conversations get "
+        warn(f"{model} leaves only ~{ram_left(model, ram):.0f} GiB of RAM beside its experts: parked conversations get "
              f"{PARK_MIB_TIGHT} MiB instead of {PARK_MIB} (--park-mib {PARK_MIB_TIGHT}); close other big programs "
              "while it runs")
     ok(f"size: {model} ({d['bits']})")
@@ -1732,18 +1804,20 @@ def main() -> int:
         on_disk = sum(p.stat().st_size for s in shards for p in (s, s.with_name(s.name + ".part")) if p.is_file()) / 1e9
         ok(f"{quant}: {len(files)} file{'s' if len(files) > 1 else ''}, {total:.0f} GB")
         if quant != model:
-            # its experts, taken as the same share of its files as the size's own: what it leaves of the RAM
-            experts = total * d["experts_gb"] / d["download_gb"]
+            # its experts, taken as the same share of its files as the size's own: what it leaves of the RAM (GiB)
+            experts = total * d["experts_gb"] / d["download_gb"] * 1e9 / GIB
             warn(f"the repository has no {model} files: the {d['bits']} model is its {quant} ({total:.0f} GB, about "
-                 f"{experts:.0f} GB of experts in RAM: " + (f"~{ram - experts:.0f} GB of RAM left beside them)"
-                                                            if ram >= experts else f"more than this PC's {ram:.0f} GB)"))
-            if fit != "no" and ram - experts < RAM_LEFT_MIN_GB:
-                confirm_risk(f"{quant}'s experts do not fit beside Linux and the server in this PC's {ram:.0f} GB of "
+                 f"{experts:.0f} GiB of experts in RAM: "
+                 + (f"~{ram - experts:.0f} GiB of RAM left beside them)" if ram >= experts else
+                    f"more than this PC's {ram:.0f} GiB)"))
+            if fit != "no" and ram - experts < RAM_LEFT_MIN_GIB:
+                confirm_risk(f"{quant}'s experts do not fit beside Linux and the server in this PC's {ram:.0f} GiB of "
                              "RAM: the OS would page them from the disk, so it would be very slow, or not start at all",
                              bool(a.model), a.yes,
-                             f"{quant} needs about {experts + RAM_LEFT_MIN_GB:.0f} GB of RAM; this PC has {ram:.0f} GB",
+                             f"{quant} needs about {experts + RAM_LEFT_MIN_GIB:.0f} GiB of RAM; this PC has "
+                             f"{ram:.0f} GiB",
                              f"choose {names[0]}, or --model {model} --yes to install it anyway", "  Install it anyway?")
-            elif ram - experts < RAM_LEFT_GB and a.park_mib is None and park != PARK_MIB_TIGHT:
+            elif ram - experts < RAM_LEFT_GIB and a.park_mib is None and park != PARK_MIB_TIGHT:
                 park = PARK_MIB_TIGHT
                 warn(f"parked conversations get {PARK_MIB_TIGHT} MiB instead of {PARK_MIB} (--park-mib {PARK_MIB_TIGHT})")
         need = max(total - on_disk, 0) + 1
@@ -1760,7 +1834,7 @@ def main() -> int:
     step(4, "the Strata engine")
     llama = get_llama_cpp()
     ok(f"llama.cpp {LLAMA_CPP_COMMIT[:7]} (ggml, gguf-py)")
-    exe = build_engine(card_archs(usable), a.yes, llama, force=a.build)
+    exe = build_engine(card_archs(usable), a.yes, llama, force=a.build, driver=oldest_driver(usable))
 
     # ---- 5. the model files
     step(5, f"downloading GLM-5.3-Flash {quant}")

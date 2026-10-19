@@ -17,13 +17,17 @@
 #   docker build -t strata .
 #   docker build -t strata --build-arg CUDA_ARCHITECTURES=86 .        # RTX 30 only
 #
-# Run (host needs an NVIDIA driver >= 580 and nvidia-container-toolkit):
+# Run (host needs an NVIDIA driver >= 580 and nvidia-container-toolkit). The port is
+# published on this host only: the server has no API key unless you set one.
 #   docker run --rm --gpus all \
-#     -p 8101:8101 \
+#     -p 127.0.0.1:8101:8101 \
 #     --ulimit memlock=-1 \
 #     -v strata-data:/data \
 #     -e MODEL=UD-IQ3_XXS \
 #     strata
+# For other machines on your network, set a key and publish it on every interface:
+#   -e API_KEY=<secret> -p 8101:8101 (Docker's rules pass by ufw: without a key,
+#   anyone who reaches the port can use the model; the entrypoint warns at each start).
 #
 # Setup choices are env vars, read by docker-entrypoint.sh: MODEL (UD-IQ3_XXS or
 # IQ4_XS), CONTEXT (tokens; empty: setup's pick for the GPUs' VRAM), PARK_MIB,
@@ -31,9 +35,9 @@
 # (GGUF files you already have), CONFIG (a config file to start with).
 #
 # Only the model files and the install config live in the /data volume (it needs
-# room for 120-170 GB); the engine is part of the image. Add an API key before
-# exposing the port to a network: -e API_KEY=<secret>. Pass -e REINSTALL=1 to
-# change the model settings later.
+# room for 120-170 GB); the engine is part of the image. API_KEY is passed on at
+# every start, so a key added later counts. Pass -e REINSTALL=1 to change the other
+# model settings later.
 
 FROM nvidia/cuda:13.0.0-devel-ubuntu24.04
 

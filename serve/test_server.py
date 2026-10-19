@@ -1589,7 +1589,7 @@ class ExpertCacheHits(unittest.TestCase):
 
 class SeveralGpus(unittest.TestCase):
     """Several GPUs in the config: the engine sees them all, in the order given, and splits the layers by each card's
-    VRAM unless the config's "split" says otherwise."""
+    free VRAM at start unless the config's "split" says otherwise."""
 
     def test_both_cards_visible(self):
         from serve.server import child_env
