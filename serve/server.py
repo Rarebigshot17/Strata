@@ -159,7 +159,8 @@ PP_SLACK = 3.0
 # Reads that had no timeout (#1317).  A blocking read of the engine's READY line that never returned held the request
 # turn for good: every later request queued behind it.  Generous on purpose: a cold model load (the experts are read
 # into the page cache before READY), a slow disk or a slow CPU is not a hang.  Only a process that says nothing at all
-# for this long is ended; the next request starts it again.
+# for this long is ended - the warm-up's progress lines in its log count: the bound runs from the last one that moved
+# on - and the next request starts it again.
 # STRATA_ENGINE_READY_S overrides it (0 = wait for ever).
 
 
@@ -410,6 +411,24 @@ def narrate_start(log_path: str, offset: int, model_path: str | None, done: thre
                   f"[strata] still starting ({time.time() - t0:.0f} s) - please wait ...", flush=True)
 
 
+WARMING = re.compile(r"warming the experts: ([\d.]+) of ")
+
+
+def warm_progress(log_path: str, pos: int) -> tuple[int, float | None]:
+    """How far the engine's expert warm-up before READY has got, by its log from `pos` on (strata-glm writes
+    "warming the experts: X of Y GB (...)" to stderr every 2 s): (where the next look reads on, the latest X in GB, or
+    None when no whole line since `pos` reports it)."""
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(pos)
+            chunk = f.read()
+    except OSError:
+        return pos, None
+    cut = chunk.rfind(b"\n") + 1                       # whole lines only: the rest is read next time
+    found = WARMING.findall(chunk[:cut].decode("utf-8", "replace"))
+    return pos + cut, float(found[-1]) if found else None
+
+
 class ConvCacheLog:
     """#596: the engine's parked conversations and checkpoints as its log tells it (src/glm/serve_loop.cpp writes
     "conversations: parked N tokens (X MiB, T ms) for ...", "conversations: resumed ... at N of M prompt tokens ...",
@@ -492,6 +511,13 @@ def arg_value(args: list, flag: str, default=None):
 
 
 GLM_CTX = 32768          # strata-glm's own --ctx when the args name none (reported while a lazy start has not run)
+# What the engine can hold of the GEN line's sampling keys (src/glm/sampler.cpp reads them with atof and casts, and
+# checks none): top_k and penalty_last_n are 32-bit ints, the seed a 64-bit unsigned one, the rest 32-bit floats.
+# Beyond these the casts are undefined (a window of 3e9 became 0: the penalties were off) or give an infinity, and NaN
+# or an infinity in a penalty turns the logits it touches into nonsense.
+ENGINE_INT_MAX = 2**31 - 1
+ENGINE_SEED_MAX = 2**64 - 1
+ENGINE_FLOAT_MAX = 3.4028234663852886e38
 
 
 class StrataEngine:
@@ -508,6 +534,7 @@ class StrataEngine:
     silent_note = None                   # #481: why the server ended a silent engine (death_note says it)
     gpu_busy = None                      # #1317: () -> bool, "the GPU is working" (the telemetry's reading); a GPU at work is not frozen
     last_err = None                      # #997: an ERR that was its last stdout line (death_note says it)
+    WARM_LOOK_S = 2.0                    # how often a start looks for the warm-up's progress (strata-glm: every 2 s)
 
     def __init__(self, exe: str, args: list[str], cwd: str | None = None, log: str | None = None,
                  env: dict | None = None, lazy: bool = False):
@@ -548,8 +575,17 @@ class StrataEngine:
             except OSError:
                 pass
         self.max_context = 0                             # before the new process is visible: never its predecessor's
-        self.proc = subprocess.Popen([exe, "--serve", *args], cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=self.log, text=True, encoding="utf-8", bufsize=1, env=env)
+        try:
+            self.proc = subprocess.Popen([exe, "--serve", *args], cwd=cwd, stdin=subprocess.PIPE,
+                                         stdout=subprocess.PIPE, stderr=self.log, text=True, encoding="utf-8",
+                                         bufsize=1, env=env)
+        except OSError as e:                             # missing, not executable, being rebuilt (update.sh)
+            loading.set()                                # the narrator stops, and our handle on the log goes
+            if log:
+                self.log.close()
+            # EngineDied, as for a start that ends before READY: a request loading it gets a 503 that says why
+            # (an OSError there read as the client's disconnect: no answer at all), and restart() tries again
+            raise EngineDied(f"the engine could not be started: {e}") from None
         contain(self.proc)                               # ends with the server, however it ends (Windows)
         # the READY read has a timeout (#1317): the lines come from a thread, up to READY, so the rest of the stream
         # stays for _pump (one reader at a time)
@@ -557,13 +593,20 @@ class StrataEngine:
         threading.Thread(target=self._ready_pump, args=(self.proc, ready_q), daemon=True).start()
         ready_deadline = None if ENGINE_READY_S is None else time.monotonic() + ENGINE_READY_S
         timed_out = False
+        warm_pos, warmed = log_start, None               # the warm-up's progress, from the log
         while True:
+            if log and ready_deadline is not None:
+                # the warm-up reads 120-170 GB before READY, longer than the bound from a slow disk or a NAS: while
+                # it moves on, the bound counts from its last progress (looked for every WARM_LOOK_S)
+                warm_pos, done = warm_progress(log, warm_pos)
+                if done is not None and (warmed is None or done > warmed):
+                    warmed, ready_deadline = done, time.monotonic() + ENGINE_READY_S
             left = None if ready_deadline is None else ready_deadline - time.monotonic()
             if left is not None and left <= 0:
                 timed_out = True
                 break
             try:
-                line = ready_q.get(timeout=left)
+                line = ready_q.get(timeout=None if left is None else min(left, self.WARM_LOOK_S))
             except queue.Empty:
                 continue
             if line is None:
@@ -592,8 +635,9 @@ class StrataEngine:
                     self.log.close()
             except (OSError, subprocess.TimeoutExpired):
                 pass
-            why = (f"the engine did not report READY within {ENGINE_READY_S:.0f} s" if timed_out else
-                   f"the engine exited before it was ready (exit code {self.proc.poll()})")
+            why = (f"the engine did not report READY within {ENGINE_READY_S:.0f} s"
+                   + (f" of its last warm-up progress ({warmed:.1f} GB read)" if warmed is not None else "")
+                   if timed_out else f"the engine exited before it was ready (exit code {self.proc.poll()})")
             # EngineDied, not bare RuntimeError: a request waiting on this load must end with a 503
             # through the request path's handler - a RuntimeError there left the turn with no answer (#1527)
             raise EngineDied(why + (f" (see {log})" if log else "") + start_log_tail(log, log_start))
@@ -613,7 +657,8 @@ class StrataEngine:
             lines.put(line)
         if self.proc is proc:                           # a killed engine's pump must not mark its successor dead
             self.ended = True                           # its output closed: it is gone, even before the OS says so
-            if line and line.startswith("ERR"):         # #997 #890: why it exited, though no request may read it
+            # #997 #890: why it exited, though no request may read it - not its answer to _after_failure's probe
+            if line and line.startswith("ERR") and not line.startswith("ERR unsupported command"):
                 self.last_err = line[4:].strip()
         lines.put(None)
 
@@ -622,12 +667,15 @@ class StrataEngine:
         of its log), else RAM."""
         if getattr(self, "silent_note", None):          # #481: the server ended it, not the OS or the engine itself
             return self.silent_note
-        tail = ""
+        tail, start = "", getattr(self, "log_start", 0)
         try:
             with open(self.log_path, "rb") as f:
                 f.seek(0, 2)
-                f.seek(max(0, f.tell() - 65536))  # its last words can sit behind many "conversations:" lines
+                at = max(start, f.tell() - 65536)  # its last words can sit behind many "conversations:" lines;
+                f.seek(at)                         # this run's only: the log keeps the earlier runs' last words
                 tail = f.read().decode("utf-8", "replace")
+                if at > start:
+                    tail = tail.partition("\n")[2]  # not a line cut in half
         except (OSError, TypeError):
             pass
         proc = self.proc                                 # None while a restart has not started the next one yet
@@ -635,7 +683,10 @@ class StrataEngine:
         if rc is not None and rc >= 0 and self.last_err:  # its own last words on stdout: they say why
             return (f"The engine exited (code {rc}) after it reported: {self.last_err} - please report it at "
                     f"{ISSUES} with the log.")
-        last = next((x.strip() for x in reversed(tail.splitlines()) if x.strip().startswith(("strata", "ERR"))), "")
+        # the engine's last line that is not the server's own or a cache summary: "strata-glm: ...", and the kernel
+        # failures that exit at once ("glm gpu kernel ...", "glm prefill kernel ...", "kda_conv_rows: ...")
+        last = next((x.strip() for x in reversed(tail.splitlines())
+                     if x.strip() and not x.strip().startswith(("[strata]", "conversations:"))), "")
         if rc is not None and rc >= 0 and last:          # it ended by itself: its own last words say why (#215)
             return (f"The engine exited (code {rc}). Its last log line: {last} - if that does not explain it, please "
                     f"report it at {ISSUES} with the log.")
@@ -697,7 +748,8 @@ class StrataEngine:
                     break
                 except RuntimeError:
                     try:
-                        self.proc.wait(timeout=60)
+                        if self.proc is not None:       # None: it could not be started at all
+                            self.proc.wait(timeout=60)
                     except (subprocess.TimeoutExpired, OSError):
                         pass
                     if i == tries - 1:
@@ -727,40 +779,43 @@ class StrataEngine:
 
     @staticmethod
     def sampling_keys(sampling: dict) -> str:
+        def num(key):                                   # a value the engine holds as a float (ENGINE_FLOAT_MAX)
+            v = sampling.get(key)
+            ok = isinstance(v, (int, float)) and not isinstance(v, bool) and abs(v) <= ENGINE_FLOAT_MAX
+            return float(v) if ok else None             # (NaN fails the comparison too)
+
         keys = ""
-        t = sampling.get("temperature")
-        if isinstance(t, (int, float)) and float(t) > 0.0:
-            keys += f" temperature={float(t)!r}"
-        tp = sampling.get("top_p")
-        if isinstance(tp, (int, float)) and float(tp) < 1.0:
-            keys += f" top_p={float(tp)!r}"
+        t = num("temperature")
+        if t is not None and t > 0.0:
+            keys += f" temperature={t!r}"
+        tp = num("top_p")
+        if tp is not None and tp < 1.0:
+            keys += f" top_p={tp!r}"
         tk = sampling.get("top_k")
         if isinstance(tk, int) and not isinstance(tk, bool) and tk >= 0:
-            keys += f" top_k={tk}"                      # 0: off (the whole vocabulary)
-        mp = sampling.get("min_p")
-        if isinstance(mp, (int, float)) and 0.0 < float(mp) <= 1.0:
-            keys += f" min_p={float(mp)!r}"
-        rp = sampling.get("repetition_penalty")
-        rp_on = isinstance(rp, (int, float)) and float(rp) != 1.0
-        pf = sampling.get("frequency_penalty")
-        pf_on = isinstance(pf, (int, float)) and float(pf) != 0.0
-        pp = sampling.get("presence_penalty")
-        pp_on = isinstance(pp, (int, float)) and float(pp) != 0.0
+            keys += f" top_k={min(tk, ENGINE_INT_MAX)}"  # 0: off (the whole vocabulary), as is more than it has
+        mp = num("min_p")
+        if mp is not None and 0.0 < mp <= 1.0:
+            keys += f" min_p={mp!r}"
+        rp, pf, pp = num("repetition_penalty"), num("frequency_penalty"), num("presence_penalty")
+        rp_on = rp is not None and rp > 0.0 and rp != 1.0  # the engine divides by it
+        pf_on = pf is not None and pf != 0.0
+        pp_on = pp is not None and pp != 0.0
         if rp_on:
-            keys += f" penalty_repeat={float(rp)!r}"
+            keys += f" penalty_repeat={rp!r}"
         if pf_on:
-            keys += f" penalty_freq={float(pf)!r}"
+            keys += f" penalty_freq={pf!r}"
         if pp_on:
-            keys += f" penalty_present={float(pp)!r}"
+            keys += f" penalty_present={pp!r}"
         if rp_on or pf_on or pp_on:
             # a penalty without a window counts over nothing: the engine's default is the last 64 tokens
             pln = sampling.get("penalty_last_n")
             if isinstance(pln, int) and not isinstance(pln, bool) and pln > 0:
-                keys += f" penalty_last_n={pln}"
+                keys += f" penalty_last_n={min(pln, ENGINE_INT_MAX)}"
             else:
                 keys += " penalty_last_n=64"
         seed = sampling.get("seed")
-        if isinstance(seed, int) and seed > 0:
+        if isinstance(seed, int) and 0 < seed <= ENGINE_SEED_MAX:
             keys += f" seed={seed}"
         return keys + bias_api.engine_key(sampling.get("logit_bias"))
 
@@ -863,6 +918,7 @@ class StrataEngine:
                     done = True
                     why = line[4:].strip()
                     if why.startswith("internal:"):       # the engine failed, not the request
+                        self._after_failure()
                         raise EngineError("the engine failed: " + why[len("internal:"):].strip())
                     raise ValueError(why)
         finally:
@@ -886,13 +942,45 @@ class StrataEngine:
                     except queue.Empty:
                         raise self._silent("the engine did not finish the request after it was stopped (STOP) "
                                            f"within {allow:.0f} s") from None
-                    if line is None or line.startswith("ERR"):
+                    if line is None:
+                        break
+                    if line.startswith("ERR"):
+                        if line[4:].strip().startswith("internal:"):
+                            self._after_failure()
                         break
                     if line.startswith("DONE"):
                         self._parse_done(line)
                         break
                     if not self.can_stop:
                         heard = time.monotonic()
+
+    ERR_PROBE_S = 60.0       # how long _after_failure waits for the engine to answer or to exit
+
+    def _after_failure(self) -> None:
+        """After `ERR internal:` the engine may exit (a CUDA fault: it cannot drop the request's state), but only once
+        it has unwound - seconds (a CUDA context, 100+ GB mapped) in which it still looks alive, so the next request
+        was written into the dying process and failed too (EngineDied).  An unknown command tells the two apart while
+        the turn is still held: an engine that carries on answers it at once (`ERR unsupported command: PING`), one
+        that is exiting never reads it and its output closes (the pump marks it ended).  One that does neither within
+        ERR_PROBE_S is ended here.  Either way the next request starts a new engine."""
+        try:
+            self.proc.stdin.write("PING\n")
+            self.proc.stdin.flush()
+        except OSError:
+            pass                                        # its input is closed: it is exiting, its output closes next
+        deadline = time.monotonic() + self.ERR_PROBE_S
+        while (left := deadline - time.monotonic()) > 0:
+            try:
+                line = self.lines.get(timeout=left)
+            except queue.Empty:
+                break
+            if line is None or line.startswith("ERR"):
+                return                                  # gone, or in step
+        self.ended = True
+        try:
+            self.proc.kill()
+        except OSError:
+            pass
 
     def _activity(self) -> tuple[float, int] | None:
         """#1317: (CPU seconds, I/O bytes) the engine process has used so far, or None when they cannot be read."""
@@ -4194,8 +4282,8 @@ def sampling_defaults_from_config(cfg: dict) -> dict:
     for key, value in block.items():
         if value is None:
             continue
-        number = isinstance(value, (int, float)) and not isinstance(value, bool)
-        if key == "temperature":
+        number = isinstance(value, (int, float)) and not isinstance(value, bool) and abs(value) <= ENGINE_FLOAT_MAX
+        if key == "temperature":                       # (json.load reads NaN and Infinity: not a number here)
             if not number or value < 0:
                 raise SystemExit(f"[strata] config sampling.temperature={value!r}: expected a number >= 0 (0 = greedy)")
             out[key] = float(value)
@@ -4239,10 +4327,13 @@ def sampling_defaults_from_config(cfg: dict) -> dict:
 def check_request_sampling(req) -> None:
     """A request's sampling field of the wrong JSON type ("temperature": "0.7", "top_k": 40.0, "seed": true) is a 400
     that names the field, as the same value is through POST /settings or the run config.  Unchecked, the value
-    replaced the configured default in run()'s merge and sampling_keys dropped it, so the reply was greedy.  Only
-    types are checked: a number (int or float, never bool) for temperature, top_p, min_p and the three penalties; an
-    integer (never bool or float) for top_k, penalty_last_n and seed.  Ranges are the engine's (a temperature <= 0 is
-    greedy, top_k 0 is off, a negative top_k or a seed <= 0 is unset), and an absent or null field is not checked."""
+    replaced the configured default in run()'s merge and sampling_keys dropped it, so the reply was greedy.  Types: a
+    number (int or float, never bool) for temperature, top_p, min_p and the three penalties; an integer (never bool
+    or float) for top_k, penalty_last_n and seed.  Ranges: what the engine can use, which checks none itself - a
+    finite number it can hold (no NaN or Infinity, which json.loads reads), temperature >= 0 (0 is greedy), top_p and
+    min_p 0..1, a repetition penalty > 0 (it divides by it; 1 is off), top_k and penalty_last_n up to ENGINE_INT_MAX
+    and a seed up to ENGINE_SEED_MAX (top_k 0 is off; a negative top_k or penalty_last_n, or a seed <= 0, is unset).
+    An absent or null field is not checked."""
     if isinstance(req, dict):      # #1819: llama.cpp's names; the OpenAI-style field wins when both are sent
         if req.get("repeat_penalty") is not None and req.get("repetition_penalty") is None:
             req["repetition_penalty"] = req["repeat_penalty"]
@@ -4270,6 +4361,18 @@ def check_request_sampling(req) -> None:
             req[key] = value = num
         if isinstance(value, bool) or not isinstance(value, int if integer else (int, float)):
             raise ValueError(f"{key}: {'an integer' if integer else 'a number'}")
+        if integer:
+            top = ENGINE_SEED_MAX if key == "seed" else ENGINE_INT_MAX
+            if value > top:
+                raise ValueError(f"{key}: an integer up to {top}")
+        elif not abs(value) <= ENGINE_FLOAT_MAX:        # NaN, an infinity, or beyond a 32-bit float
+            raise ValueError(f"{key}: a finite number")
+        elif key == "temperature" and value < 0:
+            raise ValueError("temperature: a number >= 0 (0: greedy)")
+        elif key in ("top_p", "min_p") and not 0 <= value <= 1:
+            raise ValueError(f"{key}: a number from 0 to 1")
+        elif key == "repetition_penalty" and value <= 0:
+            raise ValueError("repetition_penalty: a number > 0 (1: off)")
 
 
 def config_path_of(cfg: dict, value: str) -> str:

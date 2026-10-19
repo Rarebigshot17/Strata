@@ -58,6 +58,8 @@ for line in sys.stdin:
     if line == "QUIT":
         break
     if not line.startswith("GEN "):
+        if line not in ("", "STOP"):                    # as strata-glm: an unknown command is answered
+            print("ERR unsupported command: " + line.split()[0])
         continue
     try:
         mode = open(os.environ["FAKE_MODE"], encoding="utf-8").read().strip()
@@ -603,6 +605,26 @@ class SharedSettingsTests(unittest.TestCase):
         self.assertEqual(S.sampling_defaults_from_config({"sampling": {"top_k": 100}}), {"top_k": 100})
         with self.assertRaises(SystemExit):
             S.sampling_defaults_from_config({"sampling": {"top_k": -2}})
+
+    def test_config_sampling_not_finite(self):
+        # json.load reads NaN and Infinity, and NaN passed every "< 0" check
+        for key in ("temperature", "repetition_penalty", "presence_penalty", "frequency_penalty", "top_k"):
+            for value in (float("nan"), float("inf")):
+                with self.subTest(key=key, value=value), self.assertRaises(SystemExit):
+                    S.sampling_defaults_from_config({"sampling": {key: value}})
+
+    def test_gen_keys_only_what_the_engine_can_hold(self):
+        # whatever the source (the Chat settings take any top_k or seed): top_k and penalty_last_n are 32-bit ints in
+        # the engine, the seed a 64-bit one, the rest 32-bit floats it divides by or adds
+        keys = S.StrataEngine.sampling_keys({"top_k": 10**12, "seed": 2**64, "repetition_penalty": 1.1,
+                                             "penalty_last_n": 2**40})
+        self.assertIn(" top_k=2147483647", keys)        # more than the vocabulary either way: off
+        self.assertIn(" penalty_last_n=2147483647", keys)
+        self.assertNotIn("seed", keys)
+        for bad in ({"repetition_penalty": float("nan")}, {"repetition_penalty": 0.0}, {"temperature": float("inf")},
+                    {"frequency_penalty": float("inf")}, {"presence_penalty": -1e39}, {"top_p": float("-inf")}):
+            with self.subTest(bad=bad):
+                self.assertEqual(S.StrataEngine.sampling_keys(bad), "")
 
 
 # ------------------------------------------------------------------------------------------------ the model's GGUF
