@@ -1,66 +1,113 @@
 # Running Strata behind llama-swap
 
-[llama-swap](https://github.com/mostlygeek/llama-swap) puts several model servers behind one address and starts the one a
-request names, stopping the others to free the GPU. Strata works as one of its models. This page is what we needed to
-get it running; it was tested with llama-swap's default stop behaviour, Strata 0.1.39 (Coder IQ1_M on a Tesla V100) and
-clients reaching the machine by its host name.
+[llama-swap](https://github.com/mostlygeek/llama-swap) puts several model servers behind one address. It starts the
+one a request names and stops the others to free the GPUs. Strata can be one of its models.
+
+Nothing on this page has been run with the GLM engine yet. The entry below and the traps come from Strata's server
+code; the traps were first found by the upstream project (Niko1221/Strata) with its Qwen engine behind llama-swap.
+
+GLM-5.3-Flash needs every GPU it was set up with and, by setup.py's figures (calculated from the model's shapes, not
+measured), about 117 GB (3-bit) or 162 GB (4-bit) of RAM for its experts. So Strata cannot stay loaded beside another
+large model: put the others in a llama-swap group that does not run together with Strata, or let swapping stop it.
 
 ## The entry
 
-Set Strata up as usual first (`./setup.sh --no-start ...`), then point llama-swap at the server directly. The start script
-setup writes (`run-<model>.sh`) fixes the port at 8080, so call `serve/server.py` with llama-swap's port instead:
+Set Strata up first without starting it:
+
+```bash
+./setup.sh --no-start
+```
+
+Setup writes the run config `strata-glm-<size>.json` (`strata-glm-ud-iq3_xxs.json` for the 3-bit model,
+`strata-glm-iq4_xs.json` for the 4-bit one) and a start script `run-glm-<size>.sh`. The start script fixes the port
+(8101 unless setup was given `--port`), so llama-swap calls `serve/server.py` itself, with its own port:
 
 ```yaml
-healthCheckTimeout: 300            # Strata takes ~1.5-2 min to load; give it room
+healthCheckTimeout: 1800           # seconds: room for the expert warm-up, which is not measured yet (see below)
 
 models:
   strata:
     cmd: >-
       sh -c 'cd /path/to/Strata && exec .venv/bin/python serve/server.py
-      --engine strata --config strata-coder-iq1_m.json --port ${PORT}'
-    env: ["STRATA_ALLOWED_HOSTS=my-server"]     # the host name your clients use -- see below
+      --engine strata --config strata-glm-ud-iq3_xxs.json --port ${PORT}'
+    env:
+      - "STRATA_ALLOWED_HOSTS=my-server"   # the host name your clients use - see "The trap" below
+      - "STRATA_REQUEST_LINES=1"           # optional: one line per request in llama-swap's log
     checkEndpoint: /health
     ttl: 1800
 ```
 
-- `exec` makes the Python server the process llama-swap stops. On llama-swap's stop (SIGTERM) the server stops its engine:
-  in our test the engine was gone and the V100's memory freed within 2 s.
-- `checkEndpoint: /health` -- Strata's `/health` answers only once the model is loaded. Measured load time on our machine
-  (model files on a SATA SSD): 80 s, 105 s while another download was using the disk.
-- If other models share the GPU, put them in a llama-swap group or let swapping unload them; Strata needs the card's
-  memory to itself.
+- `exec` makes the Python server the process llama-swap stops. On SIGTERM the server ends its engine the way Ctrl+C
+  does: `STOP` and `QUIT` (the engine saves its expert profile, if the config names one, and exits), then terminate,
+  then kill, with 20 s for each step. How long the GLM engine takes to give its memory back is not measured.
+- `checkEndpoint: /health`. The server opens its port only after the engine has said `READY`, so `/health` answers
+  once the model is loaded. That is not so with `--lazy` or `"lazy_load": true` in the run config: the port then
+  opens at once and `/health` answers 200 with `"loaded": false`. Leave lazy loading off behind llama-swap.
+- `STRATA_REQUEST_LINES=1` prints one line per request on the server's output (prompt tokens, cached tokens, output
+  tokens, prompt time, total time, prefill and decode tokens/s), for a supervisor that only sees that output.
+- Parked conversations live in the engine's memory. When llama-swap stops Strata (`ttl`, or a swap), they are gone,
+  and the next request of each client reads its whole prompt again.
+
+## How long a start takes
+
+Before it says `READY`, `strata-glm` maps the model, places its layers on the GPUs and then reads the routed experts
+into the page cache (the warm-up), so the first request does not wait for the disk. While it does, the engine log
+(the run config's `"log"`) gets a line every 2 s:
+
+```text
+warming the experts: <read> of <total> GB (<seconds> s, <rate> GB/s)
+```
+
+After a reboot the warm-up reads the experts from disk. No
+start on the real model has been timed yet. For scale only: a SATA link carries at most about 0.55 GB/s, so reading
+117 GB takes at least about 3.5 minutes and 162 GB about 5 minutes (calculated; a real drive can be slower). When the
+files are still in the page cache from an earlier run, the warm-up reads them from RAM instead.
+
+So set `healthCheckTimeout` well above that until you have timed a start of your own: the last warm-up line gives the
+time and the rate. The server has its own limit as well: the engine must say `READY` within 900 s of its last
+warm-up progress, or the server ends it (`STRATA_ENGINE_READY_S` changes the 900; 0 waits for ever).
+
+`STRATA_DROP_CACHE_ON_EXIT=1` gives the model files' page cache back when the server stops (off by default). It helps
+when llama-swap then starts another large model, and it makes Strata's next start read the experts from disk again.
 
 ## The trap: "Host ... is not allowed"
 
-The first request through llama-swap failed at once with:
+The first request through llama-swap can fail at once with:
 
 ```text
-403 Host 'my-server:8040' is not allowed (DNS rebinding protection)
+403 Host 'my-server:8040' is not allowed (DNS rebinding protection). Reaching Strata under this name on purpose? ...
 ```
 
-Strata only answers to the host names it knows, so a web page cannot reach it by pointing a DNS name at 127.0.0.1.
-llama-swap passes the client's Host header through, so a client that reaches the proxy by name (`http://my-server:8040`)
-is refused. Requests by IP address and to `localhost` always pass, which is why it can work in a quick test and fail
-from another machine. Any one of these fixes it:
+Without an API key, Strata answers only to host names it knows, so that a web page cannot reach it by pointing a DNS
+name at 127.0.0.1. A proxy that passes the client's `Host` header on, as llama-swap did in the upstream test, makes
+every client that reaches the proxy by name (`http://my-server:8040`) look like such a page. Requests by IP address
+and to `localhost` always pass, which is why it can work in a quick test and fail from another machine. Any one of
+these fixes it:
 
-- `STRATA_ALLOWED_HOSTS=my-server` in the entry's `env` (comma-separated names; ports are ignored), or
-- `"allowed_hosts": ["my-server"]` in `strata-<model>.json`, or
-- an `"api_key"`, which turns the check off -- then every client must send the key.
+- `STRATA_ALLOWED_HOSTS=my-server` in the entry's `env` (comma-separated names; a port is ignored), or
+- `"allowed_hosts": ["my-server"]` in `strata-glm-<size>.json`, or
+- an `"api_key"` in the run config, which turns the check off. Every client must then send the key.
 
 ## Strata's own pages through llama-swap
 
-llama-swap forwards `/upstream/<model>/...` unchanged, so Strata's status and health pages stay reachable, and calling one
-also loads the model without sending a chat request:
+llama-swap forwards `/upstream/<model>/...` to the model's server unchanged, so Strata's status pages stay reachable.
+Calling one also starts the model, without a chat request:
 
 ```bash
 curl http://my-server:8040/upstream/strata/health
-curl http://my-server:8040/upstream/strata/v1/status
+curl http://my-server:8040/upstream/strata/v1/status     # needs the API key when one is set
 ```
 
-## Claude Code and other Anthropic-API clients: the thinking level
+## Without llama-swap
 
-Claude Code (and the Claude Agent SDK) send `"output_config": {"effort": "high"}` with every request unless told
-otherwise, so Strata thinks at its highest level (seen by logging the requests). `CLAUDE_CODE_EFFORT_LEVEL=medium` (or
-`low`) in the client's environment changes it. One measurement, for scale only: on one real coding task in our setup,
-`medium` finished in 6.5 min against 9.7 min at `high`, both correct; `low` took 10.1 min (more trial-and-fix steps).
-One run each -- not a general result.
+Strata can also share the GPUs with other programs by itself: it can unload the model after a time without requests,
+answer 503 while too little VRAM is free, run a command before it loads the model again, and unload on request
+(`POST /unload`). See [Settings](DETAILS.md#settings) and [the API](DETAILS.md#the-api).
+
+## Claude Code and other Anthropic-API clients: thinking
+
+Claude Code sends `"output_config": {"effort": ...}` with every request (the upstream project saw this by logging the
+requests). GLM-5.3-Flash has no effort levels: its template only turns thinking on or off, so `low`, `medium` and
+`high` all mean "think", and `CLAUDE_CODE_EFFORT_LEVEL` does not shorten the thinking here. To cap it, put
+`"reasoning_budget_tokens": N` in the run config: every request's thinking then ends after N tokens with a short
+wrap-up, and the model answers ([the reasoning budget](DETAILS.md#thinking)).
