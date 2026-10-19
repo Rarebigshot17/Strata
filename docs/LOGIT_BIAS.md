@@ -14,7 +14,8 @@ python3 -c "import sys; sys.path.insert(0, 'tools'); from strata_tokenizer impor
 t = Tokenizer.from_gguf('/path/to/the/first/shard.gguf'); print(t.encode('Hello'), t.encode(' Hello'))"
 ```
 
-Run it in the Strata folder. It reads only the file's header and takes under a second.
+Run it in the Strata folder (with `.venv/bin/python` if `python3` lacks the `regex` package). It reads the
+tokenizer from the file's metadata, not the weights.
 
 ## Example
 
@@ -47,7 +48,7 @@ The bias belongs to its request only. It is not kept in a parked conversation or
 change the model's state, so the next request without the field is unbiased again.
 
 The server refuses (HTTP 400) malformed entries, duplicate IDs in a pair list, IDs outside the vocabulary,
-out-of-range biases and a ban of the whole vocabulary. On the chat route this happens before streaming starts.
+out-of-range biases and a ban of the whole vocabulary. On both routes this happens before streaming starts.
 The engine says `logit_bias=1` in its `INFO` line. A server talking to an engine that lacks it refuses a non-empty
 bias instead of ignoring it.
 
