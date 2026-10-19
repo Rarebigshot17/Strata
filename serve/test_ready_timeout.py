@@ -57,6 +57,16 @@ while True:
     time.sleep(0.1)
 '''
 
+# moves on at once, then says nothing more: the disk read hung early in the warm-up
+WARMING_THEN_STUCK = r'''
+import sys, time
+for i in (1, 2):
+    sys.stderr.write('warming the experts: %d.0 of 8.0 GB (%d s, 1.00 GB/s)\n' % (i, i))
+    sys.stderr.flush()
+    time.sleep(0.1)
+time.sleep(3600)
+'''
+
 
 @unittest.skipIf(os.name == "nt", "the .cmd wrapper keeps the pipe open after the kill (only the wrapper dies), so the "
                                   "close of its stdout waits for the sleeping child; a real engine is one process")
@@ -118,6 +128,17 @@ class ReadyTimeout(unittest.TestCase):
             StrataEngine(self.make_script('stuck', WARMING_STUCK), [], log=str(log))
         self.assertIn('did not report READY', str(c.exception))
         self.assertLess(time.monotonic() - t0, 10)
+
+    def test_the_bound_runs_from_the_last_progress(self):
+        # the progress is looked for while the engine starts, not only once the bound has passed: a warm-up that
+        # moved on in the first second and then hung is ended one bound after that, not two
+        log = self.root / 'engine.log'
+        t0 = time.monotonic()
+        with mock.patch.object(server, 'ENGINE_READY_S', 2.0), mock.patch.object(StrataEngine, 'WARM_LOOK_S', 0.1), \
+                mock.patch('builtins.print'), self.assertRaises(server.EngineDied) as c:
+            StrataEngine(self.make_script('early', WARMING_THEN_STUCK), [], log=str(log))
+        self.assertIn('of its last warm-up progress (2.0 GB read)', str(c.exception))
+        self.assertLess(time.monotonic() - t0, 3.4)
 
     def test_ready_timeout_on_lazy_load_answers_the_request(self):
         # lazy start: restart()'s own bookkeeping must not crash on the missing slot_cv either (#1527)

@@ -534,6 +534,7 @@ class StrataEngine:
     silent_note = None                   # #481: why the server ended a silent engine (death_note says it)
     gpu_busy = None                      # #1317: () -> bool, "the GPU is working" (the telemetry's reading); a GPU at work is not frozen
     last_err = None                      # #997: an ERR that was its last stdout line (death_note says it)
+    WARM_LOOK_S = 2.0                    # how often a start looks for the warm-up's progress (strata-glm: every 2 s)
 
     def __init__(self, exe: str, args: list[str], cwd: str | None = None, log: str | None = None,
                  env: dict | None = None, lazy: bool = False):
@@ -594,18 +595,18 @@ class StrataEngine:
         timed_out = False
         warm_pos, warmed = log_start, None               # the warm-up's progress, from the log
         while True:
-            left = None if ready_deadline is None else ready_deadline - time.monotonic()
-            if left is not None and left <= 0:
+            if log and ready_deadline is not None:
                 # the warm-up reads 120-170 GB before READY, longer than the bound from a slow disk or a NAS: while
-                # it moves on, the bound counts from its last progress
-                warm_pos, done = warm_progress(log, warm_pos) if log else (warm_pos, None)
+                # it moves on, the bound counts from its last progress (looked for every WARM_LOOK_S)
+                warm_pos, done = warm_progress(log, warm_pos)
                 if done is not None and (warmed is None or done > warmed):
                     warmed, ready_deadline = done, time.monotonic() + ENGINE_READY_S
-                    continue
+            left = None if ready_deadline is None else ready_deadline - time.monotonic()
+            if left is not None and left <= 0:
                 timed_out = True
                 break
             try:
-                line = ready_q.get(timeout=left)
+                line = ready_q.get(timeout=None if left is None else min(left, self.WARM_LOOK_S))
             except queue.Empty:
                 continue
             if line is None:
