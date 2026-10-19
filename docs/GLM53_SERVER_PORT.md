@@ -119,8 +119,8 @@ reviewed: `glm53-flash-wip-frontend` (B1), `glm53-flash-wip-server` (B2), `glm53
 serve modules), `glm53-flash-wip-setup` (C1), `glm53-flash-wip-tools` (C2). The tests (B3), the docs (C3) and the
 review (D1) followed the merge.
 
-State of the branches (October 19): A, B, C1, C2 and D1 are merged into glm53-flash; C3 (the docs) is written and
-fact-checked on the docs branches (`glm53-flash-wip-docs-a` ... `-d`). Bugs the port's tests found and fixed: a
+State of the branches (October 19): A, B, C, D1 and E1 are merged into glm53-flash; what is left needs napster-ai
+(the steps in [GLM53_PORT.md](GLM53_PORT.md#what-to-run-on-napster-ai)). Bugs the port's tests found and fixed: a
 call cut off by the end of a reply was still returned as a call to run in non-streamed OpenAI and Anthropic answers
 (#211); a namespace tool written as `ns__tool` came back as text on /v1/responses; a call quoted on a "> " line
 inside the reasoning could be run. Added: OpenAI's
@@ -156,8 +156,7 @@ tokens more slowly than the engine wrote them (now each pass ends where the serv
   time), the run config, the run script, start on 8101. `setup.sh`, `update.sh`, Docker, `chat.py`, requirements.
 - [x] C2 (merged in c4d97d0) `tools/`: keep the GLM tools and generic HTTP tools; delete Qwen and HIP tooling with
   its tests.
-- [x] C3 (written and fact-checked against the code on the docs branches `glm53-flash-wip-docs-a` ... `-d`; the
-  merge commit follows) Docs: README for GLM, AGENTS.md, SECURITY.md, INSTALL, AI_SETUP, DETAILS, TROUBLESHOOTING,
+- [x] C3 (written and fact-checked against the code, merged in 02b0c89 ... 3d381ee) Docs: README for GLM, AGENTS.md, SECURITY.md, INSTALL, AI_SETUP, DETAILS, TROUBLESHOOTING,
   HOW_IT_WORKS, LOGIT_BIAS, LLAMA_SWAP, GLM53_PORT and this page; the Qwen/HIP docs, the translated READMEs and
   `docs/MCP_SERVER.md` (its `tools/strata_mcp.py` was removed in C1) deleted.
 
@@ -166,6 +165,14 @@ tokens more slowly than the engine wrote them (now each pass ends where the serv
 - [x] D1 (merged in 7b44860 ... 7f69bc9, and the passes' `end=` after them) A review pass over the whole diff
   (correctness first), fixes, all Python tests and the GLM checks (`glm53_selftest.sh`, `glm53_park_check.py`,
   `glm53_server_check.sh`) green on the CPU engine.
+- [x] E1 (merged in d8d45a7, 45eae16, d008e81 and 7a4d94b) The code problems the docs' fact-checkers found, in three
+  groups each reproduced by tests, fixed and reviewed: stopping (Ctrl+C, a closed window, SIGTERM and a systemd or
+  Docker stop end the engine with QUIT, so it saves its expert profile; `./setup.sh` execs the server; 120 s for the
+  engine to end; any start progress counts for the start watchdog), install (RAM in GiB on both sides, the driver
+  the chosen CUDA toolkit needs, `--yes` never asks, the Settings view through Docker's config link, a warning for
+  a keyless server on every interface), and the server (a start line saying whether calls are read from special
+  tokens, the page's Thinking On sent, `response_format` patterns and `logit_bias` checked before generating, the
+  free-VRAM check and the Monitor on every card when the config names none).
 
 ## Known risks to check on napster-ai
 
