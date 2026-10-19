@@ -169,9 +169,9 @@ and `false` mean "off". Any other value is a 400.
 
 **The reasoning budget.** `"reasoning_budget_tokens": N` in a request (chat, Anthropic or Responses), Anthropic's
 `thinking.budget_tokens`, the shared settings' or the run config's caps the thinking at N tokens, in that order: a
-request's own value wins, and 0 means no budget. When
-the thinking reaches N, the server ends it at a clean point (no tag or character cut in half) with a short wrap-up and
-`</think>`:
+request's own value wins, and a `reasoning_budget_tokens` of 0 means no budget (the ones after it do not apply). A
+`budget_tokens` of 0 or less sets none: the next one applies. When the thinking reaches N, the server ends it at a
+clean point (no tag or character cut in half) with a short wrap-up and `</think>`:
 
 ```text
 I have thought about this long enough; time to give my answer.</think>
