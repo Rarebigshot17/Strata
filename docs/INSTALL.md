@@ -395,7 +395,7 @@ explained in [DETAILS.md](DETAILS.md#settings). Keys the server does not know ar
 | `aliases` | Other model names the server lists and answers to: a list, or one comma-separated string. | None |
 | `lazy_load` | `true`: start without loading the model; the first request loads it (also `--lazy`). | `false` |
 | `idle_unload_s` | Unload the model after this many seconds without requests (also `--idle-unload`). | Never |
-| `min_free_vram_mib` | Load an unloaded model only when this much VRAM is free, else answer 503 (also `--min-free-vram-mib`). | Always load |
+| `min_free_vram_mib` | Load an unloaded model only when this much VRAM is free on each of its GPUs, else answer 503 (also `--min-free-vram-mib`). | Always load |
 | `before_load` | A command (a string or a list) run before an unloaded model loads again (also `--before-load`). | None |
 | `before_load_timeout_s`, `before_load_ignore_failure`, `before_load_strict` | How long `before_load` may run (default 120 s), and what a failure of it does. | |
 | `engine_silence_s` | End a request when the engine prints nothing for this many seconds. 0 = wait. | 300 |

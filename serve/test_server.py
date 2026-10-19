@@ -2888,6 +2888,30 @@ class SharingTheGpu(unittest.TestCase):
         self.svc.free_vram_mib = lambda: 9000
         self.assertEqual(self.chat()[0], 200)
 
+    def test_min_free_vram_is_checked_on_every_gpu_of_the_config(self):
+        # a layer split needs its room on every card: another program on the third card stops the load as one on the
+        # first does (only the first was read)
+        free = {0: 20000, 1: 20000, 2: 1500}
+        self.svc.gpu_index, self.svc.gpu_indices = 0, [0, 1, 2]
+        self.svc.min_free_vram_mib = 8000
+        self.svc.vram_free_wait_s = 0.2
+        self.svc.unload()
+        with mock.patch("serve.telemetry.free_vram_mib", lambda index=0: free.get(index)):
+            s, b = self.chat()
+            self.assertEqual(s, 503, b)
+            self.assertIn("1500 MiB of VRAM free on GPU 2", b["error"]["message"])
+            self.assertFalse(self.engine.alive())
+            free[2] = 9000
+            self.assertEqual(self.chat()[0], 200)
+            # a card that cannot be read is left out; when none can be, nothing is refused
+            free.update({0: None, 1: 3000})
+            self.assertEqual(self.svc.free_vram_mib(), 3000)
+            free.update({1: None, 2: None})
+            self.assertIsNone(self.svc.free_vram_mib())
+            self.svc.gpu_indices = []                                # a config that names no GPU: the first card
+            free[0] = 4000
+            self.assertEqual(self.svc.free_vram_mib(), 4000)
+
     def test_min_free_vram_unreadable_loads(self):
         self.svc.min_free_vram_mib = 8000
         self.svc.free_vram_mib = lambda: None                       # no NVML: never refuse

@@ -1505,7 +1505,8 @@ class Service:
         # only start it again when this much VRAM is free, and run this command first (e.g. to unload another
         # server's model); the next request after an unload starts the engine again
         self.idle_unload_s = 0
-        self.min_free_vram_mib = 0
+        self.min_free_vram_mib = 0                       # ... on each of the engine's GPUs
+        self.vram_gpu = None                             # the card free_vram_mib() found with the least free
         self.before_load = None
         self.before_load_timeout_s = 120.0               # #1997: how long the before_load command may run
         self.before_load_ignore_failure = False          # #1997: load even when it fails, without a VRAM check
@@ -1565,10 +1566,18 @@ class Service:
         return value if value > 0 else None
 
     def free_vram_mib(self) -> int | None:
-        """Free VRAM on the engine's (first) GPU, from NVML; None when it can't be read (then nothing is refused)."""
+        """The least free VRAM of the engine's GPUs (every card of a layer split: each needs its share), from NVML;
+        self.vram_gpu is that card.  A card that can't be read is left out; None when none can (then nothing is
+        refused)."""
+        self.vram_gpu = None
         try:
             from serve.telemetry import free_vram_mib
-            return free_vram_mib(int(getattr(self, "gpu_index", 0) or 0))
+            least = None
+            for index in getattr(self, "gpu_indices", None) or [int(getattr(self, "gpu_index", 0) or 0)]:
+                free = free_vram_mib(index)
+                if free is not None and (least is None or free < least):
+                    least, self.vram_gpu = free, index
+            return least
         except Exception:  # noqa: BLE001 - no NVML, no reading
             return None
 
@@ -1619,7 +1628,9 @@ class Service:
                 if hook_failed and not self.before_load_ignore_failure:
                     print(f"[strata] the before_load command failed ({hook_failed}) and only {free} MiB of VRAM is "
                           f"free (the model needs {self.min_free_vram_mib}): not loading; 503", flush=True)
-                raise GpuBusy(f"the GPU is in use by another program: {free} MiB of VRAM free, the model needs "
+                card = getattr(self, "vram_gpu", None)
+                raise GpuBusy(f"the GPU is in use by another program: {free} MiB of VRAM free"
+                              f"{'' if card is None else f' on GPU {card}'}, the model needs "
                               f"{self.min_free_vram_mib} (min_free_vram_mib) - it stays unloaded until that is free"
                               + (f"; the before_load command failed ({hook_failed})" if hook_failed else ""),
                               retry_after=15)
@@ -4687,8 +4698,8 @@ def main() -> int:
                          "model servers) can use the VRAM; the next request loads it again (also \"idle_unload_s\" "
                          "in the config; default: never)")
     ap.add_argument("--min-free-vram-mib", type=int, default=None,
-                    help="load an unloaded model only when this much VRAM is free, else answer 503 (also "
-                         "\"min_free_vram_mib\" in the config; default: always load)")
+                    help="load an unloaded model only when this much VRAM is free on each of its GPUs, else answer "
+                         "503 (also \"min_free_vram_mib\" in the config; default: always load)")
     ap.add_argument("--before-load", help="a command run before the model is loaded again (e.g. to unload another "
                                           "server's model; also \"before_load\" in the config, a string or a list)")
     a = ap.parse_args()

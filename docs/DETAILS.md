@@ -588,9 +588,10 @@ The model loads when the server starts, and the port opens once the engine is re
   curl -X POST http://127.0.0.1:8101/unload -H "Content-Type: application/json" -d '{}'
   ```
 
-- `"min_free_vram_mib": N` (or `--min-free-vram-mib N`): an unloaded model is loaded again only when the first GPU of
-  the config has N MiB free (waiting up to 15 s for memory another program just gave back); otherwise the request
-  gets a 503 with `Retry-After`. With three GPUs only the first is checked.
+- `"min_free_vram_mib": N` (or `--min-free-vram-mib N`): an unloaded model is loaded again only when every GPU of
+  the config (the first card when it names none) has N MiB free (waiting up to 15 s for memory another program just
+  gave back); otherwise the request gets a 503 with `Retry-After` that names the fullest card. A layer split needs its
+  share on each card, so a program on any of them is in the way; a card NVML cannot read is left out.
 - `"before_load": "<command>"` (a string or a list; or `--before-load`): a command run before the model is loaded
   again, for example another server's unload. It may run `"before_load_timeout_s"` seconds (default 120). When it
   fails, the model is loaded anyway, unless `min_free_vram_mib` is set and too little VRAM is free (503).
