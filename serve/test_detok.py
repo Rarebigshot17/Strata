@@ -1,7 +1,8 @@
 """The streaming detokenizer (perf-review F-1): the incremental one emits exactly what the old re-decode did, token
 by token, and its cost per token does not grow with the reply.
 
-    python -m unittest serve.test_detok      (needs a pack's tokenizer; skipped without one)
+    STRATA_TEST_GGUF=<a GLM GGUF, its first shard> python -m unittest serve.test_detok
+                                             (the real vocabulary's tests are skipped without it)
 """
 import os
 import random
@@ -17,14 +18,13 @@ sys.path.insert(0, str(ROOT))
 from serve.server import Detokenizer  # noqa: E402
 
 
+NO_GGUF = "set STRATA_TEST_GGUF to a GLM GGUF (its first shard) to test the real vocabulary"
+
+
 def find_tokenizer():
-    cands = [os.environ.get("STRATA_TOKENIZER", "")]
-    cands += [str(p) for p in ROOT.glob("packs/*/tokenizer")] + [str(p) for p in ROOT.glob("pack/*/tokenizer")]
-    cands += [r"C:\Users\AI-Server\Desktop\Strata\Public\Engine\pack\full\tokenizer"]
-    for c in cands:
-        if c and (Path(c) / "vocab.json").exists():
-            return Path(c)
-    return None
+    """The GGUF the real-vocabulary tests read the tokenizer from ($STRATA_TEST_GGUF), or None."""
+    path = os.environ.get("STRATA_TEST_GGUF", "")
+    return Path(path) if path and Path(path).is_file() else None
 
 
 class OldDetokenizer:
@@ -42,19 +42,11 @@ class OldDetokenizer:
         return delta
 
 
-@unittest.skipIf(find_tokenizer() is None, "no pack tokenizer here")
+@unittest.skipIf(find_tokenizer() is None, NO_GGUF)
 class Detok(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        import json
-        import strata_tokenizer as ST
-        t = find_tokenizer()
-        vocab = json.loads((t / "vocab.json").read_text(encoding="utf-8"))
-        toks = [None] * len(vocab)
-        for s, i in vocab.items():
-            toks[i] = s
-        cls.tok = ST.Tokenizer(toks, (t / "merges.txt").read_text(encoding="utf-8").split("\n"),
-                               json.loads((t / "token_type.json").read_text()))
+        cls.tok = real_tokenizer()
 
     def same_stream(self, ids):
         """The same text as the old re-decode, never behind it (the old one held complete characters too while
@@ -108,20 +100,14 @@ _REAL = []
 
 
 def real_tokenizer():
-    """The pack's tokenizer, loaded once for every class that needs it (None when there is no pack here)."""
+    """The GGUF's tokenizer, loaded once for every class that needs it (None without $STRATA_TEST_GGUF)."""
     if not _REAL:
         t = find_tokenizer()
         if t is None:
             _REAL.append(None)
         else:
-            import json
             import strata_tokenizer as ST
-            vocab = json.loads((t / "vocab.json").read_text(encoding="utf-8"))
-            toks = [None] * len(vocab)
-            for s, i in vocab.items():
-                toks[i] = s
-            _REAL.append(ST.Tokenizer(toks, (t / "merges.txt").read_text(encoding="utf-8").split("\n"),
-                                      json.loads((t / "token_type.json").read_text())))
+            _REAL.append(ST.Tokenizer.from_gguf(t))
     return _REAL[0]
 
 
@@ -250,15 +236,15 @@ class HeapBpe(unittest.TestCase):
         rng = random.Random(2)
         self.parity(tok, [random_text(rng) for _ in range(60)] + ["a" * 5000, "ab" * 3000, ""])
 
-    @unittest.skipIf(find_tokenizer() is None, "no pack tokenizer here")
-    def test_pack_vocab(self):
+    @unittest.skipIf(find_tokenizer() is None, NO_GGUF)
+    def test_real_vocab(self):
         tok = real_tokenizer()
         rng = random.Random(3)
         fixed = ["你好，世界" * 150, "한국어 텍스트" * 100,
                  "é́̂" * 200, "x" * 5000,
                  "https://example.com/" + "a/b-c_d.e?f=g&h=i#j" * 60,
                  "!function(e){var t={};function n(r){if(t[r])return t[r].exports}}" * 30,
-                 "<|im_start|>user\n日本語" * 40 + "<|im_end|><think>" + "漢" * 300]
+                 "<|user|>日本語" * 40 + "<|assistant|><think>" + "漢" * 300]
         self.parity(tok, fixed + [random_text(rng) for _ in range(40)])
 
     def check_speed(self, tok):
@@ -273,8 +259,8 @@ class HeapBpe(unittest.TestCase):
     def test_speed_synthetic(self):
         self.check_speed(synthetic_tokenizer())
 
-    @unittest.skipIf(find_tokenizer() is None, "no pack tokenizer here")
-    def test_speed_pack(self):
+    @unittest.skipIf(find_tokenizer() is None, NO_GGUF)
+    def test_speed_real(self):
         self.check_speed(real_tokenizer())
 
 
