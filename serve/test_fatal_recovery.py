@@ -1,116 +1,231 @@
-"""Real pipe/process protocol regression for a native ERR that leaves its process alive."""
-import os
-from pathlib import Path
+"""Real pipe/process protocol regressions for the GLM engine's two kinds of ERR line.
+
+`ERR <reason>`: the engine refused one request (malformed, does not fit) and stays alive and in step: a 400, and the
+next request goes to the same process.  `ERR internal: <what>`: the engine failed (a CUDA error): the request's state
+is gone, it is the server's failure (a 500, or an error event in a stream), and the engine may exit after it; the next
+request then starts it again.  No DONE follows either line.  A fake strata-glm process stands in for the engine.
+
+    python3 -m unittest serve.test_fatal_recovery -v
+"""
+import json
 import sys
 import tempfile
 import threading
 import time
 import unittest
-import json
+import urllib.error
 import urllib.request
-from serve.server import StrataEngine, Service, ChatTemplate, EngineDied, serve
-from serve.test_server import ByteTokenizer
+from pathlib import Path
 
-FAKE=r'''
+from serve.glm_fixtures import GlmTokenizer, glm_template
+from serve.server import EngineDied, EngineError, Service, StrataEngine, serve
+
+# The first GEN line fails as --mode says; every later one (and every one after a restart: the state file says the
+# first was attempted) answers "Z" and GLM's end of turn, <|user|> (259 in GlmTokenizer).
+FAKE = r'''
 import sys
 from pathlib import Path
-state=Path(sys.argv[sys.argv.index('--state')+1])
-mode=sys.argv[sys.argv.index('--mode')+1]
-print('READY 4096 stop',flush=True)
+state = Path(sys.argv[sys.argv.index('--state') + 1])
+mode = sys.argv[sys.argv.index('--mode') + 1]
+sys.stdout.reconfigure(line_buffering=True)
+print('INFO engine=0.2.0 backend=cpu-reference eos=3 park_mib=0 logit_bias=1')
+print('READY 4096 stop')
 for line in sys.stdin:
- if line.startswith('QUIT'):break
- if line.startswith(('GEN','BGEN')):
-  if not state.exists():
-   state.write_text('first request was attempted')
-   if mode=='invalid':print('ERR prompt exceeds context',flush=True)
-   else:
-    kind='verify batch' if mode=='batch' else 'verify'
-    print(f'ERR {kind}: timed out at layer 18; its GPU waits were released and the GPU finished (#267)',flush=True)
-    print('DONE 0 1 0 1 error',flush=True)
-   continue
-  print('T 90\nDONE 1 1 0 1 stop',flush=True)
+    if line.startswith('QUIT'):
+        break
+    if not line.startswith('GEN '):
+        continue
+    n = len(line.split()[-1].split(','))
+    if not state.exists():
+        state.write_text('the first request was attempted')
+        if mode == 'invalid':
+            print('ERR the prompt (%d tokens) does not fit the context (4096)' % n)
+            continue
+        if mode == 'late':
+            print('T 90')
+        print('ERR internal: CUDA error 700 (an illegal memory access was encountered)')
+        if mode in ('internal', 'late'):
+            sys.exit(1)
+        continue
+    print('T 90')
+    print('T 259')
+    print('DONE 2 %d 1.0 1.0 stop 0 0 0 0 0 0 0 0.0 %d 0' % (n, n))
 '''
+
 
 class FatalRecovery(unittest.TestCase):
     def setUp(self):
-        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
-        self.root=Path(self.tmp.name);py=self.root/'native.py'
-        if os.name=='nt':   # no shebangs on Windows: a .cmd runs the same fake engine
-            py.write_text(FAKE);self.script=self.root/'native.cmd'
-            self.script.write_text(f'@"{sys.executable}" "{py}" %*\r\n')
-        else:
-            self.script=py;py.write_text('#!'+sys.executable+'\n'+FAKE);py.chmod(0o700)
-    def engine(self,mode='fatal'):
-        e=StrataEngine(str(self.script),['--state',str(self.root/'state'),'--mode',mode])
-        self.addCleanup(e.close);return e
-    def service(self,e):
-        return Service(e,ByteTokenizer(),ChatTemplate(Path(__file__).parent/'chat_template.jinja'))
-    def wait_dead(self,e):
-        end=time.monotonic()+2
-        while e.alive() and time.monotonic()<end:time.sleep(.01)
-        self.assertFalse(e.alive(),'unrecoverable native ERR must invalidate health before a new request')
-    def run_request(self,svc):
-        return list(svc.run([1],False,[],8,{},threading.Event()))
-    def test_fatal_error_is_not_a_success_and_next_request_reloads(self):
-        e=self.engine();svc=self.service(e)
-        with self.assertRaises(EngineDied):self.run_request(svc)
-        self.wait_dead(e)
-        self.assertIs(svc.engine,e,'the failed request must not be retried automatically')
-        self.assertEqual(svc.history[-1]['finish'],'error')
-        result=self.run_request(svc);self.addCleanup(svc.engine.close)
-        self.assertTrue(svc.engine.alive())
-        self.assertTrue(svc.loaded());self.assertEqual(result[-1][1]['completion_tokens'],1)
-    def test_http_health_and_next_request_recovery(self):
-        old=self.engine();svc=self.service(old);http=serve(svc,port=0)
-        base=f'http://127.0.0.1:{http.server_address[1]}'
-        body={'messages':[{'role':'user','content':'hi'}],'max_tokens':8,
-              'chat_template_kwargs':{'enable_thinking':False},'stream':True}
-        try:
-            def post():
-                req=urllib.request.Request(base+'/v1/chat/completions',data=json.dumps(body).encode(),headers={'Content-Type':'application/json'})
-                with urllib.request.urlopen(req,timeout=5) as r:return r.read().decode()
-            text=post()
-            self.assertIn('"error"',text);self.assertTrue(text.rstrip().endswith('data: [DONE]'))
-            with urllib.request.urlopen(base+'/health',timeout=5) as r:self.assertFalse(json.load(r)['loaded'])
-            body['stream']=False
-            self.assertEqual(json.loads(post())['usage']['completion_tokens'],1)
-            with urllib.request.urlopen(base+'/health',timeout=5) as r:self.assertTrue(json.load(r)['loaded'])
-        finally:
-            http.shutdown();http.server_close();svc.engine.close()
-    def test_batch_timeout_signature_also_invalidates_engine(self):
-        e=self.engine('batch')
-        with self.assertRaises(EngineDied):list(e.generate([1],8,{},threading.Event()))
-        self.wait_dead(e)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.script = self.root / 'strata-glm'
+        self.script.write_text('#!' + sys.executable + '\n' + FAKE, encoding='utf-8')
+        self.script.chmod(0o700)
 
-    def feed(self,e,lines,slots):
-        import queue
-        class P:
-            stdout=iter(lines)
-            terminated=False
-            def terminate(self):self.terminated=True
-        old=e.proc;e.proc=P();e.lines=queue.Queue();e.slot_q=[queue.Queue() for _ in range(slots)];e.ended=False
-        e._pump()
-        self.assertTrue(e.ended);self.assertTrue(e.proc.terminated)
-        self.assertIsNone(e.lines.get_nowait());self.assertTrue(e.lines.empty())   # EOF, never the trailing DONE
-        e.proc=old
-    def test_fatal_lines_are_checked_before_batch_routing(self):
-        e=self.engine('fatal')
-        self.feed(e,['ERR verify batch: timed out at layer 3\n','BDONE 0 1 0 1 error\n'],2)
-        self.assertTrue(all(q.get_nowait() is None and q.empty() for q in e.slot_q))   # only the EOF reached a slot, not the BDONE
-    def test_an_earlier_window_never_finished_is_fatal(self):
-        e=self.engine('fatal')
-        self.feed(e,['ERR verify: an earlier window never finished on the GPU (#267); restart the engine\n','DONE 0 1 0 1 error\n'],0)
-        self.feed(e,['ERR verify batch: an earlier window never finished on the GPU (#267)\n'],2)
-    def test_generate_batched_refuses_a_dead_engine(self):
-        e=self.engine('fatal');e.close()
-        with self.assertRaises(EngineDied):list(e.generate_batched([1],8,{},threading.Event()))
+    def engine(self, mode):
+        e = StrataEngine(str(self.script), ['--state', str(self.root / 'state'), '--mode', mode])
+        self.addCleanup(e.close)
+        return e
+
+    def service(self, e):
+        svc = Service(e, GlmTokenizer(), glm_template())
+        self.addCleanup(lambda: svc.engine.close())
+        return svc
+
+    def wait_dead(self, e):
+        end = time.monotonic() + 5
+        while e.alive() and time.monotonic() < end:
+            time.sleep(.01)
+        self.assertFalse(e.alive(), 'an engine that exited must not count as loaded for the next request')
+        # alive() turns False as soon as the process is gone or its output closed; the pump notes the last ERR line
+        # a moment later, and death_note needs both that and the exit code
+        e.pump.join(5)
+        e.proc.wait(5)
+
+    def run_request(self, svc):
+        return list(svc.run([1], False, [], 8, {}, threading.Event()))
+
+    def content(self, events):
+        return ''.join(x.text or '' for kind, x in events if kind == 'event' and x.kind == 'content')
+
+    def test_internal_error_is_not_a_success_and_next_request_restarts(self):
+        e = self.engine('internal')
+        svc = self.service(e)
+        with self.assertRaises(EngineError) as c:
+            self.run_request(svc)
+        self.assertNotIsInstance(c.exception, ValueError)          # the server's failure, not the request's
+        self.assertIn('CUDA error 700', str(c.exception))
+        self.wait_dead(e)
+        self.assertIs(svc.engine, e, 'the failed request must not be retried automatically')
+        self.assertEqual(svc.history[-1]['finish'], 'error')
+        # #997 #890: the death note gives the engine's own last words, not a guess about RAM
+        self.assertIn('exited (code 1) after it reported: internal: CUDA error 700', e.death_note())
+        result = self.run_request(svc)
+        self.assertTrue(svc.engine.alive())
+        self.assertTrue(svc.loaded())
+        self.assertEqual(self.content(result), 'Z')
+        self.assertEqual((result[-1][1]['finish'], result[-1][1]['completion_tokens']), ('stop', 2))   # Z, <|user|>
+
+    def test_internal_error_with_the_engine_still_running(self):
+        # the engine caught the failure and dropped the request's state: it is not ended, the next request uses it
+        e = self.engine('internal-alive')
+        svc = self.service(e)
+        pid = e.proc.pid
+        with self.assertRaises(EngineError):
+            self.run_request(svc)
+        self.assertTrue(e.alive())
+        result = self.run_request(svc)
+        self.assertEqual(e.proc.pid, pid)
+        self.assertEqual((self.content(result), result[-1][1]['finish']), ('Z', 'stop'))
+
+    def test_internal_error_after_the_first_tokens(self):
+        e = self.engine('late')
+        svc = self.service(e)
+        events = []
+        with self.assertRaises(EngineError):
+            for item in svc.run([1], False, [], 8, {}, threading.Event()):
+                events.append(item)
+        self.assertEqual(self.content(events), 'Z')                  # what came before the failure was sent
+        self.assertEqual(svc.history[-1]['finish'], 'error')
+        self.wait_dead(e)
+        self.assertEqual(self.content(self.run_request(svc)), 'Z')
+
+    def post(self, base, body, path='/v1/chat/completions'):
+        req = urllib.request.Request(base + path, data=json.dumps(body).encode(),
+                                     headers={'Content-Type': 'application/json'})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, r.read().decode()
+        except urllib.error.HTTPError as err:
+            with err:
+                return err.code, err.read().decode()
+
+    def health(self, base):
+        with urllib.request.urlopen(base + '/health', timeout=5) as r:
+            return json.load(r)
+
+    def http(self, mode):
+        svc = self.service(self.engine(mode))
+        httpd = serve(svc, port=0)
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        return svc, f'http://127.0.0.1:{httpd.server_address[1]}'
+
+    def test_http_health_and_next_request_recovery(self):
+        svc, base = self.http('internal')
+        body = {'messages': [{'role': 'user', 'content': 'hi'}], 'max_tokens': 8,
+                'chat_template_kwargs': {'enable_thinking': False}, 'stream': True}
+        status, text = self.post(base, body)
+        self.assertEqual(status, 200)
+        self.assertIn('"error"', text)
+        self.assertIn('CUDA error 700', text)
+        self.assertTrue(text.rstrip().endswith('data: [DONE]'))
+        self.wait_dead(svc.engine)
+        self.assertFalse(self.health(base)['loaded'])
+        body['stream'] = False
+        status, text = self.post(base, body)
+        self.assertEqual(status, 200, text)
+        reply = json.loads(text)
+        self.assertEqual((reply['choices'][0]['message']['content'], reply['usage']['completion_tokens']), ('Z', 2))
+        self.assertTrue(self.health(base)['loaded'])
+
+    def test_http_refusal_is_a_400_and_the_engine_stays(self):
+        svc, base = self.http('invalid')
+        pid = svc.engine.proc.pid
+        body = {'messages': [{'role': 'user', 'content': 'hi'}], 'max_tokens': 8, 'reasoning_effort': 'none'}
+        status, text = self.post(base, body)
+        self.assertEqual(status, 400, text)
+        error = json.loads(text)['error']
+        self.assertEqual(error['type'], 'invalid_request_error')
+        self.assertIn('does not fit the context', error['message'])
+        self.assertTrue(self.health(base)['loaded'])
+        status, text = self.post(base, body)
+        self.assertEqual((status, json.loads(text)['choices'][0]['message']['content']), (200, 'Z'))
+        self.assertEqual(svc.engine.proc.pid, pid)
+
+    def refusal(self, path, body):
+        """`path`'s answer (not streamed) when the engine refuses the request: a fresh engine whose first GEN is
+        refused."""
+        (self.root / 'state').unlink(missing_ok=True)
+        svc, base = self.http('invalid')
+        return self.post(base, body, path)
+
+    def test_a_refusal_is_a_400_on_the_other_apis(self):
+        for path, body in (('/v1/messages', {'model': 'm', 'max_tokens': 8,
+                                             'messages': [{'role': 'user', 'content': 'hi'}]}),
+                           ('/v1/completions', {'prompt': 'hi', 'max_tokens': 8})):
+            with self.subTest(path=path):
+                status, text = self.refusal(path, body)
+                self.assertEqual(status, 400, text)
+                error = json.loads(text)['error']
+                self.assertEqual(error['type'], 'invalid_request_error')
+                self.assertIn('does not fit the context', error['message'])
+
+    # BUG: serve/server.py's /v1/responses (not streamed) answers the engine's plain ERR, a refusal of the request,
+    # with a 500 server_error: its handler catches (EngineError, ValueError) together.  The other APIs answer a 400.
+    @unittest.expectedFailure
+    def test_a_refusal_is_a_400_on_the_responses_api(self):
+        status, text = self.refusal('/v1/responses', {'model': 'm', 'input': 'hi', 'max_output_tokens': 8})
+        self.assertEqual(status, 400, text)
+        error = json.loads(text)['error']
+        self.assertEqual(error['type'], 'invalid_request_error')
+        self.assertIn('does not fit the context', error['message'])
 
     def test_validation_error_does_not_kill_engine(self):
-        e=self.engine('invalid')
-        with self.assertRaises(ValueError):list(e.generate([1],8,{},threading.Event()))
+        e = self.engine('invalid')
+        with self.assertRaises(ValueError) as c:
+            list(e.generate([1], 8, {}, threading.Event()))
+        self.assertNotIsInstance(c.exception, EngineError)
         self.assertTrue(e.alive())
-        self.assertEqual(list(e.generate([1],8,{},threading.Event())),[90])
-    def test_closed_serial_engine_rejects_without_accessing_closed_pipe(self):
-        e=self.engine();e.close()
-        with self.assertRaises(EngineDied):list(e.generate([1],8,{},threading.Event()))
-if __name__=='__main__':unittest.main()
+        self.assertEqual(list(e.generate([1], 8, {}, threading.Event())), [90, 259])   # in step: its own T lines
+        self.assertEqual(e.last['finish'], 'stop')
+
+    def test_closed_engine_rejects_without_accessing_closed_pipe(self):
+        e = self.engine('internal')
+        e.close()
+        with self.assertRaises(EngineDied):
+            list(e.generate([1], 8, {}, threading.Event()))
+
+
+if __name__ == '__main__':
+    unittest.main()
