@@ -82,10 +82,11 @@ control -> STOP                          ends the last GEN's request, even a que
 
 The server starts the engine in a session of its own: Ctrl+C and a closed terminal's SIGHUP reach only the server,
 which ends the engine with STOP and QUIT (main(), StrataEngine.shutdown). strata-glm in --serve mode
-(include/strata/glm/serve_signals.hpp) ignores SIGINT, SIGHUP and SIGTERM while the server that started it runs
-(a systemd stop signals every process of the service), ends on them once that server is gone, ends at once when
-the server goes while it still starts (before READY: the parent-death signal), and ends at a broken stdout (SIGPIPE,
-restored even when the launcher ignored it).
+(include/strata/glm/serve_signals.hpp) ignores SIGINT, SIGHUP and SIGTERM while the server that started it in a
+session of its own runs (a systemd stop signals every process of the service), ends on them once that server is gone,
+ends at once when the server goes while it still starts (before READY: the parent-death signal), and ends at a broken
+stdout (SIGPIPE, restored even when the launcher ignored it). Run by hand from a shell or by a tool, it is not in a
+session of its own, and Ctrl+C or a `kill` ends it as before.
 
 Engine options (strata-glm --serve): `-m <first shard> --ctx N --eos-ids a,b,c [--devices 0,1,2]
 [--split w,w,w] [--threads N] [--vram-reserve GB] [--expert-profile FILE] [--max-swaps N] [--no-expert-cache]

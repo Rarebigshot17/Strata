@@ -342,6 +342,7 @@ std::pair<pid_t, pid_t> server_with_engine(bool serving) {
     if (server == 0) {
         const pid_t engine = fork();
         if (engine == 0) {
+            setsid();                                  // as the server starts it
             serve_signals_starting();
             if (serving) serve_signals_serving();
             dup2(open("/dev/null", O_WRONLY), 2);
@@ -552,8 +553,10 @@ int main() {
     // ignored, as from a launcher that ignores it, and serve_signals_starting() must restore it.
     std::signal(SIGPIPE, SIG_IGN);
     // (exit code 40: the loop returned, where strata-glm saves its expert profile; nothing is printed after it)
-    auto engine = [](const std::string& mode, int64_t max_ctx, std::vector<int32_t> eos) {
+    // own_session: started by the server, which puts it in a session of its own; false: by hand from a shell
+    auto engine = [](const std::string& mode, int64_t max_ctx, std::vector<int32_t> eos, bool own_session = true) {
         return [=] {
+            if (own_session) setsid();
             serve_signals_starting();
             Fake ev;
             ev.mode = mode;
@@ -580,6 +583,19 @@ int main() {
         expect(ready && sent && done && st != -1 && WIFEXITED(st) && WEXITSTATUS(st) == 40,
                "serving: SIGINT, SIGHUP and SIGTERM are ignored while the server runs; QUIT ends the engine, which "
                "saves its profile", {p.got});
+    }
+    for (int sig : {SIGINT, SIGTERM}) {
+        // run by hand from a shell (or by a tool), not in a session of its own: Ctrl+C and kill end it as before,
+        // though its parent still runs
+        Proc p = spawn(engine("plain", 64, {31}, false));
+        const bool ready = read_until(p, "READY", 10);
+        kill(p.pid, sig);
+        const int st = wait_for(p.pid, 10);
+        close(p.in);
+        close(p.out);
+        if (st == -1) reap(p.pid);
+        expect(ready && st != -1 && WIFSIGNALED(st) && WTERMSIG(st) == sig,
+               std::string("by hand: ") + (sig == SIGINT ? "Ctrl+C" : "SIGTERM") + " ends the engine", {p.got});
     }
     {
         Proc p = spawn(engine("plain", 64, {31}));

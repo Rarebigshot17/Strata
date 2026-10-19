@@ -131,9 +131,9 @@ engine `STOP` and `QUIT`, and the engine writes its expert profile and gives bac
 120 seconds for that (the window says what it waits for after 2 seconds; `STRATA_ENGINE_QUIT_S` changes the 120, how
 long it takes on the real model is not measured), then kills the engine. The engine runs in a session of its own, so
 the terminal's signals reach only the server, and strata-glm ignores a stop signal that still reaches it while the
-server runs (a systemd stop signals every process of the service): the server's `QUIT` follows. A stop while the
-engine still starts ends it at once (it has nothing to save yet). This is read from the code and tested with a fake
-engine, not tried on a GPU.
+server runs (a systemd stop signals every process of the service): the server's `QUIT` follows. (Run by hand from a
+shell, `strata-glm --serve` ends on Ctrl+C as any program does.) A stop while the engine still starts ends it at once
+(it has nothing to save yet). This is read from the code and tested with a fake engine, not tried on a GPU.
 
 When the server ends without stopping the engine (`kill -9`, a crash), the engine ends too: at the end of its input
 when it is idle (the profile is written), at its next output line during a request, and at once while it starts.

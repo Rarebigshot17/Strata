@@ -4,7 +4,8 @@
 // (--expert-profile) and gives its memory back. It starts the engine in a session of its own, so Ctrl+C and the
 // hang-up of a closed terminal reach only the server. A stop signal that still reaches a serving engine while that
 // server runs - a systemd stop with the default KillMode=control-group sends SIGTERM to every process of the
-// service, a `kill` - is therefore ignored (the log says so): the server's QUIT follows.
+// service, a `kill` - is therefore ignored (the log says so): the server's QUIT follows. An engine run by hand from
+// a shell, or by a tool, is not in a session of its own: Ctrl+C and a `kill` end it as before.
 //
 // Without its server the engine still ends: when idle at the end of its input (the profile is saved), during a
 // request at its next output line (SIGPIPE), on a stop signal, and while it still starts (placing the layers, the
@@ -54,9 +55,11 @@ inline void serve_signals_starting() {
 
 /// Just before the serve loop says READY: the parent-death signal goes (it follows the thread that started the
 /// engine, and a restart's is a request's thread, which ends), and SIGINT, SIGHUP and SIGTERM are ignored while the
-/// server runs. One ignored from the start (nohup's SIGHUP) stays ignored.
+/// server runs - only when the server started it in a session of its own. One ignored from the start (nohup's
+/// SIGHUP) stays ignored.
 inline void serve_signals_serving() {
     prctl(PR_SET_PDEATHSIG, 0);
+    if (getsid(0) != getpid()) return;             // by hand from a shell, or a tool: Ctrl+C and kill end it
     struct sigaction sa {};
     sa.sa_handler = serve_signals_detail::on_stop;
     sigemptyset(&sa.sa_mask);
