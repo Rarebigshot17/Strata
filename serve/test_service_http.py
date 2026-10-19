@@ -377,7 +377,7 @@ class ArrivalOrder(Http):
             threads["C"].start()                                        # C arrives during the restart
             while not self.engine.running and time.monotonic() < deadline:
                 time.sleep(0.01)
-            time.sleep(0.8)
+            time.sleep(1.2)                                             # (load() looks every 0.5 s)
             threads["D"] = threading.Thread(target=ask, args=("question D",))
             threads["D"].start()                                        # D arrives after it, while B answers
             for th in threads.values():

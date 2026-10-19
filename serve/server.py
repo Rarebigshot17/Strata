@@ -8,7 +8,8 @@ POST /v1/messages (Anthropic, stream and non-stream), POST /v1/responses (OpenAI
 GET /models, GET /props, GET /slots, GET /health, GET /metrics, GET /mcp.  One request at a time; the others wait their
 turn in the order they arrived.  Tools from MCP servers (serve/mcp.py, `"mcp_servers"` in the config or --mcp-config)
 are offered only to requests that ask for them with `"strata_mcp": true` - the web app does; other clients see exactly
-the API they always saw (and get a 403 for `strata_mcp` unless the config's `"mcp_for_api": true` lets them).  GLM-5.3-Flash reads text only: a request with a picture is a 400.
+the API they always saw (and get a 403 for `strata_mcp` unless the config's `"mcp_for_api": true` lets them).
+GLM-5.3-Flash reads text only: a request with a picture is a 400.
 Requests whose prompt plus max tokens exceed the engine's context are REJECTED with 400, never truncated.
 An unset (or 0, or -1) max tokens means "unlimited": whatever the prompt leaves of the context (on /v1/completions an
 unset one is 256 tokens: a plain prompt has no end of turn to stop at).
