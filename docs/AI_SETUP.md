@@ -21,7 +21,8 @@ Work through the steps in order. Tell the user what you are doing in plain words
 - **You cannot type the user's sudo password.** `./setup.sh` uses sudo to install Python with venv when it is
   missing, and setup uses sudo to install the C++ compiler and the CUDA toolkit when they are missing. Check for them
   first (step 2). If something is missing, ask the user to run the commands in step 4 in their own terminal.
-- **Do not install or change NVIDIA drivers** unless the user asks. Strata needs driver 580 or newer.
+- **Do not install or change NVIDIA drivers** unless the user asks. Strata needs driver 580 or newer (525 or newer
+  when an installed CUDA 12 toolkit builds the engine).
 - **The download is big:** about 120 GB for the 3-bit size, about 170 GB for the 4-bit. Ask the user before you start,
   especially on a metered connection. At 100 Mbit/s, 120 GB takes about 2.7 hours (calculated).
 - **Setup runs for a long time** (the build, the download). Run it in the background or with a long timeout and read
@@ -52,14 +53,15 @@ python3 setup.py --check
 ```
 
 It ends with `This PC can run GLM-5.3-Flash (<size> recommended)` and exit code 0, or with exit code 1: no NVIDIA GPU
-(`nvidia-smi did not answer`), a driver older than 580, or `neither size fits <N> GiB of RAM`.
+(`nvidia-smi did not answer`), a driver older than the CUDA toolkit needs (580 for CUDA 13, 525 for CUDA 12), or
+`neither size fits <N> GiB of RAM`.
 
 Check the rest by hand:
 
 | What | Command | What it must show |
 | --- | --- | --- |
 | OS | `cat /etc/os-release` | Linux. Ubuntu 22.04 or 24.04 lets setup install the CUDA toolkit itself. |
-| GPUs, VRAM, driver | `nvidia-smi --query-gpu=index,name,memory.total,compute_cap,driver_version --format=csv` | Compute capability 7.5 or newer (RTX 20, 30, 40, 50 series), driver 580 or newer. |
+| GPUs, VRAM, driver | `nvidia-smi --query-gpu=index,name,memory.total,compute_cap,driver_version --format=csv` | Compute capability 7.5 or newer (RTX 20, 30, 40, 50 series), driver 580 or newer (525 or newer with an installed CUDA 12 toolkit). |
 | RAM | `free -g` (the `total` of `Mem:`) | See step 3. |
 | Free disk | `df -h .` (and the drive for `--data-dir`) | 120 GB (3-bit) or 170 GB (4-bit), plus about 8-10 GB if the CUDA toolkit is to be installed. |
 | CPU | `grep -m1 -ow avx2 /proc/cpuinfo` | `avx2`. Without it setup goes on with a warning. |
@@ -214,7 +216,7 @@ What the user should know about it:
 | What it says | What to do |
 | --- | --- |
 | `no NVIDIA GPU found (nvidia-smi did not answer)` | The NVIDIA driver is missing or not loaded. The user installs it (Ubuntu: `sudo ubuntu-drivers install`) and restarts. |
-| `the NVIDIA driver is too old` | The user updates it to 580 or newer and restarts; then run setup again. |
+| `the NVIDIA driver is too old` | The user updates it to the version the message names (580 or newer for CUDA 13, 525 for CUDA 12) and restarts; then run setup again. |
 | `input ended before a setup answer was received` | Add `--yes`. |
 | `the build tools are needed`, or a sudo password prompt | Ask the user to run the commands in step 4, then run setup again. |
 | `the CUDA Toolkit can be installed automatically on Ubuntu 22.04 / 24.04 only` | The user installs the toolkit from their distribution or https://developer.nvidia.com/cuda-downloads. |

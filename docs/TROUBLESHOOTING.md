@@ -42,8 +42,11 @@ are done.
 ## While installing
 
 **"no NVIDIA GPU found (nvidia-smi did not answer)"** or **"the NVIDIA driver is too old"**.
-Install or update the NVIDIA driver (580 or newer; on Ubuntu `sudo ubuntu-drivers install`), restart the PC and run
-`./setup.sh` again. Everything already done is kept.
+Install or update the NVIDIA driver, restart the PC and run `./setup.sh` again (on Ubuntu `sudo ubuntu-drivers
+install`). Everything already done is kept. The driver setup needs is the one the CUDA toolkit it builds the engine
+with needs: 580 or newer for CUDA 13 (the one setup installs when there is none), 525 or newer for a CUDA 12 toolkit
+you have installed. With a driver from 525 on and both toolkits installed, `STRATA_NVCC=<the CUDA 12 bin/nvcc>
+./setup.sh --build` builds with CUDA 12.
 
 **"GPU N (...) cannot be used: not supported - compute capability X"**.
 strata-glm needs compute capability 7.5 or newer (RTX 20 series and newer). This stops setup when `--gpu` or

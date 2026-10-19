@@ -52,7 +52,8 @@ REPO = "unsloth/GLM-5.3-Flash-GGUF"     # the model's GGUF files; their names ar
 HF_DEFAULT = "https://huggingface.co"
 LLAMA_CPP_COMMIT = "3cf03257f219afbe7334045ff7c6a06ac68c627d"   # ggml for the build (CMakeLists.txt pins the same)
 LLAMA_CPP_ZIP = f"https://github.com/ggml-org/llama.cpp/archive/{LLAMA_CPP_COMMIT}.zip"
-MIN_DRIVER = 580                       # the driver a CUDA 13 build runs with
+MIN_DRIVER = 580                       # the driver a CUDA 13 build runs with (setup installs CUDA 13.0)
+MIN_DRIVER_CUDA12 = 525                # the driver a CUDA 12.x build runs with (CUDA's minor version compatibility)
 MIN_ARCH = 75                          # the oldest compute capability strata-glm is compiled for (RTX 20)
 PORT = 8101                            # clear of what often runs beside it (3000, 8000, 8080)
 MODEL_NAME = "glm-5.3-flash"
@@ -746,8 +747,7 @@ def find_nvcc(below=None):
         if not Path(pick).exists():
             warn(f"STRATA_NVCC={pick}: no such file; looking for a CUDA toolkit as usual")
         else:
-            v = re.search(r"release (\d+)\.(\d+)", out([pick, "--version"]))
-            ver = (int(v.group(1)), int(v.group(2))) if v else None
+            ver = nvcc_version(pick)
             if ver and below is not None and ver >= below:
                 warn(f"STRATA_NVCC={pick} is CUDA {ver[0]}.{ver[1]}; this build needs one older than "
                      f"{below[0]}.{below[1]}")
@@ -762,11 +762,23 @@ def find_nvcc(below=None):
     best = (None, None)
     for c in dict.fromkeys(cands):                     # every toolkit found; the newest wins
         if c and Path(c).exists():
-            v = re.search(r"release (\d+)\.(\d+)", out([c, "--version"]))
-            ver = (int(v.group(1)), int(v.group(2))) if v else None
+            ver = nvcc_version(c)
             if ver and (below is None or ver < below) and (best[1] is None or ver > best[1]):
                 best = (c, ver)
     return best
+
+
+def nvcc_version(nvcc) -> tuple | None:
+    """An nvcc's CUDA version as (major, minor), None when it cannot be read."""
+    v = re.search(r"release (\d+)\.(\d+)", out([nvcc, "--version"]) if nvcc else "")
+    return (int(v.group(1)), int(v.group(2))) if v else None
+
+
+def min_driver(cuda_v) -> int:
+    """The oldest NVIDIA driver an engine built with this CUDA version runs on: 525 for CUDA 12.x (its minor version
+    compatibility; the engine has code for each card's own compute capability, so nothing is compiled at run time),
+    580 for CUDA 13 and for the CUDA 13.0 setup installs (None)."""
+    return MIN_DRIVER_CUDA12 if cuda_v and cuda_v[0] == 12 else MIN_DRIVER
 
 
 def find_tool(name):
@@ -976,6 +988,20 @@ def engine_current(archs, meta: dict | None = None) -> bool:
     meta = installed_build() if meta is None else meta
     return (BUILD_DIR / EXE).exists() and meta.get("src") == source_hash() and \
         {int(x) for x in archs} <= {int(x) for x in meta.get("archs", [])}
+
+
+def build_cuda(archs, rebuild=False) -> tuple | None:
+    """The CUDA version the engine runs with on this PC: the toolkit build/ was compiled with while that build is
+    current for these compute capabilities (and not `rebuild`, --build), else the toolkit build_engine takes - an
+    installed one of 12.0 or newer (13.0 for an RTX 50 card) - or None when it would install CUDA 13.0 first."""
+    meta = installed_build()
+    if not rebuild and engine_current(archs, meta):
+        v = nvcc_version(meta.get("nvcc"))
+        if v:
+            return v
+    archs = {int(x) for x in archs} | {int(x) for x in meta.get("archs", [])}
+    nvcc, cuda_v = find_nvcc()
+    return cuda_v if nvcc and cuda_v and cuda_v >= ((13, 0) if max(archs, default=0) >= 120 else (12, 0)) else None
 
 
 def write_build_stamp(archs, nvcc) -> dict:
@@ -1512,10 +1538,17 @@ def check_pc(a) -> tuple:
     ok("GPUs: " + " + ".join(gpu_name(g) for g in cards) + (" (the model's layers are shared across them)"
                                                              if len(cards) > 1 else ""))
     old = min(cards, key=driver_major)
-    if driver_major(old) < MIN_DRIVER:
-        fail(f"the NVIDIA driver is too old ({old['driver']}; {MIN_DRIVER} or newer is needed: the engine is built "
-             "with CUDA 13)", "update it (Ubuntu: sudo ubuntu-drivers install, or https://www.nvidia.com/drivers), "
-                              "restart, and run this again")
+    archs = card_archs([g for g in found if gpu_problem(g) is None])   # what build_engine compiles for
+    cuda_v = build_cuda(archs, a.build)
+    need = min_driver(cuda_v)
+    if driver_major(old) < need:
+        cuda12 = need == MIN_DRIVER and driver_major(old) >= MIN_DRIVER_CUDA12 and max(archs, default=0) < 120
+        fail(f"the NVIDIA driver is too old ({old['driver']}; {need} or newer is needed: "
+             + (f"the engine is built with CUDA {cuda_v[0]}.{cuda_v[1]})" if cuda_v else
+                "setup installs CUDA 13.0 to build the engine)"),
+             "update it (Ubuntu: sudo ubuntu-drivers install, or https://www.nvidia.com/drivers), restart, and run "
+             "this again" + ("; or install a CUDA 12 toolkit (an engine built with it runs on 525 or newer) and run "
+                             "STRATA_NVCC=<its bin/nvcc> ./setup.sh --build" if cuda12 else ""))
     ok(f"driver {old['driver']}, compute capability " + ", ".join(sorted({cc(g) for g in cards}))
        + f" (the engine is compiled for {cuda_archs(card_archs(cards))})")
     ram = ram_gib()

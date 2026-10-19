@@ -17,7 +17,7 @@ its design, its server and its web app, replaces the engine, and runs GLM-5.3-Fl
 
 | | |
 | --- | --- |
-| **Graphics cards** | **NVIDIA**, compute capability 7.5 or newer (GeForce RTX 20 series and newer). One card or several: the model's layers are split over them. Driver **580** or newer: setup stops with an older one. |
+| **Graphics cards** | **NVIDIA**, compute capability 7.5 or newer (GeForce RTX 20 series and newer). One card or several: the model's layers are split over them. Driver **580** or newer for the CUDA 13 toolkit setup installs; 525 or newer when it builds with a CUDA 12 toolkit you have. Setup stops with an older one. |
 | **RAM** | Every expert of the model stays in RAM: about 117 GB (109 GiB) at 3-bit, about 162 GB (151 GiB) at 4-bit (calculated). Setup counts RAM in GiB, as Linux reports it (`free -g`). It wants at least 12 GiB left beside the experts for Linux and the server, and calls a size a good fit when 40 GiB are left. So Linux must report about **121 GiB** at the least for the 3-bit size (a PC with 128 GB installed reports about 125) and about **163 GiB** for the 4-bit size (192 GB installed: about 188). [Which size](#which-size-should-i-pick). |
 | **Disk** | About 120 GB free for the 3-bit download, about 170 GB for the 4-bit one, and about 10 GB more when setup installs the CUDA toolkit. An SSD helps: the first start after a reboot reads every expert from it. |
 | **System** | **Linux** only: setup stops on any other system. A CPU with **AVX2**: without it setup warns, because the experts the cards do not hold run on the CPU. |
@@ -193,8 +193,9 @@ model servers under llama-swap: [docs/LLAMA_SWAP.md](docs/LLAMA_SWAP.md).
 
 ## Something went wrong?
 
-- **"no NVIDIA GPU found" or "the NVIDIA driver is too old".** Install or update the NVIDIA driver (580 or newer;
-  Ubuntu: `sudo ubuntu-drivers install`), restart, and run `./setup.sh` again.
+- **"no NVIDIA GPU found" or "the NVIDIA driver is too old".** Install or update the NVIDIA driver (580 or newer,
+  or 525 or newer with a CUDA 12 toolkit; the message says which; Ubuntu: `sudo ubuntu-drivers install`), restart,
+  and run `./setup.sh` again.
 - **The CUDA toolkit does not install.** Setup installs it by itself on Ubuntu 22.04 and 24.04 only. Elsewhere,
   install CUDA 12.0 or newer (13.0 for an RTX 50 card) from your distribution or from NVIDIA, then run `./setup.sh`
   again.

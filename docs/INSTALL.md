@@ -26,7 +26,7 @@ you with [AI_SETUP.md](AI_SETUP.md).
 | --- | --- |
 | **OS** | Linux on x86-64. Setup stops on any other operating system. On Ubuntu 22.04 and 24.04 setup can install the CUDA toolkit itself; on other distributions you install it. |
 | **GPU** | One or more NVIDIA cards of compute capability 7.5 or newer (RTX 20, 30, 40, 50 series). Setup leaves out a card it cannot use and says why. It has no minimum VRAM: how much VRAM the layers besides the experts take on the real model is not measured yet. |
-| **Driver** | NVIDIA 580 or newer (the engine is built with CUDA 13). Setup stops on an older one (Ubuntu: `sudo ubuntu-drivers install`, then restart). |
+| **Driver** | NVIDIA 580 or newer when the engine is built with CUDA 13 (the toolkit setup installs when none is there); 525 or newer when setup builds it with a CUDA 12 toolkit you have installed (CUDA 12's minor version compatibility). Setup stops on an older one and says which it needs (Ubuntu: `sudo ubuntu-drivers install`, then restart). |
 | **RAM** | Every routed expert stays in RAM: about 117 GB (109 GiB) for the 3-bit size, about 162 GB (151 GiB) for the 4-bit (see the table below). |
 | **CPU** | AVX2. Setup warns on a CPU without it but goes on: the experts the GPUs do not hold are computed on the CPU. |
 | **Disk** | About 120 GB (3-bit) or 170 GB (4-bit) free for the model files. Setup checks this before it downloads. The CUDA toolkit, when setup installs it, takes more (setup says about 8-10 GB with the compiler). |
@@ -182,7 +182,7 @@ What to know about them:
 - **`--check`** prints step 1 and, for each size, whether it fits this PC's RAM and the free disk space of the drive
   the model files would go to. It installs, moves and writes nothing, and needs no `.venv`: `python3 setup.py --check`
   works on a fresh clone. Its exit code is 1 when neither size fits, or when it stops at step 1 (no NVIDIA GPU, a
-  driver older than 580).
+  driver older than the CUDA toolkit needs: 580 for CUDA 13, 525 for CUDA 12).
 - **On an installed model**, a plain start keeps these for the next starts too: `--gpus`, `--host`, `--api-key`,
   `--park-mib`, `--browser` / `--no-browser`. These are for that start only: `--port`, `--gpu`.
 - **`--context` needs `--setup`** (or `--model`) on an installed model:
