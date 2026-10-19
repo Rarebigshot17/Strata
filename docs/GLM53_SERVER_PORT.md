@@ -37,8 +37,9 @@ Behaviour the port and its review (D1) settled:
   the run config's `"sampling"` block (the server does not start) are checked too, each with its own wording (a
   shared temperature may go up to 2).
 - **The start**: strata-glm reads the routed experts into the page cache before READY, with progress on stderr
-  (`--no-warm` skips it). The server's start watchdog (`STRATA_ENGINE_READY_S`, 900 s) counts from the warm-up's
-  last progress, so a slow disk that keeps reading is not ended.
+  (`--no-warm` skips it). The server's start watchdog (`STRATA_ENGINE_READY_S`, 900 s) counts from the last step the
+  engine reported (a new start line: the layers on each GPU, the expert cache; a warm-up line that moved on), so a
+  slow disk that keeps reading is not ended.
 - **Request bodies**: the size limit stays (256 MiB, `STRATA_MAX_BODY_MIB`), and at most two bodies over 16 MiB are
   held at once (a third is a 503 with `Retry-After`). Reading a request's headers and body times out after 120 s
   without data; the answer has no limit, so a long stream is never cut off.

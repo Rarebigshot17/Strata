@@ -168,12 +168,13 @@ the files in its page cache. `--no-warm` in `"args"` skips the warm-up; the firs
 from the disk instead.
 
 **"the engine did not report READY within 900 s"** (with "of its last warm-up progress (N GB read)" once the
-warm-up had begun).
-The server ends a start that makes no progress for 900 seconds. Every warm-up line that moves on starts the 900
-seconds again, so a slow disk that keeps reading is not ended. Other lines do not count: before the warm-up begins
-(mapping the files, placing the layers on the GPUs) the 900 seconds run from the start. If your PC needs longer
-than that before the warm-up begins, or the warm-up stalls for that long, give it more time in the server's
-environment: `STRATA_ENGINE_READY_S=1800 ./run-glm-<size>.sh` (0 waits for ever).
+warm-up had begun, or "of its last start line (...)" before it).
+The server ends a start that makes no progress for 900 seconds. Every step the engine reports in its log starts the
+900 seconds again: a new line (the layers on each GPU, the expert cache) or a warm-up line that moves on, so a slow
+disk that keeps reading is not ended. A line that only repeats does not count. Mapping the files and placing the
+layers on the GPUs print nothing until they are done, so the 900 seconds must cover them. If your PC needs longer
+than that for one step, or the warm-up stalls for that long, give it more time in the server's environment:
+`STRATA_ENGINE_READY_S=1800 ./run-glm-<size>.sh` (0 waits for ever).
 
 ## While running
 

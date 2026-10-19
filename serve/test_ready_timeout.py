@@ -67,6 +67,35 @@ for i in (1, 2):
 time.sleep(3600)
 '''
 
+# places its layers on three GPUs and fills its expert cache, a new line after each step (strata-glm prints these when
+# the GPU engine is built, before the warm-up): longer than the READY bound in all, each step well within it
+PLACING_SLOWLY = r'''
+import sys, time
+for i, line in enumerate(("layer 3: the experts' types have no GPU kernel, they all run on the CPU",
+                          "GPU 0: layers 0-22, 20.10 GB weights and buffers, 2.00 GB expert cache",
+                          "GPU 1: layers 23-34, 9.80 GB weights and buffers, 1.00 GB expert cache",
+                          "GPU 2: layers 35-46 + output head, 9.90 GB weights and buffers, 1.00 GB expert cache",
+                          "expert cache: 120 slots over 47 layers (4.00 GB)")):
+    if i:
+        time.sleep(1.0)
+    sys.stderr.write(line + "\n")
+    sys.stderr.flush()
+time.sleep(1.0)
+print('READY 4096 stop', flush=True)
+for line in sys.stdin:
+    if line.startswith('QUIT'):
+        break
+'''
+
+# says the same start line over and over: no progress
+REPEATING = r'''
+import sys, time
+while True:
+    sys.stderr.write('GPU 0: layers 0-46, 30.00 GB weights and buffers, 4.00 GB expert cache\n')
+    sys.stderr.flush()
+    time.sleep(0.1)
+'''
+
 
 @unittest.skipIf(os.name == "nt", "the .cmd wrapper keeps the pipe open after the kill (only the wrapper dies), so the "
                                   "close of its stdout waits for the sleeping child; a real engine is one process")
@@ -139,6 +168,22 @@ class ReadyTimeout(unittest.TestCase):
             StrataEngine(self.make_script('early', WARMING_THEN_STUCK), [], log=str(log))
         self.assertIn('of its last warm-up progress (2.0 GB read)', str(c.exception))
         self.assertLess(time.monotonic() - t0, 3.4)
+
+    def test_every_start_step_the_engine_reports_moves_the_bound_on(self):
+        # placing the layers and filling the cache from a slow disk: each step is a new line in the log
+        log = self.root / 'engine.log'
+        with mock.patch.object(server, 'ENGINE_READY_S', 2.0), mock.patch('builtins.print'):
+            eng = StrataEngine(self.make_script('placing', PLACING_SLOWLY), [], log=str(log))
+        self.addCleanup(eng.close)
+        self.assertTrue(eng.alive())
+
+    def test_a_line_that_only_repeats_is_no_progress(self):
+        log = self.root / 'engine.log'
+        t0 = time.monotonic()
+        with mock.patch('builtins.print'), self.assertRaises(server.EngineDied) as c:
+            StrataEngine(self.make_script('repeating', REPEATING), [], log=str(log))
+        self.assertIn('of its last start line (GPU 0: layers 0-46', str(c.exception))
+        self.assertLess(time.monotonic() - t0, 10)
 
     def test_ready_timeout_on_lazy_load_answers_the_request(self):
         # lazy start: restart()'s own bookkeeping must not crash on the missing slot_cv either (#1527)

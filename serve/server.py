@@ -163,9 +163,9 @@ PP_FLOOR_TOK_S = 50.0
 PP_SLACK = 3.0
 # Reads that had no timeout (#1317).  A blocking read of the engine's READY line that never returned held the request
 # turn for good: every later request queued behind it.  Generous on purpose: a cold model load (the experts are read
-# into the page cache before READY), a slow disk or a slow CPU is not a hang.  Only a process that says nothing at all
-# for this long is ended - the warm-up's progress lines in its log count: the bound runs from the last one that moved
-# on - and the next request starts it again.
+# into the page cache before READY), a slow disk or a slow CPU is not a hang.  Only a process that reports no progress
+# for this long is ended - every step it reports in its log counts (the layers on each GPU, the expert cache, each
+# step of the warm-up: start_progress), and the bound runs from the last one - and the next request starts it again.
 # STRATA_ENGINE_READY_S overrides it (0 = wait for ever).
 
 
@@ -446,12 +446,15 @@ def narrate_start(log_path: str, offset: int, model_path: str | None, done: thre
 
 
 WARMING = re.compile(r"warming the experts: ([\d.]+) of ")
+START_LINES_MAX = 1000      # distinct start lines that count as progress (an engine that prints new ones for ever)
 
 
-def warm_progress(log_path: str, pos: int) -> tuple[int, float | None]:
-    """How far the engine's expert warm-up before READY has got, by its log from `pos` on (strata-glm writes
-    "warming the experts: X of Y GB (...)" to stderr every 2 s): (where the next look reads on, the latest X in GB, or
-    None when no whole line since `pos` reports it)."""
+def start_progress(log_path: str, pos: int, seen: dict) -> tuple[int, str | None]:
+    """The progress the engine reports in its log (its stderr) from `pos` on while it starts, for the READY bound: a
+    warm-up line whose GB read moved on (strata-glm writes "warming the experts: X of Y GB (...)" every 2 s), or any
+    other line of its own that this start has not had yet - the layers on each GPU, the expert cache, a layer's note.
+    A line that only repeats itself, or a warm-up that stands still, is no progress.  `seen` keeps this start's lines
+    and its warm-up's GB ("warm_gb").  -> (where the next look reads on, the latest progress line or None)."""
     try:
         with open(log_path, "rb") as f:
             f.seek(pos)
@@ -459,8 +462,19 @@ def warm_progress(log_path: str, pos: int) -> tuple[int, float | None]:
     except OSError:
         return pos, None
     cut = chunk.rfind(b"\n") + 1                       # whole lines only: the rest is read next time
-    found = WARMING.findall(chunk[:cut].decode("utf-8", "replace"))
-    return pos + cut, float(found[-1]) if found else None
+    news = None
+    lines = seen.setdefault("lines", set())
+    for line in chunk[:cut].decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith("[strata]"):     # the server's own lines in the log
+            continue
+        if m := WARMING.search(line):
+            if float(m.group(1)) > seen.get("warm_gb", -1.0):
+                seen["warm_gb"], news = float(m.group(1)), line
+        elif line not in lines and len(lines) < START_LINES_MAX:
+            lines.add(line)
+            news = line
+    return pos + cut, news
 
 
 class ConvCacheLog:
@@ -644,18 +658,19 @@ class StrataEngine:
         threading.Thread(target=self._ready_pump, args=(proc, ready_q), daemon=True).start()
         ready_deadline = None if ENGINE_READY_S is None else time.monotonic() + ENGINE_READY_S
         timed_out = stopped = False
-        warm_pos, warmed = log_start, None               # the warm-up's progress, from the log
+        log_pos, seen, news = log_start, {}, None        # the start's progress, from the log
         try:
             while True:
                 if self.stopping:                        # the server stops while this starts (shutdown())
                     stopped = True
                     break
                 if log and ready_deadline is not None:
-                    # the warm-up reads 120-170 GB before READY, longer than the bound from a slow disk or a NAS:
-                    # while it moves on, the bound counts from its last progress (looked for every WARM_LOOK_S)
-                    warm_pos, done = warm_progress(log, warm_pos)
-                    if done is not None and (warmed is None or done > warmed):
-                        warmed, ready_deadline = done, time.monotonic() + ENGINE_READY_S
+                    # every step the engine reports moves the bound on (looked for every WARM_LOOK_S): placing the
+                    # layers and filling the expert cache from the disk, and the warm-up that reads 117-162 GB before
+                    # READY, longer than the bound from a slow disk or a NAS
+                    log_pos, line = start_progress(log, log_pos, seen)
+                    if line is not None:
+                        news, ready_deadline = line, time.monotonic() + ENGINE_READY_S
                 left = None if ready_deadline is None else ready_deadline - time.monotonic()
                 if left is not None and left <= 0:
                     timed_out = True
@@ -696,9 +711,10 @@ class StrataEngine:
                 except (OSError, subprocess.TimeoutExpired):
                     pass
         if self.max_context <= 0:
+            last = ("" if news is None else f" of its last warm-up progress ({seen['warm_gb']:.1f} GB read)"
+                    if WARMING.search(news) else f" of its last start line ({news[:120]})")
             why = ("the server is stopping" if stopped else
-                   f"the engine did not report READY within {ENGINE_READY_S:.0f} s"
-                   + (f" of its last warm-up progress ({warmed:.1f} GB read)" if warmed is not None else "")
+                   f"the engine did not report READY within {ENGINE_READY_S:.0f} s{last}"
                    if timed_out else f"the engine exited before it was ready (exit code {proc.poll()})")
             # EngineDied, not bare RuntimeError: a request waiting on this load must end with a 503
             # through the request path's handler - a RuntimeError there left the turn with no answer (#1527)

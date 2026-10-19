@@ -66,7 +66,8 @@ warm-up reads them from RAM instead.
 
 So set `healthCheckTimeout` well above that until you have timed a start of your own: the last warm-up line gives the
 time and the rate. The server has its own limit as well: the engine must say `READY` within 900 s, counted from its
-start or, while the warm-up moves on, from its latest progress line; otherwise the server ends it
+start or from the latest step it reported (the layers on each GPU, the expert cache, the warm-up); otherwise the
+server ends it
 (`STRATA_ENGINE_READY_S` changes the 900; 0 waits for ever).
 
 `STRATA_DROP_CACHE_ON_EXIT=1` gives the model files' page cache back when the server stops (off by default). It helps

@@ -119,9 +119,11 @@ first request does not wait for the disk (the warm-up; `--no-warm` in the config
 shows each step: the layers on each GPU, the expert cache, and the warm-up's progress (`warming the experts: X of Y GB`
 in the engine's log). How long this takes on the real model is not measured yet.
 
-The server gives up on a start when the engine has not said it is ready within 900 seconds. While the warm-up makes
-progress, the 900 seconds count again from its last progress line; other lines of the engine do not reset them. On a
-disk so slow that one step takes longer, set `STRATA_ENGINE_READY_S` (seconds, 0 = no limit) before you start it.
+The server gives up on a start when the engine has not said it is ready within 900 seconds. Every step the engine
+reports in its log counts the 900 seconds again: the layers on each GPU, the expert cache, each warm-up line that
+moves on (a line that only repeats does not). Placing the layers prints those lines when it is done, so the 900
+seconds must cover that step alone. On a disk so slow that one step takes longer, set `STRATA_ENGINE_READY_S`
+(seconds, 0 = no limit) before you start it.
 
 To stop the model, press Ctrl+C or close the terminal. Every ordinary stop takes the same path: Ctrl+C, closing the
 terminal (SIGHUP), `kill <the server's PID>`, `docker stop` and `systemctl stop` (SIGTERM). The server sends the
@@ -214,7 +216,7 @@ For the server (more in [DETAILS.md](DETAILS.md#settings)):
 
 | Variable | What it does |
 | --- | --- |
-| `STRATA_ENGINE_READY_S` | Seconds a start may go without news from the engine before the server gives up (default 900, counted again from each warm-up progress line; 0 = no limit). |
+| `STRATA_ENGINE_READY_S` | Seconds a start may go without news from the engine before the server gives up (default 900, counted again from each step the engine reports: the layers, the expert cache, the warm-up; 0 = no limit). |
 | `STRATA_ENGINE_STALL_S` | Seconds an engine may be silent during a request while using no CPU time and doing no I/O before the server ends it as frozen (default 90, 0 = off). |
 | `STRATA_ENGINE_QUIT_S` | Seconds the server waits for the engine to end after `QUIT` (saving its expert profile, giving back its memory) before it kills it (default 120, 0 = no limit). |
 | `STRATA_API_KEY` | The server's API key, as `--api-key` or `"api_key"`. |
