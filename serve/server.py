@@ -1131,7 +1131,8 @@ def engine_silence_s(cfg: dict) -> float:
 def split_value(cfg: dict) -> str | None:
     """The config's "split" as strata-glm's --split: each card's share of the layers, in the order of "gpu" (a list
     [24, 12, 10] or a string "24,12,10"; a card's VRAM in GB is a good share), or None when the config has none (the
-    engine splits by each card's VRAM).  ValueError for anything that is not one positive number per card."""
+    engine then shares them in proportion to each card's free VRAM at start, each layer weighed by its weights and
+    its attention cache).  ValueError for anything that is not one positive number per card."""
     v = cfg.get("split")
     if v is None or v == "" or v == []:
         return None
@@ -4693,8 +4694,10 @@ def main() -> int:
         except ValueError as e:
             raise SystemExit(f"[strata] config {e}")
         if len(gpu_list(cfg)) > 1:
-            print(f"[strata] GPUs {gpu_list(cfg)}: the layers are split over them in this order "
-                  f"({'--split ' + split if split else 'by their VRAM'}), the output head on the last", flush=True)
+            print(f"[strata] GPUs {gpu_list(cfg)}: the layers are split over them in this order, by size (weights and "
+                  "attention cache) " + (f"in the shares --split {split}" if split else
+                                         "in proportion to each card's free VRAM at start")
+                  + ", the output head on the last", flush=True)
         print("model unloaded; the first request loads it ..." if lazy else
               "loading the model (the first start takes a few minutes: the experts are read into memory) ...",
               flush=True)
