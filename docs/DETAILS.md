@@ -117,7 +117,8 @@ recommendation, temperature 1.0 and top_p 0.95 ([Settings](#sampling-defaults)).
 A value of the wrong type or out of range is a 400 that names the field (`top_p: a number from 0 to 1`). That
 includes NaN and Infinity (which JSON parsers in Python accept), `true` for a number, a fraction for a whole number,
 and a whole number too large for the engine. A number sent as a string (`"0.7"`) is read as that number. The engine
-applies the bias, then the penalties, then top-k, top-p (at temperature 1), min-p and the temperature.
+applies the bias, then the penalties, then top-k, top-p and min-p (both at temperature 1), and draws at the
+temperature.
 
 #### Output length and the context
 
@@ -282,8 +283,8 @@ its arguments piece by piece: a string parameter character by character, any oth
 - The last OpenAI chunk carries the finish reason, `usage` and `timings`. With
   `"stream_options": {"include_usage": true}` (chat and completions) the usage moves to one more chunk with empty
   `choices`, sent after it and before `[DONE]`; only that chunk carries the usage, as OpenAI and llama.cpp send it.
-- `"return_progress": true` (llama.cpp's flag) puts the prompt progress on the stream: chunks with an empty delta and
-  `prompt_progress` `{"total", "cache", "processed", "time_ms"}`, with llama.cpp's meanings.
+- `"return_progress": true` (llama.cpp's flag, chat route) puts the prompt progress on the stream: chunks with an
+  empty delta and `prompt_progress` `{"total", "cache", "processed", "time_ms"}`, with llama.cpp's meanings.
 - An error after the stream has started arrives as a last `data: {"error": ...}` line and `[DONE]` (OpenAI), an
   `error` event (Anthropic) or `response.failed` (Responses).
 - Closing the connection stops the model: the server checks every 0.5 s whether the client is still there.
@@ -447,8 +448,8 @@ takes the file's entry):
 **Who may use them.** By default only Strata's own web page: its chat sends `"strata_mcp": true` (the Sampling
 drawer's **Use tools from MCP servers** switch), and its requests name the page in `Origin`. A request with
 `"strata_mcp": true` and no `Origin` (an API client: an SDK, a bot, curl, anyone with the key) is a 403 unless the run
-config has `"mcp_for_api": true`; a page of another site is always refused. Clients that do not send `strata_mcp`
-see the API as it is, with their own tools only.
+config has `"mcp_for_api": true`; a page of another site is refused unless its origin is in `"trusted_origins"`.
+Clients that do not send `strata_mcp` see the API as it is, with their own tools only.
 
 **Security.** MCP tools run on this machine with the server's user rights, and the model decides when to call them,
 also because of what it reads (a web page or a file can contain instructions). Give a filesystem server only the
@@ -467,9 +468,11 @@ including the engine's, is in [INSTALL.md](INSTALL.md#the-run-config).
 The Sampling drawer (the gear button in the chat) holds: **Thinking** off or on (default on), **Temperature**
 (0-1.5, default 1.0; 0 is greedy), **Top-p** (default 0.95) and **Top-k** (default 0, off), **Max tokens** (empty:
 until done), **Seed** (empty: random), **Show thinking**, **Use tools from MCP servers** (shown when MCP servers are
-configured) and **Use for other apps too** (the shared settings, below). They are kept in this browser. The chat
-sends them with each request, so they win over every default. The About tab holds the API key (also kept in this
-browser) and the theme.
+configured) and **Use for other apps too** (the shared settings, below). They are kept in this browser. With each
+request the chat sends the temperature (and top-p and top-k when the temperature is above 0), the seed and max
+tokens when they are set, and `"reasoning_effort": "none"` when thinking is off. What it does not send falls back to
+the defaults below: with thinking **On** it sends nothing, so a run config or shared setting that turns thinking off
+applies. The About tab holds the API key (also kept in this browser) and the theme.
 
 ### Shared settings for other clients
 
@@ -552,7 +555,7 @@ Beside the engine's keys (`exe`, `args`, `cwd`, `log`, `gpu`, `split`, `env`, `l
 | `api_monitor` | false | The request monitor ([Monitoring](#the-request-monitor)) |
 | `lazy_load`, `idle_unload_s`, `min_free_vram_mib`, `before_load`, `before_load_timeout_s`, `before_load_strict`, `before_load_ignore_failure` | off | [Loading and unloading](#loading-and-unloading) |
 | `engine_silence_s` | 300 | Seconds the engine may say nothing during a request before the server ends it (0: no limit) |
-| `open_browser` | true | `false` keeps the browser closed even when the start script passes `--open` |
+| `open_browser` | the start script's `--open` | `false` keeps the browser closed even when the start script passes `--open` |
 
 `--reasoning-effort` written into `"args"` by mistake is not an engine option: the server takes it out and uses it as
 `"reasoning_effort"`, with a line at the start.
@@ -581,8 +584,9 @@ The model loads when the server starts, and the port opens once the engine is re
   gets a 503 with `Retry-After`. With three GPUs only the first is checked.
 - `"before_load": "<command>"` (a string or a list; or `--before-load`): a command run before the model is loaded
   again, for example another server's unload. It may run `"before_load_timeout_s"` seconds (default 120). When it
-  fails, the free VRAM decides (with `min_free_vram_mib`); `"before_load_strict": true` always refuses then (503),
-  `"before_load_ignore_failure": true` always loads.
+  fails, the model is loaded anyway, unless `min_free_vram_mib` is set and too little VRAM is free (503).
+  `"before_load_strict": true` refuses (503) whenever it fails; `"before_load_ignore_failure": true` always loads,
+  without the VRAM check.
 
 Parked conversations live in the engine's memory and are gone after an unload. To run Strata behind llama-swap
 instead, see [LLAMA_SWAP.md](LLAMA_SWAP.md).
@@ -592,8 +596,8 @@ instead, see [LLAMA_SWAP.md](LLAMA_SWAP.md).
 `serve/server.py --engine strata --config strata-glm-<size>.json` is what the start script runs, with `--port` and
 `--open`. The other options: `--host`, `--port` (default 8101), `--gpu` (one card or a list, as nvidia-smi numbers
 them), `--chat-template FILE`, `--api-key` (also `STRATA_API_KEY`), `--mcp-config FILE`, `--lazy`, `--api-monitor`,
-`--idle-unload SECONDS`, `--min-free-vram-mib N`, `--before-load CMD` and `--fit-max-tokens`. Each of them can also be
-set in the run config. `--engine mock` runs a scripted stand-in for the model (`--script TEXT`), for trying clients
+`--idle-unload SECONDS`, `--min-free-vram-mib N`, `--before-load CMD` and `--fit-max-tokens`. Each has a run config
+key, except `--port`, which the start script passes (`--open` has `"open_browser"`). `--engine mock` runs a scripted stand-in for the model (`--script TEXT`), for trying clients
 without a GPU.
 
 ### Environment variables
@@ -605,7 +609,7 @@ without a GPU.
 | `STRATA_MAX_BODY_MIB` | The request body limit in MiB (default 256) |
 | `STRATA_HTTP_BACKLOG` | Connections the operating system may hold for the server (default 256) |
 | `STRATA_ENGINE_READY_S` | How long a starting engine may go without progress before the server ends it (default 900; 0: no limit) |
-| `STRATA_ENGINE_STALL_S` | How long a silent engine that uses no CPU and does no I/O may wait before the server ends it as frozen (default 90; 0: off; needs psutil) |
+| `STRATA_ENGINE_STALL_S` | How long an engine may stay silent with no CPU time, no disk I/O and an idle GPU before the server ends it as frozen (default 90; 0: off; needs psutil) |
 | `STRATA_REQUEST_LINES` | `1`: one line per request on the server's output (for a supervisor such as llama-swap) |
 | `STRATA_DROP_CACHE_ON_EXIT` | `1`: give the model files' page cache back when the server stops |
 | `STRATA_DEBUG` | `1`: one line per request and the raw model text in the server window |
@@ -638,8 +642,8 @@ How big these are, calculated from the engine's snapshot code with the model's s
 conversation is about 0.15 GB of KDA state plus about 11 KB per token (the MLA cache's 512-wide f16 latent in 11
 layers, and the indexer's pooled keys); a checkpoint is about 0.15 GB. So `--park-mib 8192` holds one conversation of
 up to roughly 700,000 tokens, or several shorter ones. A conversation that does not fit is not parked (the engine log
-says `... more than --park-mib; not kept`): when another client takes a turn, it is lost, and its next request reads
-its whole prompt again. A 1,048,576-token conversation needs `--park-mib` of about 12,000 or more to be parked, which
+says `... more than --park-mib; not kept`): when another client takes a turn, it is lost with its checkpoints, and
+its next request reads its prompt again from the start. A 1,048,576-token conversation needs `--park-mib` of about 12,000 or more to be parked, which
 must fit in the RAM beside the experts.
 
 None of this changes the answers: `tools/glm53_park_check.py` checks each resumed reply against a fresh engine's,
@@ -661,8 +665,8 @@ The web app's Monitor tab polls `GET /metrics` once a second:
 - **Model state**: idle, reading the prompt (with progress), generating (with the phase: thinking, answering,
   writing a tool call), queued; the model, engine version and backend.
 - Eight cards with a minute of history each: **Speed** (decode and prefill tokens/s), **GPU load**, **VRAM**, **GPU
-  temp**, **Power**, **PCIe** (link and traffic to the GPU), **CPU** and **Disk read**. With several GPUs, the cards
-  show the total or the hottest card, and each card's own value.
+  temp**, **Power**, **PCIe** (link and traffic to the GPU), **CPU** and **Disk read**. With several GPUs, a card
+  shows the sum (VRAM, power), the mean (load) or the hottest GPU (temperature), and each GPU's own value.
 - **Context fill** (the running request's prompt and output against the context), **Experts in VRAM** (the expert
   cache's slots and size), **Expert-cache hits** (the last request's and since the start), **System RAM** and **GPU
   temperature**.
@@ -759,12 +763,14 @@ Listening beyond it without an API key prints a warning: anyone on the network c
 - **API keys.** `"api_key"` in the run config, `--api-key` or `STRATA_API_KEY`. Clients send it as
   `Authorization: Bearer <key>` or `x-api-key: <key>`. Several keys: `"k1,k2"` (as llama.cpp takes them) or a list in
   the config (the way to use a key with a comma in it); any one passes. Keys are compared in constant time, and spaces
-  around a key are dropped. An empty key given on purpose stops the start rather than turning the check off. The routes
-  that need it are marked in [Routes](#routes).
+  around a key are dropped. An empty `--api-key` or `STRATA_API_KEY` stops the start rather than turning the check
+  off; an empty `"api_key"` in the run config leaves the server without a key, with a warning. The routes that need it
+  are marked in [Routes](#routes).
 - **Host names (DNS rebinding).** A web page of another site can point its own name at 127.0.0.1 and then reach the
   server as if it were its own. So without an API key the server answers only requests whose `Host` is a name it knows:
   `localhost` and `*.localhost`, any IP address, the address it listens on and, when it listens beyond this machine,
-  the machine's name (`name`, `name.local`) and `host.docker.internal`, on any port. Others get a 403 that names the
+  the machine's name (`name`, `name.local`) and `host.docker.internal`, and the hosts of `"trusted_origins"`, on any
+  port. Others get a 403 that names the
   setting, and one line in the server window. To reach it under another name (a reverse proxy, a tunnel, a DNS name),
   add `"allowed_hosts": ["strata.example.com"]` or `STRATA_ALLOWED_HOSTS` (comma-separated; `".example.com"` allows
   that name and every name below it; `"*"` turns the check off). With an API key the check is off: such a page cannot
@@ -802,8 +808,8 @@ For reporting a security problem, see [SECURITY.md](../SECURITY.md).
 - **No slot save or restore** (`POST /slots/...` is a 501), no batching, no stored responses.
 - **Body size.** 256 MiB per request by default ([Security](#security)).
 - **Engine watchdogs.** A running request whose engine says nothing for `engine_silence_s` (300 s; longer while a
-  prompt chunk is read) ends with an error, and the next request starts the engine again. An engine that is silent and
-  uses no CPU or disk for 90 s is ended as frozen (`STRATA_ENGINE_STALL_S`, needs psutil). A starting engine must say
+  prompt chunk is read) ends with an error, and the next request starts the engine again. An engine that is silent
+  for 90 s with no CPU time, no disk I/O and an idle GPU is ended as frozen (`STRATA_ENGINE_STALL_S`, needs psutil). A starting engine must say
   `READY` within 900 s of its last warm-up progress (`STRATA_ENGINE_READY_S`); the warm-up that reads the experts into
   memory before `READY` counts as progress while it moves on. How long the warm-up takes on the real model is not
   measured yet.
