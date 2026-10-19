@@ -464,5 +464,60 @@ class LargeBodies(Http):
         self.assertFalse(slots.acquire(blocking=False))
 
 
+class ReadTimeout(unittest.TestCase):
+    """A client that stops sending its request (the headers or the body) no longer holds a server thread forever;
+    a long answer, streamed or not, is not cut by that limit."""
+
+    def setUp(self):
+        tok = GlmTokenizer()
+        self.engine = MockEngine(tok, "abcd" * 10, max_context=8192, delay_s=0.05)   # 2 s of answer
+        self.svc = Service(self.engine, tok, glm_template())
+        with mock.patch("serve.server.REQUEST_READ_S", 0.5):
+            self.httpd = serve(self.svc, port=0)
+        self.addCleanup(self.httpd.server_close)
+        self.addCleanup(self.httpd.shutdown)
+        self.port = self.httpd.server_address[1]
+
+    def raw(self, data: bytes) -> bytes:
+        """What the server answers to `data`, sent as it is and never finished; b"" when it just closes."""
+        s = socket.create_connection(("127.0.0.1", self.port), timeout=10)
+        try:
+            s.sendall(data)
+            out = b""
+            while chunk := s.recv(65536):
+                out += chunk
+            return out
+        finally:
+            s.close()
+
+    def test_unfinished_headers_are_dropped(self):
+        t0 = time.monotonic()
+        self.assertEqual(self.raw(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n"), b"")
+        self.assertLess(time.monotonic() - t0, 5)
+
+    def test_an_unfinished_body_is_408(self):
+        t0 = time.monotonic()
+        out = self.raw(b"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json"
+                       b"\r\nContent-Length: 100\r\n\r\n{\"messages\": ")
+        self.assertTrue(out.startswith(b"HTTP/1.0 408"), out[:80])
+        self.assertLess(time.monotonic() - t0, 5)
+
+    def test_a_long_answer_is_not_cut(self):
+        for stream in (True, False):
+            with self.subTest(stream=stream):
+                c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+                c.request("POST", "/v1/chat/completions", json.dumps({
+                    "messages": [{"role": "user", "content": "hi"}], "stream": stream, "reasoning_effort": "none"}),
+                    {"Content-Type": "application/json"})
+                r = c.getresponse()
+                body = r.read().decode()
+                c.close()
+                self.assertEqual(r.status, 200)
+                if stream:
+                    self.assertTrue(body.rstrip().endswith("data: [DONE]"), body[-200:])
+                else:
+                    self.assertEqual(json.loads(body)["choices"][0]["message"]["content"], "abcd" * 10)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2806,6 +2806,9 @@ CHUNKED_BODY_MAX = 256 << 20                # #893: the most a Transfer-Encoding
 LARGE_BODY = 16 << 20
 LARGE_BODIES_AT_ONCE = 2
 LARGE_BODY_RETRY_S = 30
+# A request's line, headers and body must keep arriving: this long without data ends it (a client that stops sending
+# held its thread forever).  The answer has no such limit: a stream may run for an hour.
+REQUEST_READ_S = 120.0
 
 
 def body_limit() -> int:
@@ -2847,6 +2850,7 @@ def make_handler(svc: Service):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.0"                       # SSE ends by closing the connection
 
+        timeout = REQUEST_READ_S                            # StreamRequestHandler sets it on the socket (reading)
         record = None                                       # #332: this request's monitor record, if kept
         watch_done = None                                   # #430 #431: stops this request's disconnect watcher
         body_read = False                                   # whether a handler took this request's body
@@ -2919,6 +2923,15 @@ def make_handler(svc: Service):
 
         def _body(self) -> bytes:
             self.body_read = True
+            try:
+                body = self._read_body()
+            except TimeoutError:
+                self.close_connection = True
+                raise BadBody(408, f"the request body stopped arriving ({self.timeout:g} s without data)") from None
+            self.connection.settimeout(None)               # read: the answer, a stream of any length, has no limit
+            return body
+
+        def _read_body(self) -> bytes:
             limit = body_limit()
             if self._chunked():
                 return self._read_chunked(limit)
