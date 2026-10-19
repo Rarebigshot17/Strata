@@ -13,9 +13,9 @@ Strata writes to two places:
 
 - **The server window** (or wherever the output of `./setup.sh`, `run-glm-<size>.sh` or `serve/server.py` goes,
   for example the systemd journal). Its lines start with `[strata]`: what the engine does while it starts, then
-  `ready: http://...`, then one line per request while it runs (`reading the prompt: ...`, `thinking: ...`,
-  `done: N tokens in S s (...)`), every refused request (`400 invalid request: ...`, `503: ...`) and what happened
-  when the engine ended.
+  `ready: http://...`, then progress lines while a request runs (`reading the prompt: N tokens, S s so far`,
+  `thinking: N of max M tokens, ...`) and a `done: N tokens in S s (...)` line when it ends, refused requests
+  (`400 invalid request: ...`, some `503: ...`) and what happened when the engine ended.
 - **The engine log**, `strata-glm-<size>.log` in the Strata folder (the run config's `"log"`). It holds the engine's
   own output: `GPU N: layers a-b, ... GB weights and buffers, ... GB expert cache`, `expert cache: ...`,
   `warming the experts: X of Y GB (...)`, the `conversations: ...` lines, and on a failure the engine's last words,
@@ -35,8 +35,9 @@ curl -s http://127.0.0.1:8101/health                     # is the server up, is 
 
 Two switches print more, both in the server's environment (for example `STRATA_DEBUG=1 ./run-glm-<size>.sh`):
 `STRATA_REQUEST_LINES=1` prints one line per engine request (prompt tokens, reused tokens, times),
-`STRATA_DEBUG=1` one line per request with the start of its last message. The second one puts parts of what
-people wrote into the log, so turn it off again when you are done.
+`STRATA_DEBUG=1` one line per request with the start of its last message, and the model's whole raw reply after
+it. The second one puts what people wrote and what the model answered into the log, so turn it off again when you
+are done.
 
 ## While installing
 
@@ -45,8 +46,10 @@ Install or update the NVIDIA driver (580 or newer; on Ubuntu `sudo ubuntu-driver
 `./setup.sh` again. Everything already done is kept.
 
 **"GPU N (...) cannot be used: not supported - compute capability X"**.
-strata-glm needs compute capability 7.5 or newer (RTX 20 series and newer). Setup prints the table of your GPUs;
-leave the card out with `--gpus` (for example `--gpus 0,1`).
+strata-glm needs compute capability 7.5 or newer (RTX 20 series and newer). This stops setup when `--gpu` or
+`--gpus` names such a card. Setup prints the table of your GPUs and the cards it can use; leave the card out of
+`--gpus` (for example `--gpus 0,1`), or give neither option: setup then uses every card that can run the engine
+and leaves the others out. "none of your GPUs can run the engine" means no card is new enough.
 
 **"The engine is compiled for your GPUs, which needs: ..."**.
 Setup installs the C++ compiler and the CUDA toolkit for you on Ubuntu 22.04 and 24.04 (it asks first, and sudo
@@ -54,22 +57,23 @@ asks for your password). On other distributions it stops with "the automatic ins
 Ubuntu/Debian" or "the CUDA Toolkit can be installed automatically on Ubuntu 22.04 / 24.04 only": install them
 with your distribution's packages (Arch: `pacman -S base-devel cuda`) or from
 [developer.nvidia.com/cuda-downloads](https://developer.nvidia.com/cuda-downloads), then run it again. A CUDA
-toolkit of 12.0 or newer that is already installed is used as it is; setup finds `nvcc` on `PATH`, in
-`/usr/local/cuda*` and in `/opt/cuda*`.
+toolkit of 12.0 or newer that is already installed is used as it is (setup installs CUDA 13.0 only when none
+of 12.0 or newer is); setup finds `nvcc` on `PATH`, under `CUDA_PATH` or `CUDA_HOME`, in `/usr/local/cuda*` and in `/opt/cuda*`.
 
 **The engine does not compile** (`command failed (exit N): cmake`).
-The compiler's own error is printed above that line. Setup already tried the build twice. Two known mismatches
-between the CUDA toolkit and a new Linux, from the upstream project (issue #601):
+The compiler's own error is printed above that line. Setup already tried the build twice. Two mismatches between
+a CUDA toolkit and a newer Linux that users of the upstream project reported (not reproduced here):
 
 - `unsupported GNU version`: the toolkit does not take your gcc. Install an older one (for example g++-14) and run
   `CXX=g++-14 ./setup.sh`. `CC`, `CXX` and `CUDAHOSTCXX` name the compilers; setup passes them to CMake, so a
   build folder that was configured before picks them up too.
 - `exception specification is incompatible` for `cospi`/`sinpi`/`rsqrt`: the toolkit's math headers clash with
-  your glibc. Use another toolkit: `STRATA_NVCC=/usr/local/cuda-12.8/bin/nvcc ./setup.sh` makes setup use that
-  `nvcc` and no other.
+  your glibc (upstream issue #601). Use another toolkit: `STRATA_NVCC=/usr/local/cuda-12.8/bin/nvcc ./setup.sh`
+  makes setup use that `nvcc` and no other.
 
-Setup takes the newest toolkit it finds; `STRATA_NVCC=<path to nvcc>` picks another. To build from scratch:
-`./setup.sh --build`, or delete the `build` folder and run setup again.
+Setup takes the newest toolkit it finds; `STRATA_NVCC=<path to nvcc>` picks another. `./setup.sh --build`
+compiles the engine again in the same `build` folder; to build from scratch, delete the `build` folder and run
+setup again.
 
 **The download stopped, or a file is wrong.**
 Run `./setup.sh` again: downloads continue where they stopped. What setup says and does:
@@ -82,12 +86,13 @@ Run `./setup.sh` again: downloads continue where they stopped. What setup says a
 - "unsloth/GLM-5.3-Flash-GGUF has no <size> files": the repository has none of that quantization (for the 4-bit
   model setup also tries UD-Q4_K_XL). Download the files by hand (`hf download`) and run setup with
   `--gguf-dir <their folder>`.
-- "<folder> has no <size> GGUF file" (with `--gguf-dir`): the folder or its sub-folders have no file whose name
-  names that quantization. "... is short: N of M bytes": a shard is cut off. Delete it and download it again.
+- "<folder> has no <size> GGUF file" (with `--gguf-dir`): no GGUF file under the folder (sub-folders included)
+  has that quantization in its path. "... is short: N of M bytes": a shard is cut off. Delete it and download it
+  again.
 
 **"not enough free disk space in <folder>: need ~N GB"**.
-The model files are about 120 GB (3-bit) or 170 GB (4-bit); setup prints the real total from the repository's
-listing before it downloads. Put them on a bigger drive: `--models-dir <folder>`, or `--data-dir <folder>`, which
+The model files are about 120 GB (3-bit) or 170 GB (4-bit), calculated from the model's shapes; setup prints the
+real total from the repository's listing before it downloads. Put them on a bigger drive: `--models-dir <folder>`, or `--data-dir <folder>`, which
 is remembered for every Strata folder on this PC.
 
 **"<size>'s experts (~N GB) do not fit beside Linux and the server in this PC's N GB of RAM"**.
@@ -123,18 +128,20 @@ The server prints the engine log's last lines under it, and they say why. The co
 
 - **Exit code 2** and a `usage: strata-glm ...` text: the run config's `"args"` has an option strata-glm does not
   know. Take it out (the usage text lists the options it takes).
-- **`strata-glm: CUDA cudaMalloc: out of memory`**: the GPUs have too little free VRAM for the layers and the
+- **`strata-glm: CUDA cudaMalloc...: out of memory`**: the GPUs have too little free VRAM for the layers and the
   attention cache. The engine reserves the attention cache for the whole context at start: 11 KB per token
-  (calculated), so 1.5 GB at 131,072 tokens and 11.8 GB at 1,048,576. Choose a shorter context
+  (calculated, the figure setup uses), so 1.5 GB at 131,072 tokens and 11.8 GB at 1,048,576. Choose a shorter context
   (`./setup.sh --setup --context 262144`, or change the number after `--ctx` in the run config's `"args"`), close
   other programs that hold VRAM (`nvidia-smi` lists them), or remove a `"split"` you set by hand. Whatever VRAM is
   left after the layers goes to the expert cache, less `--vram-reserve` (1 GB per GPU by default).
 - **A negative exit code** (`-9`) and nothing in the log: Linux ended the engine, most often for lack of RAM.
   `sudo dmesg | grep -i -E 'killed process|out of memory'` confirms it. See
   [The engine died](#the-engine-died) for what to do.
-- **`strata-glm: architecture is '...'; this engine runs GLM-5.3-Flash (glm5-next)`**, `GGUF is missing ...`, or
-  `[strata] cannot read the model's tokenizer: ... -m must name the model's first shard`: `-m` in `"args"` does not
-  name the first shard of a GLM-5.3-Flash GGUF (`...-00001-of-0000N.gguf`).
+- **`strata-glm: architecture is '...'; this engine runs GLM-5.3-Flash (glm5-next)`** or `GGUF is missing ...`:
+  `-m` in `"args"` does not name the first shard of a GLM-5.3-Flash GGUF (`...-00001-of-0000N.gguf`). The server
+  checks the same before it starts the engine and stops with
+  `[strata] cannot read the model's tokenizer: ... -m must name the model's first shard (...)` when `-m` names a
+  file without the tokenizer, such as a later shard.
 
 At the server's own start such a failure stops the server. When the engine is started again later (after it
 died, or after an unload), the server tries three times, 15 seconds apart ("the engine did not start (try 1 of
@@ -158,11 +165,13 @@ divided by that rate. Wait for `ready: http://...`. A start soon after the last 
 the files in its page cache. `--no-warm` in `"args"` skips the warm-up; the first requests then read the experts
 from the disk instead.
 
-**"the engine did not report READY within 900 s (of its last warm-up progress ...)"**.
+**"the engine did not report READY within 900 s"** (with "of its last warm-up progress (N GB read)" once the
+warm-up had begun).
 The server ends a start that makes no progress for 900 seconds. Every warm-up line that moves on starts the 900
-seconds again, so a slow disk that keeps reading is not ended; an engine that prints nothing for that long is. If
-your disk needs longer before the warm-up begins, give it more time in the server's environment:
-`STRATA_ENGINE_READY_S=1800 ./run-glm-<size>.sh` (0 waits for ever).
+seconds again, so a slow disk that keeps reading is not ended. Other lines do not count: before the warm-up begins
+(mapping the files, placing the layers on the GPUs) the 900 seconds run from the start. If your PC needs longer
+than that before the warm-up begins, or the warm-up stalls for that long, give it more time in the server's
+environment: `STRATA_ENGINE_READY_S=1800 ./run-glm-<size>.sh` (0 waits for ever).
 
 ## While running
 
@@ -172,8 +181,8 @@ your disk needs longer before the warm-up begins, give it more time in the serve
 The request ends with an error (a 503 that ends in "the next request restarts it", or an error event in a stream
 that had started), and the next request starts the engine again. What the server adds:
 
-- "The usual cause is running out of RAM ...": the engine was ended by a signal, most often by Linux's
-  out-of-memory killer (check with `dmesg` as above). The experts are read through the page cache, which Linux can
+- "The usual cause is running out of RAM ...": the engine left no reason of its own; most often a signal ended
+  it, sent by Linux's out-of-memory killer (check with `dmesg` as above). The experts are read through the page cache, which Linux can
   give back; what it cannot take back is the engine's own buffers, the parked conversations (`--park-mib`) and every
   other program. Close other programs, lower `--park-mib` (setup: `./setup.sh --park-mib 4096`), or use the 3-bit
   model.
@@ -222,8 +231,12 @@ Several things make the first requests after a start slower than later ones:
   died) each client's first request reads its whole conversation again, which for an agent at 512K tokens is the
   longest prompt there is. `reading the prompt: X of Y tokens` in the server window shows the progress.
 - The VRAM expert cache starts from the expert profile (`--expert-profile`, which setup writes into the run
-  config). The engine saves it when it ends cleanly (Ctrl+C, `docker stop`, `/unload`); after it was killed, or on
-  the first start ever, the cache fills while it answers.
+  config). The engine saves it only when it leaves its request loop: when the server sends it `QUIT` (`/unload`,
+  an idle unload, or a server that is stopped with SIGTERM, as `docker stop` and `kill <server pid>` do), or when
+  the server's end of the pipe closes. strata-glm has no signal handler of its own, so a signal that reaches the
+  engine itself ends it without saving the profile: Ctrl+C in the server's terminal reaches both processes, and so
+  does a systemd stop with the default `KillMode` (`KillMode=mixed` sends SIGTERM to the server only). After such
+  an end, or on the first start ever, the cache fills while it answers.
 - With `--no-warm`, or when Linux gave the page cache to other programs, the experts come from the disk.
 - With `"lazy_load": true` or `"idle_unload_s"`, the first request starts the engine, warm-up included.
 
@@ -235,9 +248,10 @@ Several things make the first requests after a start slower than later ones:
   Or raise the client's timeout.
 - When a client closes the connection, the server stops the engine on that request, so the others in the queue
   go on.
-- 408 "the request body stopped arriving (120 s without data)": the client stopped sending its request. Reading the
-  headers and the body has that limit; the answer has none, so a long streamed answer is never cut off by the
-  server.
+- 408 "the request body stopped arriving (120 s without data)": the client stopped sending its request. A
+  request's headers and body must keep arriving: 120 seconds without data ends it (a 408 for a body; headers that
+  stop arriving just close the connection). The answer has no such limit, so a long streamed answer is never cut
+  off by the server.
 
 ### A 400 that names a field
 
@@ -246,9 +260,11 @@ Several things make the first requests after a start slower than later ones:
 "temperature: a finite number".
 A sampling value is out of range or of the wrong type: NaN and Infinity, a repetition penalty of 0 or less,
 temperature below 0, top_p or min_p outside 0 to 1, or an integer too large for the engine. The message names the
-field. The same checks apply to the shared Chat settings (`POST /settings`) and to the run config's `"sampling"`
-block. "unknown reasoning effort ...: use none, low, medium or high" is the same for `reasoning_effort`. The server
-window prints each one as `[strata] 400 invalid request: ...`.
+field. The shared Chat settings (`POST /settings`, a 400 that names the field) and the run config's `"sampling"`
+block (a `[strata] config sampling.<field>=...` line, and the server stops) are checked the same way, each with
+its own wording; a shared temperature goes up to 2. "unknown reasoning effort ...: use none, low, medium or high"
+is the same for `reasoning_effort`. The server window prints each refused request as
+`[strata] 400 invalid request: ...`.
 
 ### A 503 or a 413 about the request's size
 
@@ -268,7 +284,8 @@ server's environment changes it.
 The MCP servers in the run config (`"mcp_servers"`, or `--mcp-config`) run their tools with your rights on this
 PC, so by default only Strata's own web page may use them. To let API clients (an agent, a bot) use them too, set
 `"mcp_for_api": true` in the run config and restart. The client must also ask for them with `"strata_mcp": true` in
-its request; without it a client gets only the tools it declares itself. A browser page of another site gets a 403
+a `/v1/chat/completions` request (the only route that offers them); without it a client gets only the tools it
+declares itself. A browser page of another site gets a 403
 "MCP tools can be used only from Strata's own page (or an origin in the config's trusted_origins)".
 
 ### A tool call came back as text
@@ -303,7 +320,8 @@ Open WebUI runs in Docker, so `127.0.0.1` inside its container is the container 
 3. **The API key.** Put the server's key in the connection's key field. A wrong or missing key is a 401
    "missing or wrong API key". Clients send it as `Authorization: Bearer <key>` or `x-api-key: <key>`.
 4. **Allowed hosts.** Without an API key the server answers only to the names it knows (protection against DNS
-   rebinding): IP addresses, `localhost`, this PC's name and `host.docker.internal`. Another name gets a 403
+   rebinding): IP addresses, `localhost`, and while it listens beyond this PC also this PC's name and
+   `host.docker.internal`. Another name gets a 403
    "Host '...' is not allowed (DNS rebinding protection)". Add it to `"allowed_hosts"` in the run config, or set an
    API key, which turns this check off.
 5. **A firewall.** If nothing reaches the server at all (`curl` from inside the container times out), a firewall
@@ -319,7 +337,8 @@ Search [the open issues](https://github.com/Rarebigshot17/Strata/issues) first, 
 
 - what you did, what you expected and what happened, with the exact message;
 - the commit (`git rev-parse --short HEAD`) and the engine version (`build_info` in
-  `curl -s http://127.0.0.1:8101/props`; add `-H "Authorization: Bearer <key>"` when the server has a key);
+  `curl -s http://127.0.0.1:8101/props` while the engine runs; add `-H "Authorization: Bearer <key>"` when the
+  server has a key);
 - `./setup.sh --check`, `nvidia-smi` and `free -g`;
 - the run config `strata-glm-<size>.json`, **with the `"api_key"` removed**;
 - the server window's output around the problem, and the end of `strata-glm-<size>.log` from the last
