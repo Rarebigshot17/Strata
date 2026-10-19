@@ -2167,9 +2167,10 @@ class Service:
                     break
                 if (self.reasoning_close_retry and thinking and finish == "stop" and not close_retried
                         and not answered and not wrap and not opens and parser.state == "reasoning"
-                        and (stops is None or stops.hit is None) and not cancel.is_set()):
+                        and not parser.pending and (stops is None or stops.hit is None) and not cancel.is_set()):
                     # #1053: the model wrote its reasoning and stopped before </think>: the client would get
-                    # an empty answer.  Close the thinking once and let it answer.
+                    # an empty answer.  Close the thinking once and let it answer.  (A call it wrote in the
+                    # thinking and ended the turn on is its act: parser.finish delivers it, #804.)
                     close_retried = True
                     extra = self.tok.encode(REASONING_CLOSE, parse_special=True)
                     if max_new - n - len(extra) >= 1:
