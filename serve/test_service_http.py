@@ -206,5 +206,30 @@ class RefusedAtTurn(Http):
                     self.assertFalse(self.svc.fifo.locked())
 
 
+class ResponsesLikeChat(Http):
+    """/v1/responses renders the prompt as the chat route does for the same request."""
+
+    def prompt_end(self, path, body):
+        code, _, out = self.call(path, body)
+        self.assertEqual(code, 200, out)
+        return self.tok.decode(self.engine.last_prompt)[-40:]
+
+    def test_the_configs_reasoning_effort_applies(self):
+        """The run config's "reasoning_effort": "none" (thinking off for requests that do not say) is used on
+        /v1/responses as on the chat and Messages routes."""
+        self.svc.config_effort = "none"
+        chat = self.prompt_end("/v1/chat/completions", {"messages": [{"role": "user", "content": "x"}]})
+        messages = self.prompt_end("/v1/messages", {"messages": [{"role": "user", "content": "x"}], "max_tokens": 64})
+        responses = self.prompt_end("/v1/responses", {"input": "x"})
+        self.assertTrue(chat.endswith("</think>"), chat)
+        self.assertEqual(messages, chat)
+        self.assertEqual(responses, chat)
+        # a request's own effort still wins, and the Chat settings' come before the config's
+        self.assertTrue(self.prompt_end("/v1/responses", {"input": "x", "reasoning": {"effort": "high"}})
+                        .endswith("<think>"))
+        self.svc.shared = {"reasoning_effort": "high"}
+        self.assertTrue(self.prompt_end("/v1/responses", {"input": "x"}).endswith("<think>"))
+
+
 if __name__ == "__main__":
     unittest.main()

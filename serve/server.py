@@ -3794,7 +3794,9 @@ def make_handler(svc: Service):
             responses_api.check_request(req)
             messages = responses_api.input_messages(req)
             tools, names, skipped = responses_api.request_tools(req)
-            kw = responses_api.template_kwargs(req, svc.shared)
+            # the Chat settings' thinking level, then the config's, as with_shared gives the other routes
+            kw = responses_api.template_kwargs(req, {**svc.shared, "reasoning_effort":
+                                                     svc.shared.get("reasoning_effort") or svc.config_effort})
             try:
                 refuse_images(messages)                      # as on the chat route
             except ValueError as e:
