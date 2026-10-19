@@ -8,8 +8,10 @@ you with [AI_SETUP.md](AI_SETUP.md).
 > The sizes on this page are calculated from the model's shapes, and setup's own figures come from `setup.py`. What
 > has been checked: the CPU reference against llama.cpp on small random GLM models (`tools/glm53_selftest.sh`),
 > conversation parking (`tools/glm53_park_check.py`), the server end to end on the CPU engine
-> (`tools/glm53_server_check.sh`), the Python tests and setup's own tests (`tools/test_setup_*.py`, which mock the
-> GPUs, the downloads and the build). The steps still to run on a real machine are in [GLM53_PORT.md](GLM53_PORT.md).
+> (`tools/glm53_server_check.sh`), the Python tests, the engine's C++ unit tests (`ctest`) and setup's own tests
+> (`tools/test_setup_*.py`, which mock the GPUs, the downloads and the build). Setup itself, the systemd unit and the
+> Docker image below have not been run on a real machine yet. The steps still to run on a real machine are in
+> [GLM53_PORT.md](GLM53_PORT.md).
 
 > **On this page:** [What you need](#what-you-need) · [Install with ./setup.sh](#install-with-setupsh) ·
 > [Setup's options](#setups-options) · [Where files go](#where-files-go) · [The build](#the-build) ·
@@ -22,7 +24,7 @@ you with [AI_SETUP.md](AI_SETUP.md).
 
 | | |
 | --- | --- |
-| **OS** | Linux on x86-64. Setup stops on any other system. On Ubuntu 22.04 and 24.04 setup can install the CUDA toolkit itself; on other distributions you install it. |
+| **OS** | Linux on x86-64. Setup stops on any other operating system. On Ubuntu 22.04 and 24.04 setup can install the CUDA toolkit itself; on other distributions you install it. |
 | **GPU** | One or more NVIDIA cards of compute capability 7.5 or newer (RTX 20, 30, 40, 50 series). Setup leaves out a card it cannot use and says why. It has no minimum VRAM: how much VRAM the layers besides the experts take on the real model is not measured yet. |
 | **Driver** | NVIDIA 580 or newer (the engine is built with CUDA 13). Setup stops on an older one (Ubuntu: `sudo ubuntu-drivers install`, then restart). |
 | **RAM** | Every routed expert stays in RAM: about 117 GB for the 3-bit size, about 162 GB for the 4-bit (see the table below). |
@@ -97,7 +99,7 @@ terminal: when its input ends (a pipe, a script) it stops and says to pass `--ye
 | --- | --- | --- |
 | **Which size?** | 1) `UD-IQ3_XXS` 3-bit, 2) `IQ4_XS` 4-bit. Each line gives the download, the RAM its experts take and what that leaves on this PC. Not asked with `--model`. | The biggest size that fits well; the 3-bit when none does. |
 | **Context?** | 1) 32K, 2) 128K, 3) 256K, 4) 512K, 5) 1M tokens. Each line says the VRAM its attention cache takes ([Choosing the context](#choosing-the-context)). Not asked with `--context`. | 128K when the chosen GPUs have 16 GB of VRAM or more in all, else 32K. |
-| **Install them now?** | Asked only when the C++ compiler or the CUDA toolkit is missing. `y` installs them with `sudo apt-get` (Ubuntu 22.04 / 24.04 only). | `y` |
+| **Install them now?** | Asked only when the C++ compiler or the CUDA toolkit is missing. `y` installs them with `sudo apt-get`: `build-essential` on any system with apt, the CUDA toolkit on Ubuntu 22.04 / 24.04 only. Without apt, or for CUDA on another distribution, setup stops and says what to install. | `y` |
 | **Install it anyway?** | Asked only when the size you chose leaves less than 12 GB of RAM beside its experts. | `n` |
 | **Which one?** | Asked by a plain `./setup.sh` when both sizes are installed: start one of them, or set up the other size / change settings. | `1`, the one started last |
 
@@ -117,16 +119,22 @@ first request does not wait for the disk (the warm-up; `--no-warm` in the config
 shows each step: the layers on each GPU, the expert cache, and the warm-up's progress (`warming the experts: X of Y GB`
 in the engine's log). How long this takes on the real model is not measured yet.
 
-The server gives up on a start when the engine has said nothing new for 900 seconds: while the warm-up makes progress
-the wait starts again from its last progress line. On a disk so slow that one step takes longer, set
-`STRATA_ENGINE_READY_S` (seconds, 0 = no limit) before you start it.
+The server gives up on a start when the engine has not said it is ready within 900 seconds. While the warm-up makes
+progress, the 900 seconds count again from its last progress line; other lines of the engine do not reset them. On a
+disk so slow that one step takes longer, set `STRATA_ENGINE_READY_S` (seconds, 0 = no limit) before you start it.
 
-To stop the model, close the terminal or press Ctrl+C. The server then stops the engine (`STOP`, `QUIT`, and after 20
-seconds each a terminate and a kill). The engine writes its expert profile only when it ends after `QUIT` or when its
-input closes. Ctrl+C in a terminal also reaches the engine, which runs in the same process group and has no signal
-handler, so it ends at once and that run's profile is not written (read from the code, not tried on a GPU). To keep
-the profile, stop the server process alone: `kill <the server's PID>` (SIGTERM takes the same path as Ctrl+C in the
-server), `systemctl stop` with the unit [below](#running-it-as-a-service), or `docker stop`.
+To stop the model, press Ctrl+C or close the terminal. On Ctrl+C (and on SIGTERM) the server stops the engine itself:
+`STOP` and `QUIT`, then, 20 seconds apart, a terminate and a kill. The engine writes its expert profile only when it
+ends after `QUIT` or when its input closes. Read from the code (not tried on a GPU), these end it sooner, and that
+run's profile is not written:
+
+- **Ctrl+C** also reaches the engine, which runs in the server's process group and has no signal handler, so it ends
+  at once. When `./setup.sh` started the server, setup also ends the server itself a quarter of a second after
+  Ctrl+C.
+- **Closing the terminal** sends SIGHUP, which neither the server nor the engine handles: both end at once.
+
+To keep the profile, stop the server process alone: `kill <the server's PID>` (SIGTERM takes the server's Ctrl+C path,
+but only the server gets it), `systemctl stop` with the unit [below](#running-it-as-a-service), or `docker stop`.
 
 ### Setup's options
 
@@ -178,8 +186,8 @@ What to know about them:
 - **`--context` needs `--setup`** (or `--model`) on an installed model:
   `./setup.sh --setup --model UD-IQ3_XXS --context 262144`. Without `--setup`, `--model` or `--no-start`, setup
   starts the installed model and `--context` has no effect.
-- **`--setup --yes` takes the recommended answers again.** Name the size and the context you want
-  (`--model ... --context ...`), or setup picks its own. Keys you added to the run config by hand are kept
+- **`--setup --yes` takes the recommended answers again.** Name the size, the context and the parking RAM you want
+  (`--model ... --context ... --park-mib ...`), or setup picks its own. Keys you added to the run config by hand are kept
   ([The run config](#the-run-config)), but `host`, `api_key`, `gpu` and `port` are written from this run's options
   only: give `--host`, `--api-key`, `--gpus` and `--port` again, or the model listens on 127.0.0.1:8101 without a key
   on every usable GPU. The earlier config is kept as `strata-glm-<size>.json.bak`.
@@ -188,7 +196,7 @@ What to know about them:
 - **`--gpu 0,2`** means `--gpus 0,2`.
 - **A new copy of Strata** (an update unzipped into another folder) with no model set up yet finds your last install
   and sets itself up the same way, without questions (size, context, parking, host, key, port, GPUs, where the shards
-  are). `--setup` or `--model` turns that off.
+  are). `--setup`, `--model` or `--no-start` turns that off.
 
 ### Environment variables
 
@@ -248,7 +256,9 @@ the log file.
 
 ## The build
 
-Setup builds the engine with CMake and Ninja (both from pip, in `.venv`). The commands it runs, with your values:
+Setup builds the engine with CMake and Ninja (both from pip, in `.venv`). The commands it runs, with your values (it
+also passes `-DCMAKE_MAKE_PROGRAM=<its ninja>`, and `CMAKE_C_COMPILER`, `CMAKE_CXX_COMPILER` and
+`CMAKE_CUDA_HOST_COMPILER` when `CC`, `CXX` or `CUDAHOSTCXX` are set):
 
 ```bash
 cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release \
@@ -263,7 +273,8 @@ cmake --build build --target strata-glm strata-glm-ref -j <half the CPU threads>
   later build keeps every architecture the last one had.
 - **The toolkit:** an installed CUDA toolkit of 12.0 or newer is used as it is; an RTX 50 card (sm_120) needs 13.0 or
   newer. When none is there, setup asks and, on Ubuntu 22.04 or 24.04, installs `build-essential` and CUDA 13.0.
-  These are the commands it runs (`2404` for 24.04, `2204` for 22.04), if you prefer to run them yourself:
+  The same steps by hand, if you prefer to run them yourself (`2404` for 24.04, `2204` for 22.04; setup downloads
+  the keyring package itself instead of with wget):
 
   ```bash
   sudo apt-get install -y build-essential
