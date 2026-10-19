@@ -16,6 +16,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
 from serve.glm_fixtures import GlmTokenizer, glm_template
 from serve.server import EngineDied, EngineError, Service, StrataEngine, serve
@@ -59,6 +60,8 @@ for line in sys.stdin:
         if mode in ('slow-exit', 'stopped'):            # strata-glm unwinds first: a CUDA context, 100+ GB mapped
             time.sleep(2)
             sys.exit(1)
+        if mode == 'hang':                              # neither carries on nor exits (stuck in the driver)
+            time.sleep(3600)
         continue
     if mode == 'then-kernel':                           # it carried on after ERR internal; this request's kernel
         sys.stderr.write('glm gpu kernel rms_norm: no kernel image is available for execution on the device\n')
@@ -153,6 +156,16 @@ class FatalRecovery(unittest.TestCase):
         gen = e.generate([1], 8, {}, threading.Event())
         self.assertEqual(next(gen), 90)
         gen.close()                                     # STOP; the engine fails and exits while it is drained
+        self.assertFalse(e.alive())
+        self.assertEqual(self.content(self.run_request(svc)), 'Z')
+
+    def test_an_engine_that_neither_answers_nor_exits_after_a_fatal_error(self):
+        # the probe after ERR internal is not answered and the output stays open: the engine is ended within
+        # ERR_PROBE_S, so the next request starts a new one instead of waiting on this one
+        e = self.engine('hang')
+        svc = self.service(e)
+        with mock.patch.object(StrataEngine, 'ERR_PROBE_S', 0.5), self.assertRaises(EngineError):
+            self.run_request(svc)
         self.assertFalse(e.alive())
         self.assertEqual(self.content(self.run_request(svc)), 'Z')
 
