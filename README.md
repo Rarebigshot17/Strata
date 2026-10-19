@@ -1,73 +1,35 @@
 <h1 align="center">Strata</h1>
 
-**English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Deutsch](README.de.md) · [Français](README.fr.md) · [Español](README.es.md) · [Português](README.pt-BR.md)
+<p align="center"><b>Run GLM-5.3-Flash, a 320-billion-parameter AI model, on one Linux PC</b><br>
+NVIDIA graphics cards and a lot of system RAM · Linux · free and open source</p>
 
-<p align="center"><b>Run a 125-billion-parameter AI model on your own gaming PC</b><br>
-NVIDIA or AMD graphics card (12 GB or more) · Windows or Linux · free and open source</p>
+Strata runs **GLM-5.3-Flash** (by Z.ai) on a PC with NVIDIA graphics cards and a lot of system RAM. It has a C++/CUDA
+engine, a server with OpenAI-, Anthropic- and Responses-compatible APIs and a web app, and an installer. Your apps,
+coding agents and bots talk to it as they would to a cloud model, and nothing leaves your PC. This is a fork of
+[Niko1221/Strata](https://github.com/Niko1221/Strata), which runs Qwen3.8-Flash-Next on gaming PCs. The fork keeps
+its design, its server and its web app, replaces the engine, and runs GLM-5.3-Flash only.
 
-<p align="center"><a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4"><img src="docs/media/pagoda-preview.webp" width="720" alt="A voxel pagoda garden that Strata's model wrote, running in the browser"></a><br>
-<sub>A voxel pagoda garden, 1 shot prompt running on an RTX 5070 with Strata (IQ3_S, 128K context) ·
-<a href="https://github.com/Niko1221/Strata/releases/download/v0.1.10/Pagoda.mp4">full video (49 s)</a></sub></p>
-
-Strata runs **[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)** on a normal PC. This is a
-large, smart AI model that usually needs a server. It chats, writes code, reads pictures and works with your apps
-and coding agents. Nothing leaves your PC.
-
-## How fast is it?
-
-We measured it on two ordinary gaming PCs. A token is about ¾ of a word.
-
-- **Writes answers:** how fast the reply appears in a short chat. 60 tokens per second is faster than you can read.
-- **Reads your prompt:** how fast it takes in what you send (here a 32K-token document, code or chat history).
-
-<table>
-<tr><th>NVIDIA: RTX 5070 (12 GB), Ryzen 5 7600, 64 GB RAM</th><th>AMD: RX 9070 XT (16 GB), Ryzen 9 3900X, 47 GB RAM</th></tr>
-<tr><td>
-
-| Size | Writes answers | Reads your prompt |
-| --- | ---: | ---: |
-| **Q2_0** | 94 tokens/s | 2,650 tokens/s |
-| **IQ2_XS** | 79 tokens/s | 2,090 tokens/s |
-| **IQ3_XXS** | 62 tokens/s | 1,750 tokens/s |
-| **IQ3_S** | 53 tokens/s | 1,620 tokens/s |
-| **Coder** | 55 tokens/s | 2,180 tokens/s |
-
-</td><td>
-
-| Size | Writes answers | Reads your prompt |
-| --- | ---: | ---: |
-| **Q2_0** | 60 tokens/s | 1,160 tokens/s |
-| **IQ2_XS** | 52 tokens/s | 1,110 tokens/s |
-| **Coder** | 44 tokens/s | 1,420 tokens/s |
-
-</td></tr>
-</table>
-
-NVIDIA: Q2_0 with engine 0.1.36, the other rows with 0.1.26 (4K answers, 32K prompts). The full tables are in
-[DETAILS.md](docs/DETAILS.md#speed-measured). A card with more VRAM is faster: an RTX 3090 (24 GB) should write
-about 100-140 tokens per second. Long chats and other cards: [speed of each model](docs/MODELS.md#how-fast-is-each-size),
-[community results](docs/COMMUNITY_BENCHMARKS.md).
-
-<p align="center"><a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a><br>
-<sub>Strata is free. If it runs well on your PC, a coffee keeps the work on it going.</sub></p>
+> **Status: the engine has not run on a GPU or on the real model yet.** There are no measured speeds, load times or
+> memory figures. The numbers on this page are calculated from the model's shapes and say so. What is checked and
+> what is not: [Status](#status).
 
 ## What you need
 
 | | |
 | --- | --- |
-| **Graphics card** | **NVIDIA** GeForce RTX 20, 30, 40 or 50 series, or **AMD** Radeon RX 7900 XT / XTX, RX 7800 XT / 7700 XT, RX 9060 XT, RX 9070 / 9070 XT, Radeon AI PRO R9700 or RX 6800 / 6900 series. It needs **12 GB of VRAM or more**. |
-| **RAM** | 32 GB or more. Your RAM decides [which model](#which-model-should-i-pick) fits. 64 GB runs every size. |
-| **Disk** | About 80 GB free. Use an SSD if you can: the first start is much faster. |
-| **System** | Windows 10 / 11 or Linux, and a current graphics driver from NVIDIA or AMD. |
+| **Graphics cards** | **NVIDIA**, compute capability 7.5 or newer (GeForce RTX 20 series and newer). One card or several: the model's layers are split over them. Driver **580** or newer (the engine is built with CUDA 13). |
+| **RAM** | Every expert of the model stays in RAM: about 117 GB at 3-bit, about 162 GB at 4-bit, plus room for Linux and the server. So at least about **130 GB** for the 3-bit size and about **175 GB** for the 4-bit size. [Which size](#which-size-should-i-pick). |
+| **Disk** | About 120 GB free for the 3-bit download, about 170 GB for the 4-bit one, and about 10 GB more when setup installs the CUDA toolkit. An SSD helps: the engine reads the whole model at every start. |
+| **System** | **Linux** only. A CPU with **AVX2**: without it setup warns, because the experts the cards do not hold run on the CPU. |
 
-The installer sets up everything else. Two or three cards can share the model ([multi-GPU](docs/MULTI_GPU.md)).
+The cards together hold everything except the routed experts, plus the attention cache. How much VRAM that takes
+in total is not measured yet. Setup installs everything else: Python, the C++ compiler and the CUDA toolkit when
+they are missing (the toolkit automatically on Ubuntu 22.04 and 24.04 only).
 
-Experimental, written and tested by community members on their own machines:
-
-- **Older graphics cards** (Tesla P40 / V100, GTX 10, Radeon VII / MI50, RX 6700 XT, RX 5500 XT): [Older GPUs](docs/OLDER_GPUS.md).
-- **Intel Arc**, built from source on Linux: [Intel Arc](docs/INTEL_ARC.md).
-- **AMD Ryzen AI Max (Strix Halo)**, built from source on Linux: [Strix Halo](docs/STRIX_HALO.md).
-- **Older processors without AVX2**: they work, but slowly. [Older CPUs](docs/INSTALL.md#older-cpus-experimental).
+**The reference machine** is the owner's PC, napster-ai: a Xeon E5-2699 v4 (AVX2, no AVX-512), 192 GB of DDR4, an
+RTX 3090 Ti 24 GB + RTX 3080 Ti 12 GB + RTX 3080 10 GB (all compute capability 8.6), a SATA SSD, Linux. Strata is
+planned for it: port 8101 (3000, 8000 and 8080 are taken there), contexts up to 512K-1M tokens, and several agents,
+a chat and a Discord bot taking turns on one engine.
 
 The full list: [docs/INSTALL.md](docs/INSTALL.md#what-you-need).
 
@@ -75,140 +37,205 @@ The full list: [docs/INSTALL.md](docs/INSTALL.md#what-you-need).
 
 ### Let your AI set it up
 
-Do you use an AI coding assistant (Claude Code, Cursor, Codex, GitHub Copilot, ...)? Paste this into it:
+Do you use an AI coding assistant (Claude Code, Codex, Cursor, ...)? Paste this into it:
 
 ```text
-Set up Strata on this PC for me: https://github.com/Niko1221/Strata - follow docs/AI_SETUP.md in that repository.
+Set up Strata on this PC for me: https://github.com/Rarebigshot17/Strata (branch glm53-flash) - follow
+docs/AI_SETUP.md in that repository.
 ```
 
-It checks your graphics card, RAM and disk and picks the model that fits. Then it installs and starts it and tells
-you how to connect your apps. AI tools can also install, start and stop Strata through its
-[MCP server](docs/MCP_SERVER.md).
+It checks your cards, RAM and disk, picks the size that fits, runs setup without questions, starts the server and
+tells you how to connect your apps. The steps it follows: [docs/AI_SETUP.md](docs/AI_SETUP.md).
 
 ### Or do it yourself
 
-[Download Strata](https://github.com/Niko1221/Strata/archive/refs/heads/main.zip) and unzip it (or `git clone` it).
-**Windows:** double-click **`START-HERE.bat`**. **Linux:** run **`./setup.sh`** in the Strata folder.
+```bash
+git clone -b glm53-flash https://github.com/Rarebigshot17/Strata.git
+cd Strata
+./setup.sh
+```
 
-The steps are the same for NVIDIA and AMD. The installer finds your card and sets up the right engine for it. It
-asks you a few questions:
+(Without git: download [the zip](https://github.com/Rarebigshot17/Strata/archive/refs/heads/glm53-flash.zip), unzip
+it and run `./setup.sh` in the folder.)
 
-- which model and which size,
-- how much context (how much text the model keeps in mind),
-- whether it should read pictures.
+`./setup.sh` makes a Python environment in `.venv` (it installs Python 3.10 or newer through apt, dnf or pacman when
+it is missing) and runs `setup.py`. It asks **two questions**: which size (3-bit or 4-bit) and how much context.
+Press Enter for the recommended answer. Then it does the rest, and skips every step that is already done:
 
-Press Enter each time for the recommended answer. Then it downloads the model (about 70 GB) and starts it. If the
-download stops, run it again: it continues where it left off. Your browser opens the Strata app at
-`http://127.0.0.1:8080`.
+1. **Checks your PC:** the NVIDIA cards and driver, the RAM, the CPU. It stops with a plain message when the engine
+   cannot run there.
+2. **Installs the Python packages** into `.venv`.
+3. **Compiles the engine** (`strata-glm`, and the CPU reference `strata-glm-ref`) for your cards, with ggml from
+   llama.cpp's source at a fixed commit. When the C++ compiler or the CUDA toolkit is missing, it asks first and
+   installs them (sudo asks for your password).
+4. **Downloads the model** from Hugging Face ([unsloth/GLM-5.3-Flash-GGUF](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF)).
+   It reads the file names and sizes from the repository first and checks the free disk space. A stopped download
+   resumes where it stopped. Every file's size and SHA-256 are checked. The files go to `Strata-GLM-data/models`
+   next to the Strata folder (`--data-dir` puts them elsewhere).
+5. **Writes** the run config `strata-glm-<size>.json` and the start script `run-glm-<size>.sh`, and starts the model
+   on port **8101**. Your browser opens the web app when the model is ready.
 
-> **While the model starts, your PC can be slow or stop responding for 1-3 minutes** (longest the first time).
-> Strata loads 35-55 GB into your RAM and locks part of it for the graphics card. This is normal. Wait, and don't
-> close the window. The window shows what Strata is doing.
+**How long this takes is not measured yet.** The download depends on your connection: at 100 MB/s, 120 GB takes
+about 20 minutes (calculated). Before it answers, the engine reads every expert into RAM once. From a SATA SSD
+(at most about 550 MB/s) 117 GB takes at least about 3.5 minutes (calculated). Setup prints its own estimates for
+the compile and the toolkit; none of them is measured on this version.
 
-**Next time**, run `START-HERE.bat` (or `./setup.sh`) again. It starts right away and downloads nothing twice. Close
-its window to stop the model. `UPDATE.bat` (`./update.sh`) updates Strata without starting it. Updating, Docker,
-several cards, where the files go and every option: [docs/INSTALL.md](docs/INSTALL.md).
+**Next time**, run `./setup.sh` again (or `./run-glm-<size>.sh`). It starts right away and downloads nothing twice.
+Press Ctrl+C, or close the terminal, to stop the model. `./update.sh` updates Strata without starting it.
+`./setup.sh --setup` sets up the other size or changes the answers. `./setup.sh --check` only checks the PC.
+Docker, every option, where the files go and how to update:
+[docs/INSTALL.md](docs/INSTALL.md) ([the run config](docs/INSTALL.md#the-run-config),
+[updating](docs/INSTALL.md#updating)).
 
-**Is it fast on your PC?** Run `BENCH.bat` (`./bench.sh`): about 5-10 minutes, it measures chat, 4K/16K prompts and an agent-style session with your own settings and writes a report to share ([how](docs/COMMUNITY_BENCHMARKS.md#run-the-benchmark)).
+## Which size should I pick?
 
-## Which model should I pick?
+The model's experts are compressed ("quantized") to about 3 or 4 bits. All of them stay in RAM, so your RAM decides.
+The 4-bit size is closer to the full model; how much better its answers are is not measured here.
 
-The installer recommends one for your RAM. The same model comes in several sizes, compressed more or less. Smaller
-sizes are faster. Larger sizes are a bit smarter.
+| Size | Setup's name | Download | Experts in RAM |
+| --- | --- | ---: | ---: |
+| **3-bit** | `UD-IQ3_XXS` | about 120 GB | about 117 GB |
+| **4-bit** | `IQ4_XS` (`UD-Q4_K_XL` when the repository has no IQ4_XS) | about 170 GB | about 162 GB |
 
-| Your RAM | Take | Why |
-| --- | --- | --- |
-| **32 GB** | **Coder** | it fits 32 GB, and it is made for code (with a 24 GB card, Q2_0 and IQ2_XS run too) |
-| **48 GB** | **IQ2_XS** (or Q2_0, the fastest) | the larger sizes do not fit |
-| **64 GB** | **IQ2_XS** (recommended), or IQ3_XXS / IQ3_S | every size fits; IQ3_S is the best and the slowest |
-| **96 GB or more** | **IQ3_S**, or Unsloth's UD-IQ4_XS (~4-bit) | room for the largest sizes with everything else open |
+These sizes are calculated from the model's shapes (about 305 billion expert parameters at 3.06 or 4.25 bits each),
+not measured. Setup reads the real file sizes from the repository before it downloads.
 
-- **[Coder](docs/MODELS.md#coder):** a coding version with half of the experts removed. It reaches 91% of the full
-  model's SWE-bench Verified score (measured by its authors) and fits 32 GB of RAM. It is weaker outside code,
-  including Chinese and other CJK text (#438). For those, take Q2_0, IQ2_XS or IQ3_S, which keep every expert.
-- **[Swift 1.5](docs/MODELS.md#swift-15):** a fine-tune that thinks for a much shorter time before it answers. You
-  get the answer sooner, at about the same quality.
-- **[Unsloth UD-IQ4_XS](docs/MODELS.md#unsloth-ud-iq4_xs):** Unsloth's ~4-bit version, between IQ3_S and
-  UD-Q4_K_XL in quality. A 94 GB download. With less than ~80 GB of RAM, Strata reads part of it from the SSD
-  while it answers, so it is slower there (an NVMe SSD helps).
-- **[Unsloth UD-Q4_K_XL](docs/MODELS.md#unsloth-ud-q4_k_xl-experimental)** (experimental): the closest to the full
-  model. But Strata reads most of it from the SSD while it answers, so it writes only 7-8.5 tokens/s on a 64 GB PC.
-- **[OrcaRouter's Uncensored IQ3_XXS](docs/MODELS.md#orcarouter-uncensored-iq3_xxs):** you set it up by hand. It is
-  not in the installer's menu.
+What is left beside the experts holds Linux, the server, your other programs and the parked conversations
+([Using it](#using-it)). Setup's verdict, calculated as your RAM minus the experts:
 
-Sizes, downloads and what fits where: [docs/MODELS.md](docs/MODELS.md). To add another model later, run
-`SETUP.bat` (Linux: `./setup.sh --setup`).
+| Your RAM | 3-bit: RAM left | 4-bit: RAM left | Setup recommends |
+| --- | --- | --- | --- |
+| 128 GB | about 11 GB: does not fit | does not fit | neither: it stops unless you insist |
+| 144 GB | about 27 GB: tight | does not fit | 3-bit, with less RAM for parked conversations |
+| 160 GB | about 43 GB: fits | does not fit | 3-bit |
+| **192 GB** | about 75 GB: fits | about 30 GB: tight | **3-bit** |
+| 256 GB | about 139 GB: fits | about 94 GB: fits | 4-bit |
+
+- **Fits:** 40 GB or more left.
+- **Tight:** 12 to 40 GB left. Setup warns and gives parked conversations 4 GB instead of 8 (`--park-mib 4096`).
+  Close other big programs while the model runs.
+- **Does not fit:** under 12 GB left. Linux would read experts from the disk while the model answers: very slow, or
+  no start at all. Setup stops there unless you ask for it with `--model <size> --yes`.
+
+Setup counts the RAM that Linux reports, which is a few GB less than what is installed, so its own figures are a
+little lower than these. `./setup.sh --check` prints them for your PC without installing anything. On napster-ai
+(192 GB) setup recommends the 3-bit size.
 
 ## Using it
 
-<p align="center"><img src="docs/media/runpagoda.png" width="900" alt="The Strata app's Monitor tab next to a coding agent"><br>
-<sub>The Strata app's <b>Monitor</b> (left) while a coding agent writes the pagoda garden from the video (right)</sub></p>
+- **In the browser:** open `http://127.0.0.1:8101`. It has **Chat**, a live **Monitor** of the model and your
+  GPUs, CPU and RAM, and **About** with the settings and addresses.
+- **Your apps and agents:** add an "OpenAI-compatible" provider with the base URL **`http://<host>:8101/v1`**
+  (`http://127.0.0.1:8101/v1` on the same PC). Any model name works. The API key is the one you set, or anything
+  when you set none.
+  - Apps that use Anthropic's API: `http://<host>:8101/v1/messages` (Claude Code:
+    `ANTHROPIC_BASE_URL=http://127.0.0.1:8101`).
+  - Codex CLI and other apps that use OpenAI's Responses API: `http://<host>:8101/v1/responses`. It stores nothing:
+    the client sends the whole conversation each time.
+  - Plain text completions: `/v1/completions`. Every endpoint and field: [docs/DETAILS.md](docs/DETAILS.md#the-api).
+- **Open WebUI in Docker, and other machines:** Strata must listen beyond this PC, and then it needs an API key:
 
-- **In the browser:** open `http://127.0.0.1:8080`. It has **Chat**, a live **Monitor** of the model and your
-  GPU/CPU/RAM, and **About** with the settings and addresses.
-- **Your apps and coding agents:** add an "OpenAI-compatible" provider with the base URL
-  **`http://127.0.0.1:8080/v1`**. Any API key and any model name work.
-  - Apps that use Anthropic's API: `http://127.0.0.1:8080/v1/messages` (Claude Code:
-    `ANTHROPIC_BASE_URL=http://127.0.0.1:8080`).
-  - Codex CLI and other apps that use the OpenAI Responses API: `/v1/responses`
-    ([setup](docs/DETAILS.md#the-responses-api-and-codex-cli)).
-- **Thinking:** choose **off, low, medium or high** in the chat menu or in your app's "reasoning effort". Off is the
-  fastest. High is best for hard questions.
-- **Pictures:** say yes to "Images?" in setup. Then click **Picture** in the chat, or attach pictures in your app.
-  AMD cards read pictures on Linux through the processor; on Windows they can't yet.
-- **From your phone or another PC:** `START-HERE.bat --setup --host 0.0.0.0 --api-key <secret>`. Always set a key.
-- **One request at a time:** by default Strata answers one request, and the others wait. To answer several at once,
-  set `"parallel": 2` ([BATCHING.md](docs/BATCHING.md)). On a 12 GB card this makes each answer slower.
-- **Long prompts:** Strata reads the first message of a chat in full, about 1 minute per 30,000 tokens. Follow-up
-  messages start in seconds.
+  ```bash
+  ./setup.sh --host 0.0.0.0 --api-key "$(openssl rand -hex 24)"
+  ```
 
-More: [where your chats are stored](docs/INSTALL.md#where-things-are-stored), [the API](docs/DETAILS.md#using-it).
+  Both are saved for the model. In Open WebUI add an OpenAI connection with that key and the address its container
+  reaches the host at: `http://172.17.0.1:8101/v1` on Docker's default bridge, or `http://100.126.222.90:8101/v1`
+  over Tailscale on napster-ai (the agents and the Discord bot can use that address too). Clients send the key as
+  `Authorization: Bearer <key>` or `x-api-key`; the web page asks for it. Without a key, anyone who can reach the
+  port can use the model: [SECURITY.md](SECURITY.md).
+- **Thinking:** GLM-5.3-Flash thinks before it answers, or it does not. It has no levels. In the web app, open
+  the sampling settings and choose Thinking **Off** or **On**. In the API, `reasoning_effort: "none"` turns it off,
+  and low, medium and high all mean on. `"chat_template_kwargs": {"enable_thinking": false}` and Anthropic's
+  `"thinking": {"type": "disabled"}` turn it off too. A request that says nothing gets thinking on.
+- **Several clients:** Strata answers one request at a time. The others wait, in the order they arrived. When a
+  request belongs to another conversation, the engine parks the current conversation's state in RAM. A later turn
+  of a parked conversation reads only the new tokens, not the whole conversation again. Parked conversations get
+  8 GB of RAM by default (`--park-mib`), and the one used least recently goes first. A parked 100K-token
+  conversation takes about 1.3 GB (calculated). How fast a parked turn resumes is not measured yet.
+- **Context:** the longest conversation the engine accepts. Setup offers 32K, 128K (recommended when your cards
+  have 16 GB or more together), 256K, 512K and 1M tokens (the model's full context). Each token takes 11 KB of VRAM
+  in the attention cache, and that VRAM is taken from the expert cache:
+
+  | Context | 32K | 128K | 256K | 512K | 1M |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | VRAM for the attention cache (calculated) | 0.4 GB | 1.5 GB | 3.0 GB | 5.9 GB | 11.8 GB |
+
+  Fewer cached experts means more of them run on the CPU; how much slower that is has not been measured. A request
+  whose prompt plus `max_tokens` does not fit the context gets a 400; it is never cut. To change the context later:
+  `./setup.sh --setup`, or `--ctx` in the [run config](docs/INSTALL.md#the-run-config).
+- **Pictures:** GLM-5.3-Flash reads text only. A request with a picture gets a 400.
+
+Settings and monitoring: [docs/DETAILS.md](docs/DETAILS.md#settings) and
+[Prometheus and Grafana](docs/DETAILS.md#monitoring).
 
 ## Something went wrong?
 
-- **My PC froze the first time Strata started.** This is normal while it loads the model. Wait, and don't close the
-  window. Still frozen after 10 minutes? Restart the PC, close other programs and try again, or pick a smaller size.
-- **It stopped while downloading or installing.** Run `START-HERE.bat` (or `./setup.sh`) again. It continues where
-  it stopped.
-- **It's very slow and the disk light keeps blinking, or it says "the engine stopped unexpectedly".** Your PC does
-  not have enough free RAM. Close other programs (browsers use a lot), or pick a smaller size (Q2_0 or IQ2_XS).
-- **It says port 8080 is already in use.** Strata is already running. Look for its window.
+- **"no NVIDIA GPU found" or "the NVIDIA driver is too old".** Install or update the NVIDIA driver (580 or newer;
+  Ubuntu: `sudo ubuntu-drivers install`), restart, and run `./setup.sh` again.
+- **The CUDA toolkit does not install.** Setup installs it by itself on Ubuntu 22.04 and 24.04 only. Elsewhere,
+  install CUDA 12.0 or newer (13.0 for an RTX 50 card) from your distribution or from NVIDIA, then run `./setup.sh`
+  again.
+- **It stopped while downloading or compiling.** Run `./setup.sh` again. It continues where it stopped. A file with
+  the wrong size or SHA-256 is deleted and downloaded again.
+- **The model is very slow and the disk is busy all the time.** The experts do not fit in the free RAM, so Linux
+  reads them from the disk. Close other big programs, or take the 3-bit size (`./setup.sh --setup`).
+- **"port 8101 is already in use".** Strata (or another server) is already running. Stop it, or start with
+  `--port <another port>`.
 
 More problems and their fixes: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). Still stuck? Open an
-[issue](https://github.com/Niko1221/Strata/issues) and attach `strata-<model>.log` from the Strata folder. Found a
-security problem? Report it privately: [SECURITY.md](SECURITY.md).
+[issue](https://github.com/Rarebigshot17/Strata/issues) and attach the engine's log, `strata-glm-<size>.log` in the
+Strata folder. Found a security problem? Report it privately: [SECURITY.md](SECURITY.md).
 
 ## How does it work?
 
-Models like this one usually run on servers with hundreds of gigabytes of graphics memory. Your graphics card has
-12-24 GB. Strata makes the model fit by **sharing the work across your whole PC**. Think of a kitchen: the things
-you use all the time stay on the counter, and the rest waits in the pantry.
+A model this size normally runs on servers with hundreds of gigabytes of graphics memory. Strata makes it fit by
+**sharing the work across the whole PC**:
 
-<p align="center"><img src="docs/media/how-it-works.svg" width="860" alt="The model's 24,576 experts: the busiest on the graphics card, all of them in RAM, a lookup table on the SSD"></p>
+- **The model is a team of small specialists ("experts").** Each of its 42 expert layers has 288 of them, and each
+  word needs only 8 per layer.
+- **The graphics cards** do the part every word needs (the attention layers, the routers, the shared experts) and
+  keep the experts that are asked for most often. They keep learning which ones those are.
+- **The RAM** holds every expert. When a word needs one the cards do not have, **the processor** computes it while
+  the cards do their part.
+- **Several conversations** take turns on one engine. Each one's state is parked in RAM, so a new turn does not read
+  the whole conversation again.
 
-- **The model is a team of 24,576 small specialists ("experts").** Each word needs only 10 of them.
-- **Your graphics card** keeps the few thousand experts that are used most often. **Your RAM** holds all of them,
-  and **your processor** works on the rest at the same time. **Your SSD** holds a big lookup table.
+The longer explanation: [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md).
 
-<p align="center"><img src="docs/media/guess-and-check.svg" width="860" alt="A small helper guesses the next words; the big model checks them all at once and keeps the right ones"></p>
+## Status
 
-- **Guess, then check:** a small helper guesses the next few words. The big model checks them all at once. You get
-  the same answer, 1.6-1.8x sooner.
-- **Long texts are read in big pieces** (up to 8,192 tokens at a time), at over 1,000 tokens per second.
+What is checked, without a GPU and without the real model:
 
-The longer explanation: [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md). Every part and its numbers:
-[the details](docs/DETAILS.md#how-it-works) and the [paper](docs/paper/Strata-Paper.pdf).
+- **The CPU reference** (`strata-glm-ref`) matches llama.cpp to float rounding on small random GLM-5.3-Flash models
+  (`tools/glm53_selftest.sh`).
+- **Conversation parking and checkpoints:** every resumed reply is the same, token for token, as a fresh engine's
+  (`tools/glm53_park_check.py`, on the CPU engine).
+- **The server end to end** on the CPU engine: tokenizer, chat, streaming, a resumed second turn, completions,
+  metrics, a request that does not fit (`tools/glm53_server_check.sh`).
+- The server's and setup's Python tests and the engine's C++ unit tests, which need no GPU ([AGENTS.md](AGENTS.md)).
+
+What is **not** checked yet:
+
+- **The GPU engine** (`strata-glm`) is written but has never run on a GPU. Its logits have not been compared with
+  llama.cpp's on the real model.
+- **The real model** has not run in Strata. The tests use GLM-4.7-Flash's chat template. GLM-5.3-Flash's own
+  template and special tokens are read from its GGUF, and have not been checked against the server yet.
+- **No speed, load time or memory use is measured.** Every such figure in these docs is calculated.
+- **A full install** that ends with the real model answering has not run yet.
+
+The steps that check these on napster-ai, one by one: [docs/GLM53_PORT.md](docs/GLM53_PORT.md) ("What to run on
+napster-ai"). The server port's decisions and plan: [docs/GLM53_SERVER_PORT.md](docs/GLM53_SERVER_PORT.md).
 
 ## Credits and license
 
-The model is [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) by the Qwen team. It was
-compressed by [ISTA-DASLab](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF), UkisAI (Swift 1.5)
-and Unsloth. Strata uses parts of [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp). All credits:
-[docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md#credits). Strata is open source under the [MIT License](LICENSE). A few
-parts and every model have their own licenses ([which ones](docs/HOW_IT_WORKS.md#license)).
+- The model is GLM-5.3-Flash by Z.ai. The GGUF files setup downloads are
+  [Unsloth's](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF). Their license applies to the model files.
+- Strata comes from [Niko1221/Strata](https://github.com/Niko1221/Strata) by its author and contributors. This fork
+  keeps its design (experts in RAM, the most used cached in VRAM, the rest on the CPU), its server, its web app and
+  its installer, and replaces the Qwen engine with a GLM-5.3-Flash one.
+- Strata uses parts of [llama.cpp / ggml](https://github.com/ggml-org/llama.cpp) (MIT), and every part of the engine
+  is checked against llama.cpp.
 
-## Support Strata
-
-Strata is free and open source. If it is useful to you, you can support its development:
-
-<p align="center"><a href="https://buymeacoffee.com/strataengine"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="50"></a></p>
+Strata is open source under the [MIT License](LICENSE). A few parts and the model have their own licenses
+([which ones](docs/HOW_IT_WORKS.md)).
