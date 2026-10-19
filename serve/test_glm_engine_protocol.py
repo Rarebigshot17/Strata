@@ -215,6 +215,14 @@ class FakeEngineTests(unittest.TestCase):
         gen = next(x for x in self.fake.lines() if x.startswith("GEN "))
         self.assertTrue(gen.startswith("GEN 16 cp=1 end=264,266 temperature=1.0 "), gen)
 
+    def test_drawn_key_follows_a_seed(self):
+        # a seeded pass skips the draws of the reply's earlier passes; without a seed there is nothing to go on from
+        for sampling, keys in (({"temperature": 1.0, "seed": 7}, "temperature=1.0 seed=7 drawn=25 "),
+                               ({"temperature": 1.0}, "temperature=1.0 1,2")):
+            list(self.fake.engine.generate([1, 2], 16, sampling, threading.Event(), drawn=25))
+            gen = [x for x in self.fake.lines() if x.startswith("GEN ")][-1]
+            self.assertTrue(gen.startswith("GEN 16 " + keys), gen)
+
     def test_err_is_a_refusal(self):
         self.fake.set_mode("err")
         with self.assertRaises(ValueError) as c:

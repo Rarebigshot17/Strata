@@ -26,10 +26,11 @@ start   <- INFO engine=<version> backend=cuda|cpu-reference eos=<n> park_mib=<in
                [expert_slots=<n> expert_cache_mib=<int>] ...
         <- READY <ctx> stop
 request -> GEN <max_new> [cp=<n>] [end=<id,...>] [logit_bias=id:bias,...] [temperature= top_p= top_k= min_p=
-               penalty_repeat= penalty_freq= penalty_present= penalty_last_n= seed=] <id,id,...>
+               penalty_repeat= penalty_freq= penalty_present= penalty_last_n= seed= drawn=] <id,id,...>
                                          (unknown keys ignored; end=: more ids that end the request as an end of
                                          turn does.  The last printed token is never taken into the state, so the
-                                         prompt plus every printed token continues it)
+                                         prompt plus every printed token continues it.  drawn=: the seed's draws
+                                         the reply's earlier passes made, one a sampled token, which this one skips)
         <- RESUME <n>                    n prompt tokens came from a kept state (only when n > 0)
         <- PP <done> <total> <ms> <tok/s>   at most 4 a second, always once at done == total
         <- HB                            the engine is working (a long prompt chunk); at most every few seconds,

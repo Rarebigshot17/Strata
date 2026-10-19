@@ -27,6 +27,9 @@ struct SamplingParams {
     int penalty_last_n = 64;
     uint64_t seed = 0;              ///< used when has_seed (any value, 0 included); otherwise a random seed
     bool has_seed = false;
+    /// `drawn=`: the seed's draws a reply's earlier passes made (a draw a sampled token), which this one skips: a
+    /// reply the server makes in several passes is then drawn as in one.
+    uint64_t drawn = 0;
     /// `logit_bias=id:value,...`: added to the logits before the penalties; -100 bans the token.
     std::vector<std::pair<int32_t, float>> logit_bias;
     std::string bias_error;         ///< why the logit_bias value was refused (empty: fine)

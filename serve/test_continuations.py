@@ -13,6 +13,7 @@ whole thinking again.
 from __future__ import annotations
 
 import json
+import random
 import sys
 import unittest
 import urllib.request
@@ -77,10 +78,38 @@ class LiveEngine(S.MockEngine):
             self.live = list(ids) + out[:max(0, printed - 1)]
 
 
+class SeededEngine(S.MockEngine):
+    """strata-glm drawing at a temperature with a seed: its Sampler starts the seed's random numbers again on every
+    GEN (after the `drawn` ones the GEN names) and takes one for each token it prints.  It thinks `thought`, then
+    writes `length` letters, each "a" or "b" by its draw, then ends the turn."""
+
+    def __init__(self, tok, thought: str, length: int):
+        super().__init__(tok, "x")
+        self.head = tok.encode(thought + "</think>", parse_special=True)
+        self.length, self.end = length, tok.encode("<|user|>", parse_special=True)[0]
+        self.first, self.gens = None, 0
+
+    def generate(self, ids, max_new, sampling, cancel, checkpoint=None, end_ids=None, drawn=0):
+        if self.first is None:
+            self.first = list(ids)
+        self.gens += 1
+        rng = random.Random(sampling["seed"])
+        for _ in range(drawn):
+            rng.random()
+        at = len(ids) - len(self.first)                # the reply's tokens before this pass
+        for k in range(max_new):
+            u, pos = rng.random(), at + k
+            t = (self.head[pos] if pos < len(self.head) else ord("ab"[u < 0.5])
+                 if pos < len(self.head) + self.length else self.end)
+            yield t
+            if t == self.end or t in (end_ids or ()):
+                return
+
+
 class Continuations(unittest.TestCase):
-    def start(self, script, after=None, lag=50):
+    def start(self, script, after=None, lag=50, engine=None):
         self.tok = GlmTokenizer()
-        self.engine = LiveEngine(self.tok, script, after or {}, lag)
+        self.engine = engine or LiveEngine(self.tok, script, after or {}, lag)
         httpd = S.serve(S.Service(self.engine, self.tok, glm_template()), port=0)
         self.addCleanup(httpd.server_close)
         self.addCleanup(httpd.shutdown)
@@ -169,6 +198,19 @@ class Continuations(unittest.TestCase):
         self.assertEqual([(g["max_new"], g["end_ids"]) for g in self.engine.gens],
                          [(20, None), (380, self.ids("</think>", "</tool_call>")), (1, None), (1, None)])
         self.assertContinued()
+
+    def test_a_seeded_reply_in_two_passes_is_the_one_pass_reply(self):
+        # the pass capped at the budget ends inside the answer: the next pass's draws go on after the first pass's
+        # instead of starting the seed's again (which drew the answer's next letters with the reply's first numbers)
+        replies = []
+        for budget in (None, len(THOUGHT) + 10):
+            with self.subTest(budget=budget):
+                self.start("", engine=SeededEngine(GlmTokenizer(), THOUGHT, 40))
+                c = self.chat(temperature=1.0, seed=7, **({"reasoning_budget_tokens": budget} if budget else {}))
+                self.assertEqual(self.engine.gens, 1 if budget is None else 2)
+                replies.append((c["message"]["reasoning_content"], c["message"]["content"], c["finish_reason"]))
+        self.assertEqual(len(replies[0][1]), 40)
+        self.assertEqual(replies[1], replies[0])
 
     def test_a_reader_that_keeps_up_changes_nothing(self):
         for lag in (0, 1):
