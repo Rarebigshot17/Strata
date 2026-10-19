@@ -2794,6 +2794,11 @@ def body_limit() -> int:
     return mib << 20 if mib > 0 else CHUNKED_BODY_MAX
 
 
+# raised at a request's turn, once its stream may have begun: Service._run's start of an engine that died
+# (refused, or it could not be ended) and an MCP round's prepare() while it starts; the stream's error event then
+TURN_REFUSALS = (GpuBusy, EngineStarting, EngineStuck)
+
+
 class BadBody(Exception):
     """A request body that cannot be read (a malformed or oversized chunked body): the status and the sentence."""
 
@@ -2820,6 +2825,7 @@ def make_handler(svc: Service):
         record = None                                       # #332: this request's monitor record, if kept
         watch_done = None                                   # #430 #431: stops this request's disconnect watcher
         body_read = False                                   # whether a handler took this request's body
+        answer_started = False                              # send_response() ran: an answer (or a stream) began
         DRAIN_SECONDS = 5                                   # the longest an unread body is read and dropped
 
         def log_message(self, fmt, *args):
@@ -3041,6 +3047,12 @@ def make_handler(svc: Service):
             self.end_headers()
 
         def _json(self, code, obj, headers=None):
+            if self.answer_started:
+                # the answer has begun (a stream): a second status line and body would be written into it
+                print(f"[strata] not sent, the answer had begun: {code} {json.dumps(obj, ensure_ascii=False)}",
+                      flush=True)
+                self._note(error=obj.get("error") if isinstance(obj, dict) else obj)
+                return
             if self.record is not None:
                 with svc.status_lock:
                     self.record["http_status"] = code
@@ -3606,7 +3618,7 @@ def make_handler(svc: Service):
                 self._note(outcome="disconnected")
                 cancel.set()                                 # client went away: stop the engine
                 chunks.close()
-            except (EngineDied, EngineError, StructuredOutputError, ValueError) as e:
+            except (EngineDied, EngineError, StructuredOutputError, ValueError, *TURN_REFUSALS) as e:
                 self._stream_error(e)
 
         def _completions(self, req):
@@ -3652,7 +3664,7 @@ def make_handler(svc: Service):
                 self._note(outcome="disconnected")
                 cancel.set()                                 # client went away: stop the engine
                 chunks.close()
-            except (EngineDied, EngineError, ValueError) as e:
+            except (EngineDied, EngineError, ValueError, *TURN_REFUSALS) as e:
                 self._stream_error(e)
 
         def _stream_error(self, e: Exception):
@@ -3766,8 +3778,8 @@ def make_handler(svc: Service):
                 self._responses_failed(asm, f"{e}; the next request restarts it", "server_error", send)
             except StructuredOutputError as e:
                 self._responses_failed(asm, str(e), "structured_output_failed", send)
-            except (EngineError, ValueError) as e:           # the engine failed, or refused it, after the start
-                self._responses_failed(asm, str(e), "server_error", send)
+            except (EngineError, ValueError, *TURN_REFUSALS) as e:   # the engine failed, refused it, or could not
+                self._responses_failed(asm, str(e), "server_error", send)   # be started at its turn
 
         def _responses_failed(self, asm, message, code, send):
             e = asm.failed(message, code)
@@ -3885,8 +3897,8 @@ def make_handler(svc: Service):
                 err = {"type": "error", "error": {"type": "api_error", "message": f"{e}; the next request restarts it"}}
                 self._note(error=err["error"])
                 self.wfile.write(b"event: error\ndata: " + json.dumps(err).encode() + b"\n\n")
-            except (EngineError, ValueError) as e:           # the engine failed, or refused it, after the start
-                err = {"type": "error", "error": {"type": "api_error", "message": str(e)}}
+            except (EngineError, ValueError, *TURN_REFUSALS) as e:   # the engine failed, refused it, or could not
+                err = {"type": "error", "error": {"type": "api_error", "message": str(e)}}   # be started at its turn
                 self._note(error=err["error"])
                 self.wfile.write(b"event: error\ndata: " + json.dumps(err).encode() + b"\n\n")
 

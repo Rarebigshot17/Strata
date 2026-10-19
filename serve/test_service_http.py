@@ -3,10 +3,12 @@ a Discord bot, over the tailnet.  Each test is one finding of the D1 review (ser
 
     python3 -m unittest serve.test_service_http -v
 """
+import http.client
 import json
 import os
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -148,6 +150,60 @@ class LoadButton(Http):
             code, _, body = self.call("/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}]})
         self.assertEqual(code, 503, body)
         self.assertIn("could not be started", json.loads(body)["error"]["message"])
+
+
+class RefusedAtTurn(Http):
+    """The engine was alive when a request's load() checked it and is gone at the request's turn (it died in the
+    request ahead, or POST /unload freed the card), and starting it again is refused or fails: the stream has
+    begun, so the error arrives as the API's own error event - not as a second HTTP response written into it."""
+
+    BODIES = {"/v1/chat/completions": {"messages": [{"role": "user", "content": "hi"}], "stream": True},
+              "/v1/completions": {"prompt": "hi", "stream": True, "max_tokens": 8},
+              "/v1/messages": {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 64, "stream": True},
+              "/v1/responses": {"input": "hi", "stream": True}}
+
+    def streamed(self, path, restart_error):
+        self.engine.running = True                                  # alive when the request's load() looks
+        self.assertTrue(self.svc.fifo.acquire(timeout=5))          # the request ahead holds the turn
+        out = {}
+
+        def send():
+            c = http.client.HTTPConnection("127.0.0.1", self.httpd.server_address[1], timeout=30)
+            try:
+                c.request("POST", path, json.dumps(self.BODIES[path]), {"Content-Type": "application/json"})
+                r = c.getresponse()
+                out["status"], out["body"] = r.status, r.read().decode("utf-8", "replace")
+            finally:
+                c.close()
+        th = threading.Thread(target=send)
+        th.start()
+        deadline = time.monotonic() + 10
+        while self.svc.fifo.waiting() < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.engine.running = False                                 # it died in the request ahead
+        with mock.patch.object(self.engine, "restart", side_effect=restart_error), mock.patch("builtins.print"):
+            self.svc.fifo.release()
+            th.join(30)
+        self.assertFalse(th.is_alive())
+        return out["status"], out["body"]
+
+    def test_the_error_is_an_event_of_the_stream(self):
+        from serve.server import GpuBusy
+        for err in (GpuBusy("the GPU is in use by another program", retry_after=15),
+                    EngineStuck("the engine could not be ended")):
+            for path in self.BODIES:
+                with self.subTest(err=type(err).__name__, path=path):
+                    status, body = self.streamed(path, err)
+                    self.assertEqual(status, 200)
+                    self.assertNotIn("HTTP/1.", body)
+                    self.assertIn(str(err), body)
+                    if path == "/v1/messages":
+                        self.assertIn("event: error", body)
+                    elif path == "/v1/responses":
+                        self.assertIn("event: response.failed", body)
+                    else:
+                        self.assertTrue(body.rstrip().endswith("data: [DONE]"), body)
+                    self.assertFalse(self.svc.fifo.locked())
 
 
 if __name__ == "__main__":
