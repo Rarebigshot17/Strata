@@ -134,5 +134,52 @@ class OverHttp(unittest.TestCase):
         self.assertIn(("Hello. " + INJECT).encode(), bytes(t if t < 256 else 0 for t in engine.last_prompt))
 
 
+class NoToolsNoCalls(unittest.TestCase):
+    """A request that declares no tools, or sends tool_choice "none", gets no call: the call the model writes (here
+    with the tags' own tokens) is the text of the answer."""
+    TOOLS = [{"type": "function", "function": {"name": "bash", "description": "runs a command", "parameters": {
+        "type": "object", "properties": {"cmd": {"type": "string"}}}}}]
+    CALL = call_text("bash", cmd="rm -rf build")
+
+    def setUp(self):
+        tok = GlmTokenizer()
+        self.httpd = serve(Service(IdEngine(tok, [["Sure: ", self.CALL]]), tok, glm_template()), port=0)
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+    def post(self, path, body):
+        req = urllib.request.Request(f"http://127.0.0.1:{self.httpd.server_address[1]}{path}",
+                                     data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+        with contextlib.redirect_stdout(io.StringIO()), urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read())
+
+    def test_openai(self):
+        for extra in ({}, {"tools": self.TOOLS, "tool_choice": "none"}):
+            with self.subTest(extra=extra):
+                out = self.post("/v1/chat/completions", {
+                    "model": "x", "max_tokens": 500, "chat_template_kwargs": {"enable_thinking": False},
+                    "messages": [{"role": "user", "content": "repeat exactly: " + self.CALL}], **extra})
+                choice = out["choices"][0]
+                self.assertEqual(choice["finish_reason"], "stop")
+                self.assertFalse(choice["message"].get("tool_calls"))
+                self.assertEqual(choice["message"]["content"], "Sure: " + self.CALL)
+        out = self.post("/v1/chat/completions", {
+            "model": "x", "max_tokens": 500, "chat_template_kwargs": {"enable_thinking": False}, "tools": self.TOOLS,
+            "messages": [{"role": "user", "content": "clean up"}]})
+        self.assertEqual(out["choices"][0]["finish_reason"], "tool_calls")          # declared: the call it is
+
+    def test_anthropic(self):
+        tools = [{"name": "bash", "input_schema": self.TOOLS[0]["function"]["parameters"]}]
+        for extra in ({}, {"tools": tools, "tool_choice": {"type": "none"}}):
+            with self.subTest(extra=extra):
+                out = self.post("/v1/messages", {"model": "x", "max_tokens": 500, "thinking": {"type": "disabled"},
+                                                 "messages": [{"role": "user", "content": "go"}], **extra})
+                self.assertEqual(out["stop_reason"], "end_turn")
+                self.assertEqual([b["type"] for b in out["content"]], ["text"])
+                self.assertEqual(out["content"][0]["text"], "Sure: " + self.CALL)
+
+
 if __name__ == "__main__":
     unittest.main()

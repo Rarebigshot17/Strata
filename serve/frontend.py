@@ -803,7 +803,7 @@ def _escape(text: str) -> str:
     return json.dumps(text)[1:-1]
 
 
-_NAME = re.compile(r"[\w.:/-]{1,256}")    # a tool name, when the request declares no tools to check it against
+_NAME = re.compile(r"[\w.:/-]{1,256}")    # a tool name, when there are no declared names to check it against
 
 
 class CallReader:
@@ -1194,6 +1194,11 @@ class OutputParser:
                     if THINK_START.startswith(s):
                         return out
                     self.opened = True
+                if not self.schemas:
+                    # no tools declared (or tool_choice "none", which reaches here as none): no call, the tags are text
+                    out.append(Event("content", self._track(self.buf)))
+                    self.buf = ""
+                    return out
                 i = self.buf.find(CALL_START)
                 if i < 0:
                     # Hold a partial tag AND the newlines before it: if a tool call follows, they are dropped,
@@ -1226,10 +1231,10 @@ class OutputParser:
                 if kind == "json":
                     self.state = "json"
                 else:
-                    # the text after the tag decides: a declared tool's name (any name-like word when the request
-                    # declares no tools) and then <arg_key> or </tool_call> is a call; anything else is prose that
-                    # names the tag ("I'll use a <tool_call> block") - content, not a malformed call
-                    self.state, self.reader = "call", CallReader(self.schemas, declared=bool(self.schemas))
+                    # the text after the tag decides: a declared tool's name and then <arg_key> or </tool_call> is a
+                    # call; anything else is prose that names the tag ("I'll use a <tool_call> block") - content, not
+                    # a malformed call
+                    self.state, self.reader = "call", CallReader(self.schemas)
             elif self.state == "json":
                 # recover: `{"name": ..., "arguments": {...}}` inside the wrapper is the call once its </tool_call> has
                 # arrived and it names a declared tool; anything else is the text it is
