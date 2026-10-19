@@ -389,5 +389,37 @@ class ArrivalOrder(Http):
         self.assertEqual((self.svc.status["queued"], self.svc.fifo.waiting(), self.svc.fifo.locked()), (0, 0, False))
 
 
+class McpOnlyForTheOwnPage(Http):
+    """The server's MCP tools run with the owner's rights (a shell, files): `"strata_mcp": true` runs them only for
+    Strata's own page - a browser names it in Origin - unless the run config's "mcp_for_api" lets API clients."""
+
+    def setUp(self):
+        super().setUp()
+        self.svc.mcp = mock.Mock()
+        self.svc.mcp.template_tools.return_value = []           # no tools offered: the request then runs without
+        self.own = "http://127.0.0.1:%d" % self.httpd.server_address[1]
+
+    def ask(self, headers=None):
+        self.svc.mcp.template_tools.reset_mock()
+        code, _, body = self.call("/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}],
+                                                           "strata_mcp": True}, headers)
+        return code, self.svc.mcp.template_tools.called
+
+    def test_an_api_client_without_origin_is_refused(self):
+        self.assertEqual(self.ask(), (403, False))
+        self.assertEqual(self.ask({"Authorization": "Bearer x"}), (403, False))
+
+    def test_the_own_page_and_trusted_origins_get_them(self):
+        self.assertEqual(self.ask({"Origin": self.own}), (200, True))
+        self.svc.trusted_origins = ["https://strata.example.com"]
+        self.assertEqual(self.ask({"Origin": "https://strata.example.com"}), (200, True))
+        self.assertEqual(self.ask({"Origin": "https://evil.example.com"})[0], 403)
+
+    def test_mcp_for_api_lets_api_clients_use_them(self):
+        self.svc.mcp_for_api = True
+        self.assertEqual(self.ask(), (200, True))
+        self.assertEqual(self.ask({"Origin": "https://evil.example.com"})[0], 403)   # still no other web page
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -265,9 +265,11 @@ class ToolLoop(unittest.TestCase):
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
 
     def post(self, body, headers=None, stream=True):
+        """As the web app's chat posts: JSON, from the page itself (its Origin is the server's own address)."""
         body = {"model": "m", "messages": [{"role": "user", "content": "check it"}], "stream": stream, **body}
         req = urllib.request.Request(self.base + "/v1/chat/completions", data=json.dumps(body).encode(),
-                                     headers={"Content-Type": "application/json", **(headers or {})})
+                                     headers={"Content-Type": "application/json", "Origin": self.base,
+                                              **(headers or {})})
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
                 text = r.read().decode()
@@ -384,7 +386,7 @@ class ToolLoop(unittest.TestCase):
         self.start(call_script("fake__sleep", seconds=8), answer("never"))
         body = {"model": "m", "messages": [{"role": "user", "content": "x"}], "stream": True, "strata_mcp": True}
         req = urllib.request.Request(self.base + "/v1/chat/completions", data=json.dumps(body).encode(),
-                                     headers={"Content-Type": "application/json"})
+                                     headers={"Content-Type": "application/json", "Origin": self.base})
         r = urllib.request.urlopen(req, timeout=30)
         for raw in r:
             if b'"event": "call"' in raw:
@@ -413,6 +415,8 @@ class ToolLoop(unittest.TestCase):
         host = self.base.split("://", 1)[1]
         code, _ = self.post({"strata_mcp": True}, {"Origin": "http://" + host})
         self.assertEqual(code, 200)
+        code, _ = self.post({"strata_mcp": True}, {"Origin": ""})   # an API client (no page): not without mcp_for_api
+        self.assertEqual(code, 403)
 
     def test_get_mcp(self):
         self.start(answer("hi"))

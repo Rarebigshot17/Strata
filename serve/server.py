@@ -8,7 +8,7 @@ POST /v1/messages (Anthropic, stream and non-stream), POST /v1/responses (OpenAI
 GET /models, GET /props, GET /slots, GET /health, GET /metrics, GET /mcp.  One request at a time; the others wait their
 turn in the order they arrived.  Tools from MCP servers (serve/mcp.py, `"mcp_servers"` in the config or --mcp-config)
 are offered only to requests that ask for them with `"strata_mcp": true` - the web app does; other clients see exactly
-the API they always saw.  GLM-5.3-Flash reads text only: a request with a picture is a 400.
+the API they always saw (and get a 403 for `strata_mcp` unless the config's `"mcp_for_api": true` lets them).  GLM-5.3-Flash reads text only: a request with a picture is a 400.
 Requests whose prompt plus max tokens exceed the engine's context are REJECTED with 400, never truncated.
 An unset (or 0, or -1) max tokens means "unlimited": whatever the prompt leaves of the context (on /v1/completions an
 unset one is 256 tokens: a plain prompt has no end of turn to stop at).
@@ -1342,6 +1342,7 @@ class Service:
         self.started_at = time.time()
         self.status_lock = threading.Lock()
         self.mcp = None                                  # serve/mcp.py's McpHub when MCP servers are configured
+        self.mcp_for_api = False                         # the config's "mcp_for_api": API clients may use its tools too
         # sharing the GPU with other programs (all off by default): unload the engine after this many idle seconds,
         # only start it again when this much VRAM is free, and run this command first (e.g. to unload another
         # server's model); the next request after an unload starts the engine again
@@ -3596,6 +3597,13 @@ def make_handler(svc: Service):
             if use_mcp:
                 if not self._own_page("MCP tools can be used"):   # tools run with the user's rights on this PC
                     return
+                if not self.headers.get("Origin") and not svc.mcp_for_api:
+                    # no Origin: no browser page, an API client (an SDK, a bot, curl, any key holder) - the tools are
+                    # the page's (its fetch names it in Origin; _own_page refused any other page's)
+                    self._json(403, {"error": {"type": "forbidden", "message":
+                                     "MCP tools (strata_mcp) run only for Strata's own page; set \"mcp_for_api\": "
+                                     "true in the run config to let API clients use them"}})
+                    return
                 svc.mcp.wait(10)                                  # servers still starting (only right after start)
                 extra = svc.mcp.template_tools(exclude=own)       # the request's own tools win a name clash
                 use_mcp = bool(extra)
@@ -4570,8 +4578,14 @@ def main() -> int:
     if hub is not None:
         import atexit
         svc.mcp = hub
+        # "mcp_for_api" (true/false, default false): API clients' requests with "strata_mcp": true may run the MCP
+        # tools too; without it only Strata's own page can (its requests name it in Origin)
+        mcp_for_api = cfg.get("mcp_for_api", False)
+        if not isinstance(mcp_for_api, bool):
+            raise SystemExit(f"[strata] config \"mcp_for_api\" must be true or false, not {mcp_for_api!r}")
+        svc.mcp_for_api = mcp_for_api
         print(f"[strata] starting {len(hub.servers)} MCP server{'s' * (len(hub.servers) != 1)} for the web app's "
-              f"chat: {', '.join(hub.servers)}", flush=True)
+              f"chat{' and API clients (mcp_for_api)' if mcp_for_api else ''}: {', '.join(hub.servers)}", flush=True)
         hub.start()
         atexit.register(hub.close)                      # the servers Strata started end with it
     httpd = serve(svc, host=a.host, port=a.port)
