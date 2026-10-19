@@ -77,6 +77,37 @@ int main() {
         e.set("logit_bias", "600:1"); std::printf("  refused 600:1    -> %s\n", e.check(500).c_str()); bad += e.check(500).empty();
         e.set("logit_bias", "1:-100,0:-100"); std::printf("  2-token vocab all banned -> %s\n", e.check(2).c_str()); bad += e.check(2).empty();
     }
+    // settings that leave nothing to draw from are refused: a repetition penalty of 0 or below (a positive logit
+    // over 0 is infinite; a negative one turns a ban's -inf into +inf, so the banned token comes out) and values
+    // that are not finite numbers
+    {
+        std::vector<float> l(10, 0.0f); l[3] = 2.0f;
+        SamplingParams q; q.set("logit_bias", "3:-100"); q.set("penalty_repeat", "-1"); Sampler gq(q);
+        std::printf("penalty_repeat -1 with token 3 banned and in the history: greedy -> %d\n", gq.sample(l, {3}));
+        for (auto [key, value] : {std::pair{"penalty_repeat", "0"}, {"penalty_repeat", "-1"}, {"penalty_repeat", "nan"},
+                                  {"temperature", "inf"}, {"temperature", "1e39"}, {"temperature", "nan"},
+                                  {"top_p", "nan"}, {"min_p", "inf"}, {"penalty_freq", "-inf"},
+                                  {"penalty_present", "nan"}}) {
+            SamplingParams p; p.set("logit_bias", "3:-100"); p.set(key, value);
+            const std::string why = p.check(10);
+            std::printf("  refused %s=%-5s -> %s\n", key, value, why.empty() ? "(accepted) FAIL" : why.c_str());
+            bad += why.empty();
+        }
+        SamplingParams ok; ok.set("penalty_repeat", "1.1"); ok.set("temperature", "0.7"); ok.set("penalty_freq", "-0.5");
+        std::printf("  accepted penalty_repeat=1.1 temperature=0.7 penalty_freq=-0.5 %s\n", ok.check(10).empty() ? "ok" : "FAIL");
+        bad += !ok.check(10).empty();
+    }
+    // integer keys beyond int's range are its nearest end: a penalty window of 2^32 tokens covers the whole history
+    // (cast to int it read INT_MIN on x86, a window of nothing), a top_k of 1e20 is off
+    {
+        std::vector<float> l(10, 0.0f); l[3] = 2.0f;
+        SamplingParams p; p.set("penalty_freq", "5"); p.set("penalty_last_n", "4294967296"); Sampler s(p);
+        const int got = s.sample(l, {3, 3});
+        SamplingParams k; k.set("top_k", "1e20");
+        std::printf("penalty_last_n 4294967296: token 3 penalized -> greedy %d (not 3); top_k 1e20 -> %d %s\n", got,
+                    k.top_k, got != 3 && k.top_k > 10 ? "ok" : "FAIL");
+        bad += !(got != 3 && k.top_k > 10);
+    }
     // timing on GLM's vocabulary
     {
         std::vector<float> l(154880); std::normal_distribution<float> nd(0, 2); for (auto& v : l) v = nd(g);

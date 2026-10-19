@@ -2,6 +2,7 @@
 #include "strata/glm/sampler.hpp"
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cstdlib>
 #include <numeric>
@@ -10,6 +11,10 @@
 namespace strata::glm {
 
 namespace {
+
+/// An integer key's value: beyond int's range, its nearest end (a plain cast is undefined there, and on x86 gave
+/// INT_MIN: penalty_last_n=4294967296 counted no tokens at all).
+int to_int(double v) { return v != v ? 0 : (int) std::clamp(v, (double) INT_MIN, (double) INT_MAX); }
 
 /// `id:value,id:value`, the Qwen engine's rules: values -100..100, -100 a ban, no duplicate ids.
 std::string parse_bias(const std::string& text, std::vector<std::pair<int32_t, float>>& out) {
@@ -47,12 +52,12 @@ bool SamplingParams::set(const std::string& key, const std::string& value) {
     const double v = std::atof(value.c_str());
     if (key == "temperature") temperature = (float) v;
     else if (key == "top_p") top_p = (float) v;
-    else if (key == "top_k") top_k = (int) v;
+    else if (key == "top_k") top_k = to_int(v);
     else if (key == "min_p") min_p = (float) v;
     else if (key == "penalty_repeat") penalty_repeat = (float) v;
     else if (key == "penalty_freq") penalty_freq = (float) v;
     else if (key == "penalty_present") penalty_present = (float) v;
-    else if (key == "penalty_last_n") penalty_last_n = (int) v;
+    else if (key == "penalty_last_n") penalty_last_n = to_int(v);
     else if (key == "seed") {
         seed = (uint64_t) std::strtoull(value.c_str(), nullptr, 10);
         has_seed = true;
