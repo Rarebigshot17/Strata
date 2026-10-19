@@ -4768,7 +4768,8 @@ def main() -> int:
     # stop, a systemd stop) and SIGHUP (the terminal was closed). It ends the engine with STOP and QUIT, and the
     # engine saves its expert profile; the engine runs in a session of its own, so these signals reach only this
     # process. #96: without a handler, docker stop's SIGTERM does nothing to PID 1. Python's own SIGINT handler
-    # stays, and a signal ignored from the start stays ignored (nohup's SIGHUP, an & job's SIGINT).
+    # stays, and a SIGINT or SIGHUP ignored from the start stays ignored (nohup's SIGHUP, an & job's SIGINT); SIGTERM
+    # is handled even when the launcher ignored it, or kill, docker stop and systemctl stop would do nothing.
     def on_stop_signal(signum, frame):
         if signum == getattr(signal, "SIGHUP", None):   # a closing terminal hangs up more than once (the kernel, the
             signal.signal(signum, signal.SIG_IGN)       # shell): only Ctrl+C or SIGTERM again hurries the stop
@@ -4776,7 +4777,7 @@ def main() -> int:
     for name in ("SIGTERM", "SIGHUP"):
         sig = getattr(signal, name, None)               # (no SIGHUP on Windows)
         try:
-            if sig is not None and signal.getsignal(sig) is not signal.SIG_IGN:
+            if sig is not None and (name == "SIGTERM" or signal.getsignal(sig) is not signal.SIG_IGN):
                 signal.signal(sig, on_stop_signal)
         except (ValueError, OSError):                   # not the main thread
             pass

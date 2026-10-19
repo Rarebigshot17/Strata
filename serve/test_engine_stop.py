@@ -183,7 +183,7 @@ class ServerStops(unittest.TestCase):
         self.script.chmod(0o755)
         self.record = self.dir / "record.txt"
 
-    def start(self, start_s: float = 0.0, quit_s: float = 0.0, extra: tuple = ()):
+    def start(self, start_s: float = 0.0, quit_s: float = 0.0, extra: tuple = (), launcher: tuple = ()):
         cfg = {"exe": str(self.script), "args": ["-m", "glm-00001-of-00001.gguf", "--ctx", "4096"],
                "cwd": str(self.dir), "log": str(self.dir / "engine.log"), "open_browser": False,
                "env": {"FAKE_RECORD": str(self.record), "FAKE_START_S": str(start_s), "FAKE_QUIT_S": str(quit_s)}}
@@ -191,8 +191,8 @@ class ServerStops(unittest.TestCase):
         path.write_text(json.dumps(cfg), encoding="utf-8")
         self.port = free_port()
         # a process group of its own, as a terminal's foreground job: the test signals it as the terminal would
-        proc = subprocess.Popen([sys.executable, "-m", "serve.server", "--engine", "strata", "--config", str(path),
-                                 "--port", str(self.port), *extra], cwd=ROOT, stdin=subprocess.DEVNULL,
+        proc = subprocess.Popen([*launcher, sys.executable, "-m", "serve.server", "--engine", "strata", "--config",
+                                 str(path), "--port", str(self.port), *extra], cwd=ROOT, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True)
         self.addCleanup(self.cleanup, proc)
         return proc
@@ -249,6 +249,17 @@ class ServerStops(unittest.TestCase):
 
     def test_sigterm(self):
         self.stops_with_quit(signal.SIGTERM)
+
+    def test_sigterm_reaches_the_stop_though_the_launcher_ignored_it(self):
+        # a launcher (a supervisor, a script with trap '' TERM) that ignores SIGTERM passes that on to the server:
+        # `kill <pid>`, docker stop and systemctl stop must still end the engine with QUIT (#96)
+        ignoring = (sys.executable, "-c", "import os, signal, sys; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                    "os.execv(sys.argv[1], sys.argv[1:])")
+        proc = self.start(launcher=ignoring)
+        self.ready(proc)
+        os.kill(proc.pid, signal.SIGTERM)
+        self.assertEqual(proc.wait(60), 0)
+        self.assertIn("QUIT", self.lines(), proc.stdout.read())
 
     def test_closing_the_terminal(self):
         self.stops_with_quit(signal.SIGHUP, close_window=True)
