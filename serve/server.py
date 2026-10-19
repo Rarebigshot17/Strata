@@ -194,6 +194,13 @@ def engine_frozen(base: tuple[float, int], now: tuple[float, int]) -> bool:
 
 
 ENGINE_READY_S = _timeout_env("STRATA_ENGINE_READY_S", 900.0)
+# After QUIT (STOP first ends a running request at its next token or prompt chunk) the engine saves its expert profile
+# and gives back its memory: the VRAM on every card, its pinned buffers and parked conversations (--park-mib), and the
+# mapping of the 117-162 GB of experts - how long that takes on the real model is not measured.  The server waits this
+# long before it kills the engine (a kill loses that run's profile).  20 s was the wait before; 120 s leaves room on a
+# busy PC and still bounds an engine that does not end.  STRATA_ENGINE_QUIT_S overrides it (0 = wait for ever).
+ENGINE_QUIT_S = _timeout_env("STRATA_ENGINE_QUIT_S", 120.0)
+QUIT_QUIET_S = 2.0          # an engine that ends within this is not announced in the server window
 
 
 # ------------------------------------------------------------------------------------------------ the model's files
@@ -1096,6 +1103,22 @@ class StrataEngine:
             pass
         return EngineSilent(f"{what}; the server ended the engine")
 
+    def _wait_quit(self) -> None:
+        """Wait up to ENGINE_QUIT_S for the engine to end after QUIT (subprocess.TimeoutExpired when it has not); the
+        server window says what it waits for once that takes longer than QUIT_QUIET_S."""
+        try:
+            self.proc.wait(timeout=QUIT_QUIET_S if ENGINE_QUIT_S is None else min(QUIT_QUIET_S, ENGINE_QUIT_S))
+            return
+        except subprocess.TimeoutExpired:
+            if ENGINE_QUIT_S is not None and ENGINE_QUIT_S <= QUIT_QUIET_S:
+                raise
+        bound = "" if ENGINE_QUIT_S is None else f", up to {ENGINE_QUIT_S:.0f} s"
+        console("[strata] waiting for the engine to end: it saves its expert profile and gives back its memory (the "
+                f"VRAM, the parked conversations, the mapped experts){bound} ...")
+        t0 = time.monotonic() - QUIT_QUIET_S
+        self.proc.wait(timeout=None if ENGINE_QUIT_S is None else ENGINE_QUIT_S - QUIT_QUIET_S)
+        console(f"[strata] the engine ended ({time.monotonic() - t0:.0f} s after QUIT)")
+
     def shutdown(self):
         """The server's own stop (main()): no engine is started from here on - a request's restart, a load - and this
         one ends as close() ends it."""
@@ -1104,9 +1127,10 @@ class StrataEngine:
 
     def close(self):
         """End the engine process: STOP (a running request ends: the engine reads QUIT only between requests) and
-        QUIT first - the engine saves its expert profile (--expert-profile) and frees its memory itself - then
-        terminate, then kill, each given 20 s.  Raises EngineStuck when it still runs after all three.  An engine
-        that has not said READY yet reads no command (and has nothing to save): it is killed."""
+        QUIT - the engine saves its expert profile (--expert-profile) and frees its memory itself - given
+        ENGINE_QUIT_S, then a kill given 20 s (no terminate: strata-glm ignores SIGTERM while the server runs).  Raises
+        EngineStuck when it still runs after that.  An engine that has not said READY yet reads no command (and has
+        nothing to save): it is killed at once."""
         if self.proc is None:
             return
         try:
@@ -1119,11 +1143,13 @@ class StrataEngine:
                     self.proc.stdin.write("STOP\nQUIT\n")
                     self.proc.stdin.flush()
                     self.proc.stdin.close()
-                    self.proc.wait(timeout=20)
-                except (OSError, ValueError, subprocess.TimeoutExpired):
-                    self.proc.terminate()
-                    self.proc.wait(timeout=20)
+                except (OSError, ValueError):           # its input is gone: it is ending already
+                    pass
+                self._wait_quit()
         except subprocess.TimeoutExpired:
+            if self.ready:                              # (a start that a kill did not end comes here too)
+                console(f"[strata] the engine did not end within {ENGINE_QUIT_S:.0f} s of QUIT: it is killed (this "
+                        "run's expert profile may not be saved; STRATA_ENGINE_QUIT_S gives it longer)")
             self.proc.kill()
             try:
                 self.proc.wait(timeout=20)

@@ -38,8 +38,9 @@ models:
 ```
 
 - `exec` makes the Python server the process llama-swap stops. On SIGTERM the server ends its engine the way Ctrl+C
-  does: `STOP` and `QUIT` (the engine saves its expert profile, if the config names one, and exits), then terminate,
-  then kill, with 20 s for each step. How long the GLM engine takes to give its memory back is not measured.
+  does: `STOP` and `QUIT` (the engine saves its expert profile, if the config names one, and exits), up to 120 s
+  for that (`STRATA_ENGINE_QUIT_S`), then a kill. How long the GLM engine takes to give its memory back is not
+  measured.
 - `checkEndpoint: /health`. The server opens its port only after the engine has said `READY`, so `/health` answers
   once the model is loaded. That is not so with `--lazy` or `"lazy_load": true` in the run config: the port then
   opens at once and `/health` answers 200 with `"loaded": false`. Leave lazy loading off behind llama-swap.

@@ -11,6 +11,8 @@ group of its own, which the test signals as a terminal would.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import signal
@@ -21,6 +23,7 @@ import time
 import unittest
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
 from serve import server as S
 from serve.test_glm_engine_protocol import free_port, write_gguf
@@ -89,6 +92,53 @@ class EngineSession(unittest.TestCase):
             self.assertIn("QUIT", (Path(d) / "record.txt").read_text(encoding="utf-8").splitlines())
             with self.assertRaises(S.EngineDied):           # stopping: a request's restart starts nothing
                 engine.restart()
+
+
+class QuitWait(unittest.TestCase):
+    """After QUIT the engine saves its expert profile and gives back its memory (VRAM on every card, the parked
+    conversations, the mapped experts): a longer wait than the 20 s it had, still bounded, and the window says what
+    it waits for."""
+
+    def test_a_longer_bounded_wait_then_a_kill(self):
+        engine = S.StrataEngine("missing-executable", [], lazy=True)
+        proc = mock.Mock()
+        proc.stdin, proc.stdout = io.StringIO(), io.StringIO()
+        proc.poll.side_effect = lambda: -9 if proc.kill.called else None
+        waits = []
+
+        def wait(timeout=None):
+            waits.append((timeout, proc.kill.called))
+            if proc.kill.called:
+                return -9
+            raise subprocess.TimeoutExpired("engine", timeout)
+        proc.wait.side_effect = wait
+        engine.proc = proc
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            engine.close()
+        before_kill = sum(t for t, killed in waits if not killed)
+        self.assertGreaterEqual(before_kill, 120)
+        self.assertEqual(before_kill, S.ENGINE_QUIT_S)
+        proc.terminate.assert_not_called()               # strata-glm ignores SIGTERM while the server runs
+        proc.kill.assert_called_once()
+        self.assertIsNone(engine.proc)
+        self.assertIn("saves its expert profile", out.getvalue())
+        self.assertIn("killed", out.getvalue())
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "a fake engine process")
+    def test_an_engine_slow_to_end_is_waited_for_and_the_window_says_so(self):
+        with tempfile.TemporaryDirectory() as d:
+            script = Path(d) / "strata-glm"
+            script.write_text(f"#!{sys.executable}\n" + FAKE_ENGINE, encoding="utf-8")
+            script.chmod(0o755)
+            env = {**os.environ, "FAKE_RECORD": str(Path(d) / "record.txt"), "FAKE_QUIT_S": "3"}
+            engine = S.StrataEngine(str(script), ["--ctx", "4096"], cwd=d, env=env)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                engine.shutdown()
+            self.assertIn("BYE", (Path(d) / "record.txt").read_text(encoding="utf-8").splitlines())
+            self.assertIn("waiting for the engine to end", out.getvalue())
+            self.assertIn("the engine ended", out.getvalue())
 
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "process groups and /proc: Linux")

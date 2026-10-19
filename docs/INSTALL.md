@@ -125,11 +125,13 @@ disk so slow that one step takes longer, set `STRATA_ENGINE_READY_S` (seconds, 0
 
 To stop the model, press Ctrl+C or close the terminal. Every ordinary stop takes the same path: Ctrl+C, closing the
 terminal (SIGHUP), `kill <the server's PID>`, `docker stop` and `systemctl stop` (SIGTERM). The server sends the
-engine `STOP` and `QUIT`, then, 20 seconds apart, a terminate and a kill; the engine writes its expert profile when
-it ends after `QUIT`. The engine runs in a session of its own, so the terminal's signals reach only the server, and
-strata-glm ignores a stop signal that still reaches it while the server runs (a systemd stop signals every process of
-the service): the server's `QUIT` follows. A stop while the engine still starts ends it at once (it has nothing to
-save yet). This is read from the code and tested with a fake engine, not tried on a GPU.
+engine `STOP` and `QUIT`, and the engine writes its expert profile and gives back its memory. The server waits up to
+120 seconds for that (the window says what it waits for after 2 seconds; `STRATA_ENGINE_QUIT_S` changes the 120, how
+long it takes on the real model is not measured), then kills the engine. The engine runs in a session of its own, so
+the terminal's signals reach only the server, and strata-glm ignores a stop signal that still reaches it while the
+server runs (a systemd stop signals every process of the service): the server's `QUIT` follows. A stop while the
+engine still starts ends it at once (it has nothing to save yet). This is read from the code and tested with a fake
+engine, not tried on a GPU.
 
 When the server ends without stopping the engine (`kill -9`, a crash), the engine ends too: at the end of its input
 when it is idle (the profile is written), at its next output line during a request, and at once while it starts.
@@ -214,6 +216,7 @@ For the server (more in [DETAILS.md](DETAILS.md#settings)):
 | --- | --- |
 | `STRATA_ENGINE_READY_S` | Seconds a start may go without news from the engine before the server gives up (default 900, counted again from each warm-up progress line; 0 = no limit). |
 | `STRATA_ENGINE_STALL_S` | Seconds an engine may be silent during a request while using no CPU time and doing no I/O before the server ends it as frozen (default 90, 0 = off). |
+| `STRATA_ENGINE_QUIT_S` | Seconds the server waits for the engine to end after `QUIT` (saving its expert profile, giving back its memory) before it kills it (default 120, 0 = no limit). |
 | `STRATA_API_KEY` | The server's API key, as `--api-key` or `"api_key"`. |
 | `STRATA_ALLOWED_HOSTS` | Extra host names the server answers to, as `"allowed_hosts"`. |
 | `STRATA_MAX_BODY_MIB` | The largest request body in MiB (default 256). |
@@ -522,8 +525,8 @@ RestartSec=30
 # SIGTERM to the server only: the server sends the engine STOP and QUIT, and the engine writes its expert profile.
 # (The default, control-group, also sends it to the engine, which ignores it while the server runs.)
 KillMode=mixed
-# the server gives the engine 20 s after QUIT, 20 s after a terminate and 20 s after a kill
-TimeoutStopSec=120
+# the server gives the engine up to 120 s after QUIT (STRATA_ENGINE_QUIT_S) and 20 s after a kill
+TimeoutStopSec=180
 
 [Install]
 WantedBy=multi-user.target
@@ -541,7 +544,7 @@ Before you enable it:
 - Add `"open_browser": false` to the run config, or run setup with `--no-browser` (a service has no browser to open).
 - To reach it from other machines, set `"host": "0.0.0.0"` **and** `"api_key"`. Without a key, anyone who can reach
   the port can use the model.
-- `TimeoutStopSec=120` is an example value: how long the engine takes to stop on the real model is not measured. A
+- `TimeoutStopSec=180` is an example value: how long the engine takes to stop on the real model is not measured. A
   stop that is killed loses the expert profile of that run.
 - The run script has the port written into it. To change the port, run setup again with `--setup --port N`, or edit
   the script.
@@ -613,7 +616,8 @@ docker run -d --name strata --gpus all \
 - **RAM:** setup reads the host's RAM from `/proc/meminfo`, not a container memory limit. Do not set a limit below what
   the size needs.
 - **Stopping:** the server is PID 1 (setup replaces itself with it) and stops the engine on SIGTERM. Give it time:
-  `docker stop -t 90 strata` (an example value; the stop time is not measured).
+  `docker stop -t 180 strata` (an example value: the server waits up to 120 s for the engine after `QUIT`, and the
+  stop time is not measured).
 
 ## Building and starting by hand
 
