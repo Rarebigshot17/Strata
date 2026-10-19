@@ -277,7 +277,7 @@ class CodexCompaction(unittest.TestCase):
 
 class NoLeakedSampler(unittest.TestCase):
     """Test isolation: a stopped server stops its hardware sampler.  Every Service these tests started used to leave one
-    running (21 after this file), polling NVML and psutil every second, which skewed serve/test_parallel's timings."""
+    running (21 after this file), polling NVML and psutil every second, which skewed later tests' timings."""
 
     def test_server_close_ends_the_sampler(self):
         import threading

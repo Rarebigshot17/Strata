@@ -9,7 +9,7 @@
 //     transcribed from llama.cpp's vecdotq.cuh and that wrapper's operands are the same sites: it reinterprets
 //     the operands as SIGNED bytes and accumulates in int32, which is what `__dp4a` does for these calls.  The
 //     fallback below computes exactly that with four PTX `vmad` byte-select instructions, so it is bit-exact
-//     rather than merely close (tools/sm60_dp4a_check.cu checks it against the byte-wise form).
+//     rather than merely close (it was checked against the byte-wise form).
 //   * `__nanosleep`, available from 7.0 (Volta).  It only paces single-thread doorbell waits, so a loop that
 //     spins without it is correct, merely busier.
 //
@@ -28,7 +28,7 @@
 __device__ __forceinline__ int strata_dp4a(const int a, const int b, const int c) {
     // PTX vmad with byte selectors: compiles to four VMAD.S8.S8 (cuobjdump -sass), no byte extraction.
     // Bit-exact with the byte-wise form it replaces: 1.07e9 cases (edge bytes, every per-lane byte pair, random),
-    // 0 mismatches, ~2.2x faster in isolation on a Tesla P100 (tools/sm60_dp4a_check.cu).
+    // 0 mismatches against the byte-wise form, ~2.2x faster in isolation on a Tesla P100.
     int r = c;
     asm("vmad.s32.s32.s32 %0, %1.b0, %2.b0, %0;\n\t"
         "vmad.s32.s32.s32 %0, %1.b1, %2.b1, %0;\n\t"

@@ -201,9 +201,6 @@ class FatalRecovery(unittest.TestCase):
                 self.assertEqual(error['type'], 'invalid_request_error')
                 self.assertIn('does not fit the context', error['message'])
 
-    # BUG: serve/server.py's /v1/responses (not streamed) answers the engine's plain ERR, a refusal of the request,
-    # with a 500 server_error: its handler catches (EngineError, ValueError) together.  The other APIs answer a 400.
-    @unittest.expectedFailure
     def test_a_refusal_is_a_400_on_the_responses_api(self):
         status, text = self.refusal('/v1/responses', {'model': 'm', 'input': 'hi', 'max_output_tokens': 8})
         self.assertEqual(status, 400, text)

@@ -3721,8 +3721,10 @@ def make_handler(svc: Service):
                                                                 code="server_error"))
                 except EngineNonFinite as e:                 # #879, twice: not the request's fault
                     return self._json(503, responses_error_body(str(e), "server_error", code="server_error"))
-                except (EngineError, ValueError) as e:       # the engine failed, or refused it (an ERR line)
+                except EngineError as e:                     # the engine failed (ERR internal): the server's fault
                     return self._json(500, responses_error_body(str(e), "server_error", code="server_error"))
+                except ValueError as e:                      # the engine refused the request (an ERR line), as on
+                    return self._json(400, responses_error_body(str(e), "invalid_request_error"))   # the other APIs
                 return self._json(200, result)
             self._sse()
             last = time.monotonic()
@@ -3895,7 +3897,7 @@ class Server(ThreadingHTTPServer):
 
     def server_close(self):
         # the hardware sampler serve() started for this server stops with it (test isolation: every Service a test
-        # started used to leave its sampler running, 21 of them after test_responses, which slowed test_parallel's timing)
+        # started used to leave its sampler running, 21 of them after test_responses, which skewed later tests' timings)
         tel = getattr(getattr(self, "svc", None), "telemetry", None)
         if tel is not None and hasattr(tel, "close"):
             tel.close()

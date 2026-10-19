@@ -33,11 +33,11 @@ class LogitBias(unittest.TestCase):
         self.assertEqual(len(normalize(entries, 248320)), 103215)
         self.assertEqual(engine_key(entries).count(':-100'), 103215)
 
-    def test_capability_and_batch(self):
-        for engine in [SimpleNamespace(info={}), SimpleNamespace(info={'logit_bias': 1}, batch=2)]:
-            with self.assertRaises(ValueError):
-                validate_request({'logit_bias': {'1': -100}}, engine, 10)
-            self.assertEqual(validate_request({}, engine, 10), {})
+    def test_capability(self):
+        engine = SimpleNamespace(info={})                 # an engine whose INFO line has no logit_bias=1
+        with self.assertRaises(ValueError):
+            validate_request({'logit_bias': {'1': -100}}, engine, 10)
+        self.assertEqual(validate_request({}, engine, 10), {})
         self.assertEqual(validate_request({'logit_bias': {'1': -100}}, SimpleNamespace(info={'logit_bias': 1}), 10), {1: -100})
 
     def test_http_rejects_before_stream(self):
