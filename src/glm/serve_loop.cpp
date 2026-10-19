@@ -95,7 +95,7 @@ bool parse_ids(const std::string& s, std::vector<int32_t>& out) {
         if (item.empty()) return false;
         char* end = nullptr;
         const long v = std::strtol(item.c_str(), &end, 10);
-        if (*end != '\0') return false;
+        if (*end != '\0' || v != (int32_t) v) return false;   // beyond 32 bits it would wrap to another id
         out.push_back((int32_t) v);
     }
     return !out.empty();
