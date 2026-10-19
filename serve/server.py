@@ -28,6 +28,7 @@ import collections
 import hmac
 import codecs
 import json
+import math
 import os
 import queue
 import re
@@ -4346,7 +4347,8 @@ def clean_shared_defaults(d) -> dict:
     for key, value in d.items():
         if value is None or value == "":
             continue
-        number = isinstance(value, (int, float)) and not isinstance(value, bool)
+        # a number, and a finite one: NaN and Infinity (which Python's json reads) are not settings
+        number = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
         if key == "reasoning_effort":                          # GLM thinks or does not: none is off, the rest on
             if value not in ("none", "low", "medium", "high"):
                 raise ValueError("reasoning_effort: none, low, medium or high")

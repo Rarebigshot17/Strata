@@ -600,6 +600,14 @@ class SharedSettingsTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 S.clean_shared_defaults(bad)
 
+    def test_settings_not_finite(self):
+        # Python's json reads NaN and Infinity: each is refused with its field's own message
+        for key in ("temperature", "top_p", "top_k", "seed", "max_tokens", "reasoning_budget_tokens"):
+            for value in (float("nan"), float("inf"), float("-inf")):
+                with self.subTest(key=key, value=value), self.assertRaises(ValueError) as c:
+                    S.clean_shared_defaults({key: value})
+                self.assertTrue(str(c.exception).startswith(key + ":"), str(c.exception))
+
     def test_config_sampling_top_k(self):
         self.assertEqual(S.sampling_defaults_from_config({"sampling": {"top_k": 0}}), {"top_k": 0})
         self.assertEqual(S.sampling_defaults_from_config({"sampling": {"top_k": 100}}), {"top_k": 100})
