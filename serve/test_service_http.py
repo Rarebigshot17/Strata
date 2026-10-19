@@ -420,6 +420,40 @@ class McpOnlyForTheOwnPage(Http):
         self.assertEqual(self.ask(), (200, True))
         self.assertEqual(self.ask({"Origin": "https://evil.example.com"})[0], 403)   # still no other web page
 
+    def test_the_run_configs_mcp_for_api(self):
+        """main() reads "mcp_for_api": false unless the config says true; anything else stops the start."""
+        import sys
+        import serve.server as S
+
+        class Reached(Exception):
+            pass
+        seen = {}
+
+        def fake_serve(svc, host=None, port=None):
+            seen["mcp_for_api"] = svc.mcp_for_api
+            raise Reached
+        hub = mock.Mock(servers={"shell": None})
+        for value, expect in ((None, False), (False, False), (True, True), ("yes", SystemExit), (1, SystemExit)):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as d:
+                seen.clear()
+                path = os.path.join(d, "cfg.json")
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump({} if value is None else {"mcp_for_api": value}, f)
+                with mock.patch.object(S, "serve", fake_serve), mock.patch.object(S, "hub_from_config",
+                                                                                 return_value=hub), \
+                        mock.patch("atexit.register"), mock.patch("builtins.print"), \
+                        mock.patch.object(sys, "argv", ["server.py", "--engine", "mock", "--port", "0",
+                                                        "--config", path]):
+                    if expect is SystemExit:
+                        with self.assertRaises(SystemExit) as stop:
+                            S.main()
+                        self.assertIn("mcp_for_api", str(stop.exception.code))
+                        self.assertEqual(seen, {})
+                    else:
+                        with self.assertRaises(Reached):
+                            S.main()
+                        self.assertIs(seen["mcp_for_api"], expect)
+
 
 class LargeBodies(Http):
     """A body may hold 256 MiB, and parsed it takes many times that: only a few large ones are held at once, and one

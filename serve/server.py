@@ -4433,7 +4433,7 @@ def main() -> int:
                          "Several keys: separate them with commas (key1,key2), as llama.cpp does")
     ap.add_argument("--mcp-config", help="a JSON file with MCP servers in Claude Desktop's format ({\"mcpServers\": "
                                          "{...}}); the web app's chat can use their tools (also \"mcp_servers\" in "
-                                         "the config)")
+                                         "the config; API clients too with \"mcp_for_api\": true there)")
     ap.add_argument("--lazy", action="store_true", help="start the API unloaded (the engine starts with the first request)")
     ap.add_argument("--api-monitor", action="store_true",
                     help="the API request monitor at /api-monitor: keeps the last 100 requests' prompts and answers in "
