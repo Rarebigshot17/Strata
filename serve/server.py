@@ -3736,6 +3736,10 @@ def make_handler(svc: Service):
             if not req.get("stream"):
                 try:
                     result = responses_api.collect(items)
+                except KeyError:                             # no response.completed: the client hung up (the run
+                    if cancel.is_set():                      # was cancelled; the watcher noted it) - nobody to
+                        return                               # answer, and not a malformed request
+                    raise
                 except StructuredOutputError as e:
                     return self._json(502, responses_error_body(str(e), "server_error",
                                                                 code="structured_output_failed"))

@@ -6,6 +6,7 @@ a Discord bot, over the tailnet.  Each test is one finding of the D1 review (ser
 import http.client
 import json
 import os
+import socket
 import tempfile
 import threading
 import time
@@ -253,6 +254,32 @@ class ResponsesLikeChat(Http):
         self.assertTrue(self.prompt_end("/v1/responses", {
             "input": "x", "tools": ns, "tool_choice": {"type": "function", "name": "run"},
             "reasoning": {"effort": "none"}}).endswith("<tool_call>shell.run"))
+
+
+class ResponsesHangUp(Http):
+    reply = "word " * 400
+
+    def test_a_client_that_hangs_up_is_not_a_malformed_request(self):
+        """A non-streamed /v1/responses whose client closes the connection mid-answer: the run is cancelled and
+        the monitor says "disconnected" - not a 400 "the request is malformed (KeyError: 'response')"."""
+        self.engine.delay = 0.02
+        self.svc.api_monitor = True
+        body = json.dumps({"input": "hi", "reasoning": {"effort": "none"}}).encode()
+        s = socket.create_connection(("127.0.0.1", self.httpd.server_address[1]), timeout=10)
+        s.sendall(b"POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
+                  b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+        deadline = time.monotonic() + 10
+        while not self.svc.status.get("generated") and time.monotonic() < deadline:
+            time.sleep(0.02)
+        with mock.patch("builtins.print") as printed:
+            s.close()                                               # the client hangs up mid-answer
+            while time.monotonic() < deadline and not (self.svc.api_requests and
+                                                       self.svc.api_requests[-1].get("finished_at")):
+                time.sleep(0.05)
+        record = self.svc.api_requests[-1]
+        self.assertEqual(record["state"], "disconnected", record)
+        self.assertNotEqual(record.get("http_status"), 400)
+        self.assertFalse([c for c in printed.call_args_list if "malformed" in str(c)])
 
 
 if __name__ == "__main__":
