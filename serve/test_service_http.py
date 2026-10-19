@@ -312,5 +312,35 @@ class ExtremeJson(Http):
                     self.assertEqual(code, 400, out)
 
 
+class CheckedBeforeLoad(Http):
+    def test_a_bad_request_is_400_without_loading_the_model(self):
+        """A request the server refuses anyway is refused before an unloaded model is loaded for it (minutes for
+        GLM-5.3-Flash, holding the turn of every other client)."""
+        self.engine.running, self.engine.unloaded = False, True
+        hi = [{"role": "user", "content": "hi"}]
+        picture = [{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type":
+                                                                              "image/png", "data": "AAAA"}}]}]
+        cases = [("/v1/messages", {"messages": picture, "max_tokens": 8}),
+                 ("/v1/messages", {"messages": hi, "max_tokens": 8, "stop_sequences": 5}),
+                 ("/v1/messages", {"messages": hi, "max_tokens": 8, "temperature": "abc"}),
+                 ("/v1/messages", {"messages": hi, "max_tokens": 8, "reasoning_budget_tokens": "x"}),
+                 ("/v1/messages", {"messages": hi, "max_tokens": 1e999}),
+                 ("/v1/chat/completions", {"messages": hi, "stop": 5}),
+                 ("/v1/chat/completions", {"messages": hi, "temperature": "abc"}),
+                 ("/v1/chat/completions", {"messages": hi, "reasoning_budget_tokens": "x"}),
+                 ("/v1/chat/completions", {"messages": hi, "max_tokens": 1e999}),
+                 ("/v1/completions", {"prompt": "hi", "max_tokens": 1e999})]
+        for path, body in cases:
+            with self.subTest(path=path, body=body), mock.patch("builtins.print"):
+                self.engine.running, self.engine.starts = False, 0
+                code, _, out = self.call(path, json.dumps(body).replace("Infinity", "1e999").encode())
+                self.assertEqual(code, 400, out)
+                self.assertEqual(self.engine.starts, 0, "loaded for a request it refuses")
+        self.engine.running, self.engine.starts = False, 0
+        code, _, out = self.call("/v1/messages", {"messages": hi, "max_tokens": 8})   # a good one loads it
+        self.assertEqual(code, 200, out)
+        self.assertEqual(self.engine.starts, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

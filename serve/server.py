@@ -3570,9 +3570,10 @@ def make_handler(svc: Service):
             messages, validator = prepare_format(req.get("response_format"), messages)
             if validator is not None and (tools or req.get("strata_mcp")):
                 raise ValueError("structured response_format with tools/MCP is not supported")
-            svc.load()
             max_req = max_new = int(req.get("max_completion_tokens") or req.get("max_tokens") or 0)   # 0/-1: the rest
-            bias_api.validate_request(req, svc.engine, len(getattr(svc.tok, "tokens", ())) or None)
+            svc.reasoning_budget(req)                         # a bad value is a 400 before anything is sent
+            stop_strings(req)                                 # ... and so is a bad stop / stop_sequences
+            check_request_sampling(req)                       # ... and a sampling field of the wrong type
             use_mcp = req.get("strata_mcp") is True and svc.mcp is not None      # the web app's opt-in (serve/mcp.py)
             own = {t.get("name") for t in tools or [] if isinstance(t, dict)}   # #592: a second line of defence
             if use_mcp:
@@ -3584,9 +3585,8 @@ def make_handler(svc: Service):
                 tools = (tools or []) + extra or None
             if force and use_mcp:
                 raise ValueError("a forced tool_choice with MCP tools is not supported")
-            svc.reasoning_budget(req)                         # a bad value is a 400 before anything is sent
-            stop_strings(req)                                 # ... and so is a bad stop / stop_sequences
-            check_request_sampling(req)                       # ... and a sampling field of the wrong type
+            svc.load()                                        # only now: a refused request does not load the model
+            bias_api.validate_request(req, svc.engine, len(getattr(svc.tok, "tokens", ())) or None)
             ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new, force=force)
             cancel = threading.Event()
             self._watch_client(cancel)                       # #430 #431
@@ -3636,10 +3636,11 @@ def make_handler(svc: Service):
             bias_api.normalize(req.get("logit_bias"), len(getattr(svc.tok, "tokens", ())) or None)
             stop_strings(req)                                 # a bad stop is a 400 before anything is sent
             check_request_sampling(req)                       # ... and a sampling field of the wrong type
+            asked = int(req.get("max_tokens") or COMPLETION_MAX_TOKENS)   # ... and a max_tokens of 1e999
             svc.load()
             bias_api.validate_request(req, svc.engine, len(getattr(svc.tok, "tokens", ())) or None)
             ids = svc.tok.encode(prompt, parse_special=True)
-            max_new = svc.room(len(ids), int(req.get("max_tokens") or COMPLETION_MAX_TOKENS))   # -1: the rest
+            max_new = svc.room(len(ids), asked)               # -1: the rest
             svc.checkpoint.at = None                          # no conversation in it: the engine keeps its own end
             cancel = threading.Event()
             self._watch_client(cancel)                       # #430 #431
@@ -3875,7 +3876,6 @@ def make_handler(svc: Service):
             self._json(200, {"input_tokens": len(svc.encode_prompt(messages, tools, kw))})
 
         def _anthropic(self, req):
-            svc.load()
             req = svc.with_shared(req, "anthropic")
             messages, tools, kw = anthropic_to_messages(req, svc.anthropic_think_unasked)
             refuse_images(messages)
@@ -3886,6 +3886,7 @@ def make_handler(svc: Service):
             svc.reasoning_budget(req)                         # a bad value is a 400 before anything is sent
             stop_strings(req)                                 # ... and so is a bad stop / stop_sequences
             check_request_sampling(req)                       # ... and a sampling field of the wrong type
+            svc.load()                                        # only now: a refused request does not load the model
             ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new, force=force)
             cancel = threading.Event()
             self._watch_client(cancel)                       # #430 #431
