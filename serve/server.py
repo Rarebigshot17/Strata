@@ -2106,8 +2106,9 @@ class Service:
         `force` (forced_call): the opening of the call the reply must make - see prepare().  `raw`: a plain
         completion (/v1/completions), whose text is all content: no thinking and no tool calls are read from it."""
         defaults = {**self.sampling_defaults, **self.shared}   # GLM's and the config's, then the Chat settings
-        if defaults:                   # the request's own fields win (explicit 0 stays greedy)
-            req_values = {k: v for k, v in (sampling or {}).items() if v is not None}
+        if defaults:                   # the request's own fields win (explicit 0 stays greedy); null and a value that
+            # means unset (a negative top_k, say) take the default, as a field left out does
+            req_values = {k: v for k, v in (sampling or {}).items() if v is not None and not sampling_unset(k, v)}
             sampling = {**defaults, **req_values}
         checkpoint, self.checkpoint.at = getattr(self.checkpoint, "at", None), None   # prepare()'s, for this run
         # #123: read after the merge, so a budget shared through POST /settings is seen like the other keys
@@ -4560,6 +4561,15 @@ def sampling_defaults_from_config(cfg: dict) -> dict:
         else:
             print(f"[strata] config sampling.{key}={value!r}: unknown key, ignored", flush=True)
     return out
+
+
+def sampling_unset(key: str, value) -> bool:
+    """A request's sampling value that means "not set" (see check_request_sampling): a negative top_k or
+    penalty_last_n, or a seed <= 0 (llama.cpp's and vLLM's -1).  The shared or configured value applies to it, as to a
+    field left out; without one the engine's default does (top_k off, a random seed, a 64-token window)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return (key in ("top_k", "penalty_last_n") and value < 0) or (key == "seed" and value <= 0)
 
 
 def check_request_sampling(req) -> None:

@@ -108,12 +108,12 @@ recommendation, temperature 1.0 and top_p 0.95 ([Settings](#sampling-defaults)).
 | --- | --- | --- |
 | `temperature` | a number >= 0 | 0 is greedy (always the most likely token) |
 | `top_p` | 0 to 1 | 1 is off |
-| `top_k` | a whole number up to 2,147,483,647 | 0 (or more than the vocabulary) is off; a negative value is not passed on, so the engine's default (off) applies |
+| `top_k` | a whole number up to 2,147,483,647 | 0 (or more than the vocabulary) is off; a negative value (-1) counts as left out: the shared or configured top_k, else off |
 | `min_p` | 0 to 1 | 0 is off |
 | `repetition_penalty` (also `repeat_penalty`) | a number > 0 | 1 is off |
 | `frequency_penalty`, `presence_penalty` | finite numbers | 0 is off |
-| `penalty_last_n` (also `repeat_last_n`) | a whole number up to 2,147,483,647 | the window of the three penalties; 64 when a penalty is on and no window is given |
-| `seed` | a whole number from 1 to 2^64-1 | the same seed and request give the same draw; unset, 0 or negative is random |
+| `penalty_last_n` (also `repeat_last_n`) | a whole number up to 2,147,483,647 | the window of the three penalties; 64 when a penalty is on and no window is given (a negative value counts as left out) |
+| `seed` | a whole number from 1 to 2^64-1 | the same seed and request give the same draw; 0 or negative (-1) counts as left out: the shared or configured seed, else random |
 | `logit_bias` | token id -> -100..100 | a per-request token bias, checked before the answer starts on every route ([LOGIT_BIAS.md](LOGIT_BIAS.md)) |
 
 A value of the wrong type or out of range is a 400 that names the field (`top_p: a number from 0 to 1`). That
