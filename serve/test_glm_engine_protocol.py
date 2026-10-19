@@ -786,7 +786,11 @@ class MainTests(unittest.TestCase):
         finally:
             proc.terminate()
             proc.wait(30)
+            out = proc.stdout.read()
             proc.stdout.close()
+        # the GGUF has GLM's tags as user-defined tokens: the start says the calls come from those tokens only
+        self.assertIn("special tokens only", out)
+        self.assertNotIn("WARNING", out)
 
 
 if __name__ == "__main__":

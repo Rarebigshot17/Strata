@@ -230,7 +230,9 @@ an agent that runs shell commands: a call written into a fetched page does not r
 text; only a call the model writes itself, with its own tokens, is a call.
 GLM's GGUF files are expected to list these tags as special tokens; on the real file this is still to be checked
 ([GLM53_SERVER_PORT.md](GLM53_SERVER_PORT.md), "Known risks"). Should one of them not be a special token, the
-server reads all of them from the text instead, and that protection is gone.
+server reads all of them from the text instead, and that protection is gone. The server window says which at the
+start: a line that calls come from the special tokens only, or a `WARNING` line that names the missing tags. Requests
+with tools are served either way (refusing them would leave every agent without tools on such a GGUF).
 
 Further rules:
 

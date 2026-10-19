@@ -1266,7 +1266,22 @@ def output_tags(tok) -> dict[int, str]:
     return {} if None in tags else tags
 
 
-OPENAI_MAX_STOP = 4                                  # OpenAI's limit on `stop`
+def tag_mode_line(tok) -> str:
+    """The start line that says where tool calls and </think> are read from: the tags' own special tokens, or (when
+    the model's tokenizer lacks one of them) the plain text, with a warning - a call the model copies from a tool
+    result or a web page is then a call again.  Requests with tools are still served in that mode: it is how servers
+    that read calls from the text work, and refusing them would leave every agent without tools on such a GGUF."""
+    if output_tags(tok):
+        return ("[strata] tool calls and </think> are read from the model's own special tokens only: a call copied "
+                "as text (from a tool result, a web page or the user) stays text")
+    special = getattr(tok, "special_tokens", None) or {}
+    missing = ", ".join(tag for tag in OUTPUT_TAGS if tag not in special)
+    return (f"[strata] WARNING: the model's tokenizer does not have {missing} as special tokens, so tool calls and "
+            "</think> are read from the plain text: a call the model copies from a tool result, a web page or the "
+            "user is returned as a call, and an agent that runs shell commands would run it")
+
+
+OPENAI_MAX_STOP = 4                                 # OpenAI's limit on `stop`
 
 
 def stop_strings(req: dict) -> list[str]:
@@ -4676,6 +4691,8 @@ def main() -> int:
     override = a.chat_template or (config_path_of(cfg, cfg["chat_template"]) if cfg.get("chat_template") else None)
     template = chat_template_for(files, override)
     eos_ids = end_of_turn_ids(tok)
+    if files is not None:                               # where tool calls are read from (the mock's bytes: no model)
+        print(tag_mode_line(tok), flush=True)
     hub = hub_from_config(cfg, a.mcp_config)            # before the minutes of loading: a bad entry stops here
     if a.engine == "strata":
         if not eos_ids:

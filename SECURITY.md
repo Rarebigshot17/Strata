@@ -47,9 +47,10 @@ others are command-line options or environment variables: [docs/DETAILS.md](docs
 - **Tool calls** are read from the model's own special tokens only, when the tokenizer has GLM's tags as special
   tokens. A call the model copies as plain text, from a tool result, a web page or the user, then stays text and is
   never returned as a call. GLM's tokenizer is expected to have them; the real GGUF has not been checked for it yet,
-  and without them the server reads the tags from the text and does not say so. A request that declares no tools,
-  or sets `tool_choice` to `"none"`, gets no calls. Running a call is the client's choice: an agent that runs shell
-  commands decides what it runs.
+  and without them the server reads the tags from the text. Its start line says which: a `WARNING` line that names
+  the missing tags means the text (requests with tools are still served). A request that declares no tools, or sets
+  `tool_choice` to `"none"`, gets no calls. Running a call is the client's choice: an agent that runs shell commands
+  decides what it runs.
 - **MCP tools** are opt-in: only the servers you list in the run config (`"mcp_servers"`) or in `--mcp-config`, and
   only for requests from Strata's own page that ask for them. API clients get them only when the run config sets
   `"mcp_for_api": true` (the default is false). The tools run with your user's rights, and the model decides when to
