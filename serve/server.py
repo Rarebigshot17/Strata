@@ -57,6 +57,7 @@ from serve.frontend import (CALL_END, ORDINARY_LT, OUTPUT_TAGS, THINK_END, ChatT
                             openai_to_messages, tool_choice_of, unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 from serve import runconfig  # noqa: E402
+from serve.runconfig import env_on  # noqa: E402
 from serve import logit_bias as bias_api  # noqa: E402
 from serve.cache_drop import gguf_shards  # noqa: E402
 from serve.winjob import contain  # noqa: E402
@@ -167,12 +168,6 @@ PP_SLACK = 3.0
 # for this long is ended - every step it reports in its log counts (the layers on each GPU, the expert cache, each
 # step of the warm-up: start_progress), and the bound runs from the last one - and the next request starts it again.
 # STRATA_ENGINE_READY_S overrides it (0 = wait for ever).
-
-
-def env_on(name: str) -> bool:
-    """A STRATA_ switch in the environment: off when unset, empty or "0", "false", "no", "off" (any case), the words
-    the other switches read as off (POST /unload's wait); any other value is on."""
-    return os.environ.get(name, "").strip().lower() not in ("", "0", "false", "no", "off")
 
 
 def _timeout_env(name: str, default: float) -> float | None:

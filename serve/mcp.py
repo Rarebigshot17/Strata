@@ -33,6 +33,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from serve.runconfig import env_on
 from serve.winjob import contain
 
 PROTOCOL = "2025-06-18"               # the MCP revision Strata asks for; the server's answer is used as given
@@ -140,7 +141,7 @@ class StdioTransport:
             line = raw.decode("utf-8", "replace").rstrip()
             if line:
                 self.stderr.append(line)
-                if os.environ.get("STRATA_DEBUG"):
+                if env_on("STRATA_DEBUG"):
                     print(f"[mcp {self.name}] {line}", flush=True)
 
     def _read(self):
