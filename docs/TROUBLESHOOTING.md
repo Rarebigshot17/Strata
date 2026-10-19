@@ -290,9 +290,9 @@ in the run config also accepts a declared tool's call written as JSON inside `<t
 
 Open WebUI runs in Docker, so `127.0.0.1` inside its container is the container itself, not the PC.
 
-1. **The server must listen beyond this PC.** Set `"host": "0.0.0.0"` and an `"api_key"` in the run config, or run
-   `./setup.sh --setup --host 0.0.0.0 --api-key <key>`. The server then prints `from other devices: http://<IP>:8101/`
-   for each address it has.
+1. **The server must listen beyond this PC.** Set `"host": "0.0.0.0"` and an `"api_key"` in the run config, or
+   start it once with `./setup.sh --host 0.0.0.0 --api-key <key>` (both are then saved for this model). The server
+   then prints `from other devices: http://<IP>:8101/` for each address it has.
 2. **The address.** In Open WebUI add an OpenAI connection with:
    - `http://172.17.0.1:8101/v1` when its container is on Docker's default bridge (172.17.0.1 is the PC's address
      there; on a network of your own, `docker network inspect <network>` shows its gateway);
