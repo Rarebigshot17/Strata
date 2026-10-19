@@ -215,12 +215,16 @@ class SecretsInTheAddress(unittest.TestCase):
     def test_unreachable(self):
         urls = {"query": "http://127.0.0.1:9/mcp?token=sk-query-1#sk-frag-2",
                 "user": "http://alice:sk-pass-3@127.0.0.1/mcp",     # urllib: InvalidURL "nonnumeric port: 'sk-pass-3@..."
-                "bare": "example.invalid/mcp?token=sk-query-4"}     # urllib: ValueError "unknown url type: '<all of it>'"
-        hub = McpHub({n: {"url": u} for n, u in urls.items()}, {"start_timeout_s": 5})
+                "bare": "example.invalid/mcp?token=sk-query-4",     # urllib: ValueError "unknown url type: '<all of it>'"
+                "spaced": " example.invalid/mcp?token=sk-query-5\n"}   # ... quoted as urllib cleans it (no spaces)
+        servers = {n: {"url": u} for n, u in urls.items()}
+        # http.client: ValueError "Invalid header value b'Bearer sk-...'" (a line break pasted into the config)
+        servers["header"] = {"url": "http://127.0.0.1:9/mcp", "headers": {"Authorization": "Bearer sk-header-6\n"}}
+        hub = McpHub(servers, {"start_timeout_s": 5})
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             hub.start(wait=True)
-        for name in urls:
+        for name in servers:
             self.assertEqual(hub.servers[name].status, "failed", name)
         self.assertIn("could not reach http://127.0.0.1:9/mcp: ", hub.servers["query"].error)
         self.assertIn("could not reach http://127.0.0.1/mcp: ", hub.servers["user"].error)

@@ -326,9 +326,10 @@ class HttpTransport:
         except (OSError, ValueError, http.client.HTTPException, McpError) as e:
             if isinstance(e, McpError):
                 err = e
-            else:          # urllib quotes all of an address it cannot use ("unknown url type"), or a part (InvalidURL)
-                why = "not a usable address" if isinstance(e, http.client.InvalidURL) else \
-                    str(e).replace(self.url, shown_url(self.url))
+            else:          # urllib and http.client quote an address or header they cannot use, secrets and all
+                quoted = isinstance(e, (http.client.InvalidURL, ValueError)) and \
+                    not isinstance(e, (json.JSONDecodeError, UnicodeError))      # the answer's text, not ours
+                why = "not a usable address or header" if quoted else str(e)
                 err = McpError(f"could not reach {shown_url(self.url)}: {why}")
             if slot is None:
                 raise err from None
