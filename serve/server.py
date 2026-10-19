@@ -639,7 +639,7 @@ class StrataEngine:
             # a session of its own: Ctrl+C and the hang-up of a closed terminal reach only the server, which ends the
             # engine with STOP and QUIT (main()) - the engine then saves its expert profile.  Without the server the
             # engine still ends: at the end of its input (idle), at its next output line (a request; SIGPIPE), and
-            # strata-glm while it starts at the server's end (include/strata/glm/serve_signals.hpp).
+            # strata-glm at once while it starts (include/strata/glm/serve_signals.hpp).
             proc = subprocess.Popen([exe, "--serve", *args], cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                     stderr=self.log, text=True, encoding="utf-8", bufsize=1, env=env,
                                     start_new_session=True)

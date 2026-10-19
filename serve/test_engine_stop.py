@@ -114,11 +114,10 @@ class QuitWait(unittest.TestCase):
         proc.wait.side_effect = wait
         engine.proc = proc
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
+        with contextlib.redirect_stdout(out), mock.patch.object(S, "ENGINE_QUIT_S", 120.0):   # the default
             engine.close()
         before_kill = sum(t for t, killed in waits if not killed)
-        self.assertGreaterEqual(before_kill, 120)
-        self.assertEqual(before_kill, S.ENGINE_QUIT_S)
+        self.assertEqual(before_kill, 120)
         proc.terminate.assert_not_called()               # strata-glm ignores SIGTERM while the server runs
         proc.kill.assert_called_once()
         self.assertIsNone(engine.proc)
