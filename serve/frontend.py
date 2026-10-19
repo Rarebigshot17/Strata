@@ -345,8 +345,8 @@ def _mark(text: str, tags: dict[str, str] = LITERAL_TAGS) -> str:
 def _mark_deep(v, tags: dict[str, str] = LITERAL_TAGS):
     if isinstance(v, str):
         return _mark(v, tags)
-    if isinstance(v, dict):
-        return {k: _mark_deep(x, tags) for k, x in v.items()}
+    if isinstance(v, dict):         # keys too: the template writes a schema's property names and a call's argument names
+        return {_mark_deep(k, tags): _mark_deep(x, tags) for k, x in v.items()}
     if isinstance(v, list):
         return [_mark_deep(x, tags) for x in v]
     return v
@@ -356,7 +356,7 @@ def _has_tag(v, tags: dict[str, str] = LITERAL_TAGS) -> bool:
     if isinstance(v, str):
         return any(tag in v for tag in tags)
     if isinstance(v, dict):
-        return any(_has_tag(x, tags) for x in v.values())
+        return any(_has_tag(k, tags) or _has_tag(x, tags) for k, x in v.items())
     if isinstance(v, list):
         return any(_has_tag(x, tags) for x in v)
     return False
