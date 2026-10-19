@@ -205,7 +205,7 @@ For setup:
 | Variable | What it does |
 | --- | --- |
 | `HF_ENDPOINT` | A Hugging Face mirror (e.g. `https://hf-mirror.com`) for the listing and the downloads. The same size and SHA-256 checks apply. |
-| `STRATA_NVCC` | The `nvcc` to build with. When set, it is the only one considered. Otherwise setup takes the newest toolkit on `PATH`, in `$CUDA_PATH` / `$CUDA_HOME`, `/usr/local/cuda*` or `/opt/cuda*`. |
+| `STRATA_NVCC` | The `nvcc` to build with. When set, it is the only one considered (a path that does not exist is warned about, and setup looks as usual). Otherwise setup takes the newest toolkit on `PATH`, in `$CUDA_PATH` / `$CUDA_HOME`, `/usr/local/cuda*` or `/opt/cuda*`. |
 | `CC`, `CXX`, `CUDAHOSTCXX` | The host compilers of the build. `CUDAHOSTCXX` (nvcc's host compiler) defaults to `CXX`. |
 | `STRATA_UV=1` | `./setup.sh` makes `.venv` with uv. On NixOS this is the default when uv is installed. |
 | `XDG_CONFIG_HOME` | Where setup keeps `strata-glm/settings.json` (default `~/.config`). |
