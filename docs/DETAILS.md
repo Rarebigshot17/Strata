@@ -616,6 +616,7 @@ GPU.
 | `STRATA_HTTP_BACKLOG` | Connections the operating system may hold for the server (default 256) |
 | `STRATA_ENGINE_READY_S` | How long a starting engine may go without progress before the server ends it (default 900; 0: no limit) |
 | `STRATA_ENGINE_STALL_S` | How long an engine may stay silent with no CPU time, no disk I/O and an idle GPU before the server ends it as frozen (default 90; 0: off; needs psutil) |
+| `STRATA_ENGINE_QUIT_S` | How long the server waits for the engine to end after `QUIT` before it kills it (default 120; 0: no limit) |
 | `STRATA_REQUEST_LINES` | `1`: one line per request on the server's output (for a supervisor such as llama-swap) |
 | `STRATA_DROP_CACHE_ON_EXIT` | `1`: give the model files' page cache back when the server stops |
 | `STRATA_DEBUG` | `1`: one line per request and the raw model text in the server window |
@@ -819,6 +820,7 @@ For reporting a security problem, see [SECURITY.md](../SECURITY.md).
 - **Engine watchdogs.** A running request whose engine says nothing for `engine_silence_s` (300 s; longer while a
   prompt chunk is read) ends with an error, and the next request starts the engine again. An engine that is silent
   for 90 s with no CPU time, no disk I/O and an idle GPU is ended as frozen (`STRATA_ENGINE_STALL_S`, needs psutil).
-  A starting engine must say `READY` within 900 s (`STRATA_ENGINE_READY_S`); while the warm-up that reads the experts
-  into memory before `READY` moves on (its progress lines in the engine log), the 900 s count from its latest line.
+  A starting engine must say `READY` within 900 s (`STRATA_ENGINE_READY_S`), counted again from each step it reports
+  in its log: the layers on each GPU, the expert cache, and each line of the warm-up that reads the experts into
+  memory before `READY` that moves on.
   How long the warm-up takes on the real model is not measured yet.

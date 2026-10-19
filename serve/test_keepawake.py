@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ON = ES_CONTINUOUS | ES_SYSTEM_REQUIRED
 
 
-def wait_for(cond, t=3.0):
+def wait_for(cond, t=10.0):                                   # only a failure waits this long (a loaded PC is slow)
     end = time.time() + t
     while time.time() < end:
         if cond():
@@ -82,14 +82,20 @@ class KeepAwakeTests(unittest.TestCase):
         svc = Service(MockEngine(tok, "ok"), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
         rec = Recorder()
         svc.keep_awake = ka = KeepAwake(rec)
-        kinds = [k for k, _ in svc.run(tok.encode("hi"), False, None, 8, {}, threading.Event())]
+        # Each request is held at its first event until the keep-awake thread has set the state: run straight
+        # through, a request can end before that thread first looks (it did under load), and a hold that has
+        # already ended is rightly never set.
+        gen = svc.run(tok.encode("hi"), False, None, 8, {}, threading.Event())
+        kinds = [next(gen)[0]]
+        self.assertTrue(wait_for(lambda: rec.calls == [ON]))
+        kinds += [k for k, _ in gen]
         self.assertIn("done", kinds)
         self.assertTrue(wait_for(lambda: rec.calls == [ON, ES_CONTINUOUS]))
         gen = svc.run(tok.encode("hi"), False, None, 8, {}, threading.Event())
         next(gen)
-        self.assertTrue(wait_for(lambda: rec.calls[-1] == ON))
+        self.assertTrue(wait_for(lambda: rec.calls == [ON, ES_CONTINUOUS, ON]))
         gen.close()                                           # the client left
-        self.assertTrue(wait_for(lambda: rec.calls[-1] == ES_CONTINUOUS))
+        self.assertTrue(wait_for(lambda: rec.calls == [ON, ES_CONTINUOUS, ON, ES_CONTINUOUS]))
         ka.close()
 
     def test_default_service_has_none(self):

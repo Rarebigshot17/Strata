@@ -119,22 +119,24 @@ first request does not wait for the disk (the warm-up; `--no-warm` in the config
 shows each step: the layers on each GPU, the expert cache, and the warm-up's progress (`warming the experts: X of Y GB`
 in the engine's log). How long this takes on the real model is not measured yet.
 
-The server gives up on a start when the engine has not said it is ready within 900 seconds. While the warm-up makes
-progress, the 900 seconds count again from its last progress line; other lines of the engine do not reset them. On a
-disk so slow that one step takes longer, set `STRATA_ENGINE_READY_S` (seconds, 0 = no limit) before you start it.
+The server gives up on a start when the engine has not said it is ready within 900 seconds. Every step the engine
+reports in its log counts the 900 seconds again: the layers on each GPU, the expert cache, each warm-up line that
+moves on (a line that only repeats does not). Placing the layers prints those lines when it is done, so the 900
+seconds must cover that step alone. On a disk so slow that one step takes longer, set `STRATA_ENGINE_READY_S`
+(seconds, 0 = no limit) before you start it.
 
-To stop the model, press Ctrl+C or close the terminal. On Ctrl+C (and on SIGTERM) the server stops the engine itself:
-`STOP` and `QUIT`, then, 20 seconds apart, a terminate and a kill. The engine writes its expert profile only when it
-ends after `QUIT` or when its input closes. Read from the code (not tried on a GPU), these end it sooner, and that
-run's profile is not written:
+To stop the model, press Ctrl+C or close the terminal. Every ordinary stop takes the same path: Ctrl+C, closing the
+terminal (SIGHUP), `kill <the server's PID>`, `docker stop` and `systemctl stop` (SIGTERM). The server sends the
+engine `STOP` and `QUIT`, and the engine writes its expert profile and gives back its memory. The server waits up to
+120 seconds for that (the window says what it waits for after 2 seconds; `STRATA_ENGINE_QUIT_S` changes the 120, how
+long it takes on the real model is not measured), then kills the engine. The engine runs in a session of its own, so
+the terminal's signals reach only the server, and strata-glm ignores a stop signal that still reaches it while the
+server runs (a systemd stop signals every process of the service): the server's `QUIT` follows. (Run by hand from a
+shell, `strata-glm --serve` ends on Ctrl+C as any program does.) A stop while the engine still starts ends it at once
+(it has nothing to save yet). This is read from the code and tested with a fake engine, not tried on a GPU.
 
-- **Ctrl+C** also reaches the engine, which runs in the server's process group and has no signal handler, so it ends
-  at once. When `./setup.sh` started the server, setup also ends the server itself a quarter of a second after
-  Ctrl+C.
-- **Closing the terminal** sends SIGHUP, which neither the server nor the engine handles: both end at once.
-
-To keep the profile, stop the server process alone: `kill <the server's PID>` (SIGTERM takes the server's Ctrl+C path,
-but only the server gets it), `systemctl stop` with the unit [below](#running-it-as-a-service), or `docker stop`.
+When the server ends without stopping the engine (`kill -9`, a crash), the engine ends too: at the end of its input
+when it is idle (the profile is written), at its next output line during a request, and at once while it starts.
 
 ### Setup's options
 
@@ -209,14 +211,14 @@ For setup:
 | `CC`, `CXX`, `CUDAHOSTCXX` | The host compilers of the build. `CUDAHOSTCXX` (nvcc's host compiler) defaults to `CXX`. |
 | `STRATA_UV=1` | `./setup.sh` makes `.venv` with uv. On NixOS this is the default when uv is installed. |
 | `XDG_CONFIG_HOME` | Where setup keeps `strata-glm/settings.json` (default `~/.config`). |
-| `STRATA_EXECV=1` | Setup replaces itself with the server instead of starting it as a child. The Docker image sets it. |
 
 For the server (more in [DETAILS.md](DETAILS.md#settings)):
 
 | Variable | What it does |
 | --- | --- |
-| `STRATA_ENGINE_READY_S` | Seconds a start may go without news from the engine before the server gives up (default 900, counted again from each warm-up progress line; 0 = no limit). |
+| `STRATA_ENGINE_READY_S` | Seconds a start may go without news from the engine before the server gives up (default 900, counted again from each step the engine reports: the layers, the expert cache, the warm-up; 0 = no limit). |
 | `STRATA_ENGINE_STALL_S` | Seconds an engine may be silent during a request while using no CPU time and doing no I/O before the server ends it as frozen (default 90, 0 = off). |
+| `STRATA_ENGINE_QUIT_S` | Seconds the server waits for the engine to end after `QUIT` (saving its expert profile, giving back its memory) before it kills it (default 120, 0 = no limit). |
 | `STRATA_API_KEY` | The server's API key, as `--api-key` or `"api_key"`. |
 | `STRATA_ALLOWED_HOSTS` | Extra host names the server answers to, as `"allowed_hosts"`. |
 | `STRATA_MAX_BODY_MIB` | The largest request body in MiB (default 256). |
@@ -523,10 +525,10 @@ ExecStart=/home/<user>/Strata/run-glm-ud-iq3_xxs.sh
 Restart=on-failure
 RestartSec=30
 # SIGTERM to the server only: the server sends the engine STOP and QUIT, and the engine writes its expert profile.
-# The default (control-group) also sends SIGTERM to the engine, which then ends at once without writing it.
+# (The default, control-group, also sends it to the engine, which ignores it while the server runs.)
 KillMode=mixed
-# the server gives the engine 20 s after QUIT, 20 s after a terminate and 20 s after a kill
-TimeoutStopSec=120
+# the server gives the engine up to 120 s after QUIT (STRATA_ENGINE_QUIT_S) and 20 s after a kill
+TimeoutStopSec=180
 
 [Install]
 WantedBy=multi-user.target
@@ -544,7 +546,7 @@ Before you enable it:
 - Add `"open_browser": false` to the run config, or run setup with `--no-browser` (a service has no browser to open).
 - To reach it from other machines, set `"host": "0.0.0.0"` **and** `"api_key"`. Without a key, anyone who can reach
   the port can use the model.
-- `TimeoutStopSec=120` is an example value: how long the engine takes to stop on the real model is not measured. A
+- `TimeoutStopSec=180` is an example value: how long the engine takes to stop on the real model is not measured. A
   stop that is killed loses the expert profile of that run.
 - The run script has the port written into it. To change the port, run setup again with `--setup --port N`, or edit
   the script.
@@ -615,8 +617,9 @@ docker run -d --name strata --gpus all \
   engine's log is inside the container: `docker exec strata tail -f /opt/strata/strata-glm-ud-iq3_xxs.log`.
 - **RAM:** setup reads the host's RAM from `/proc/meminfo`, not a container memory limit. Do not set a limit below what
   the size needs.
-- **Stopping:** the server is PID 1 (`STRATA_EXECV=1`) and stops the engine on SIGTERM. Give it time:
-  `docker stop -t 90 strata` (an example value; the stop time is not measured).
+- **Stopping:** the server is PID 1 (setup replaces itself with it) and stops the engine on SIGTERM. Give it time:
+  `docker stop -t 180 strata` (an example value: the server waits up to 120 s for the engine after `QUIT`, and the
+  stop time is not measured).
 
 ## Building and starting by hand
 

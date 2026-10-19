@@ -163,9 +163,9 @@ PP_FLOOR_TOK_S = 50.0
 PP_SLACK = 3.0
 # Reads that had no timeout (#1317).  A blocking read of the engine's READY line that never returned held the request
 # turn for good: every later request queued behind it.  Generous on purpose: a cold model load (the experts are read
-# into the page cache before READY), a slow disk or a slow CPU is not a hang.  Only a process that says nothing at all
-# for this long is ended - the warm-up's progress lines in its log count: the bound runs from the last one that moved
-# on - and the next request starts it again.
+# into the page cache before READY), a slow disk or a slow CPU is not a hang.  Only a process that reports no progress
+# for this long is ended - every step it reports in its log counts (the layers on each GPU, the expert cache, each
+# step of the warm-up: start_progress), and the bound runs from the last one - and the next request starts it again.
 # STRATA_ENGINE_READY_S overrides it (0 = wait for ever).
 
 
@@ -194,6 +194,13 @@ def engine_frozen(base: tuple[float, int], now: tuple[float, int]) -> bool:
 
 
 ENGINE_READY_S = _timeout_env("STRATA_ENGINE_READY_S", 900.0)
+# After QUIT (STOP first ends a running request at its next token or prompt chunk) the engine saves its expert profile
+# and gives back its memory: the VRAM on every card, its pinned buffers and parked conversations (--park-mib), and the
+# mapping of the 117-162 GB of experts - how long that takes on the real model is not measured.  The server waits this
+# long before it kills the engine (a kill loses that run's profile).  20 s was the wait before; 120 s leaves room on a
+# busy PC and still bounds an engine that does not end.  STRATA_ENGINE_QUIT_S overrides it (0 = wait for ever).
+ENGINE_QUIT_S = _timeout_env("STRATA_ENGINE_QUIT_S", 120.0)
+QUIT_QUIET_S = 2.0          # an engine that ends within this is not announced in the server window
 
 
 # ------------------------------------------------------------------------------------------------ the model's files
@@ -343,6 +350,15 @@ def unload_wait(value, default: float) -> float:
         return default
 
 
+def console(text: str) -> None:
+    """A line in the server window, which may be gone: after the terminal was closed (SIGHUP) every write to it fails
+    (EIO), and the stop that follows must still end the engine."""
+    try:
+        print(text, flush=True)
+    except (OSError, ValueError):
+        pass
+
+
 def start_log_tail(log: str | None, offset: int, n: int = 20) -> str:
     """#496: the last n lines this start wrote to the engine log, for the error when the engine ended before READY -
     whatever the failure, the engine's own reason is in them (people posted the traceback without the log).  "" when
@@ -430,12 +446,15 @@ def narrate_start(log_path: str, offset: int, model_path: str | None, done: thre
 
 
 WARMING = re.compile(r"warming the experts: ([\d.]+) of ")
+START_LINES_MAX = 1000      # distinct start lines that count as progress (an engine that prints new ones for ever)
 
 
-def warm_progress(log_path: str, pos: int) -> tuple[int, float | None]:
-    """How far the engine's expert warm-up before READY has got, by its log from `pos` on (strata-glm writes
-    "warming the experts: X of Y GB (...)" to stderr every 2 s): (where the next look reads on, the latest X in GB, or
-    None when no whole line since `pos` reports it)."""
+def start_progress(log_path: str, pos: int, seen: dict) -> tuple[int, str | None]:
+    """The progress the engine reports in its log (its stderr) from `pos` on while it starts, for the READY bound: a
+    warm-up line whose GB read moved on (strata-glm writes "warming the experts: X of Y GB (...)" every 2 s), or any
+    other line of its own that this start has not had yet - the layers on each GPU, the expert cache, a layer's note.
+    A line that only repeats itself, or a warm-up that stands still, is no progress.  `seen` keeps this start's lines
+    and its warm-up's GB ("warm_gb").  -> (where the next look reads on, the latest progress line or None)."""
     try:
         with open(log_path, "rb") as f:
             f.seek(pos)
@@ -443,8 +462,19 @@ def warm_progress(log_path: str, pos: int) -> tuple[int, float | None]:
     except OSError:
         return pos, None
     cut = chunk.rfind(b"\n") + 1                       # whole lines only: the rest is read next time
-    found = WARMING.findall(chunk[:cut].decode("utf-8", "replace"))
-    return pos + cut, float(found[-1]) if found else None
+    news = None
+    lines = seen.setdefault("lines", set())
+    for line in chunk[:cut].decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith("[strata]"):     # the server's own lines in the log
+            continue
+        if m := WARMING.search(line):
+            if float(m.group(1)) > seen.get("warm_gb", -1.0):
+                seen["warm_gb"], news = float(m.group(1)), line
+        elif line not in lines and len(lines) < START_LINES_MAX:
+            lines.add(line)
+            news = line
+    return pos + cut, news
 
 
 class ConvCacheLog:
@@ -559,6 +589,8 @@ class StrataEngine:
     silent_note = None                   # #481: why the server ended a silent engine (death_note says it)
     gpu_busy = None                      # #1317: () -> bool, "the GPU is working" (the telemetry's reading); a GPU at work is not frozen
     last_err = None                      # #997: an ERR that was its last stdout line (death_note says it)
+    ready = True                         # the process has said READY (False while it starts: it reads no command yet)
+    stopping = False                     # the server is stopping (shutdown()): no engine is started from here on
     WARM_LOOK_S = 2.0                    # how often a start looks for the warm-up's progress (strata-glm: every 2 s)
 
     def __init__(self, exe: str, args: list[str], cwd: str | None = None, log: str | None = None,
@@ -585,6 +617,8 @@ class StrataEngine:
         self.info["version"] = None
         if lazy:
             return
+        if self.stopping:                # a request's restart while the server stops: no new engine
+            raise EngineDied("the server is stopping; the engine is not started again")
         self.unloaded = False            # `ended` stays True until READY (below): not alive while starting (#344)
         self.log = open(log, "a", encoding="utf-8") if log else subprocess.DEVNULL
         loading = threading.Event()                     # set once READY: the narrator below stops
@@ -600,10 +634,15 @@ class StrataEngine:
             except OSError:
                 pass
         self.max_context = 0                             # before the new process is visible: never its predecessor's
+        self.ready = False
         try:
-            self.proc = subprocess.Popen([exe, "--serve", *args], cwd=cwd, stdin=subprocess.PIPE,
-                                         stdout=subprocess.PIPE, stderr=self.log, text=True, encoding="utf-8",
-                                         bufsize=1, env=env)
+            # a session of its own: Ctrl+C and the hang-up of a closed terminal reach only the server, which ends the
+            # engine with STOP and QUIT (main()) - the engine then saves its expert profile.  Without the server the
+            # engine still ends: at the end of its input (idle), at its next output line (a request; SIGPIPE), and
+            # strata-glm at once while it starts (include/strata/glm/serve_signals.hpp).
+            proc = subprocess.Popen([exe, "--serve", *args], cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                    stderr=self.log, text=True, encoding="utf-8", bufsize=1, env=env,
+                                    start_new_session=True)
         except OSError as e:                             # missing, not executable, being rebuilt (update.sh)
             loading.set()                                # the narrator stops, and our handle on the log goes
             if log:
@@ -611,63 +650,78 @@ class StrataEngine:
             # EngineDied, as for a start that ends before READY: a request loading it gets a 503 that says why
             # (an OSError there read as the client's disconnect: no answer at all), and restart() tries again
             raise EngineDied(f"the engine could not be started: {e}") from None
-        contain(self.proc)                               # ends with the server, however it ends (Windows)
+        self.proc = proc                                 # close() reaches it from here (it kills a start)
+        contain(proc)                                    # ends with the server, however it ends (Windows)
         # the READY read has a timeout (#1317): the lines come from a thread, up to READY, so the rest of the stream
         # stays for _pump (one reader at a time)
         ready_q: queue.Queue = queue.Queue()
-        threading.Thread(target=self._ready_pump, args=(self.proc, ready_q), daemon=True).start()
+        threading.Thread(target=self._ready_pump, args=(proc, ready_q), daemon=True).start()
         ready_deadline = None if ENGINE_READY_S is None else time.monotonic() + ENGINE_READY_S
-        timed_out = False
-        warm_pos, warmed = log_start, None               # the warm-up's progress, from the log
-        while True:
-            if log and ready_deadline is not None:
-                # the warm-up reads 120-170 GB before READY, longer than the bound from a slow disk or a NAS: while
-                # it moves on, the bound counts from its last progress (looked for every WARM_LOOK_S)
-                warm_pos, done = warm_progress(log, warm_pos)
-                if done is not None and (warmed is None or done > warmed):
-                    warmed, ready_deadline = done, time.monotonic() + ENGINE_READY_S
-            left = None if ready_deadline is None else ready_deadline - time.monotonic()
-            if left is not None and left <= 0:
-                timed_out = True
-                break
-            try:
-                line = ready_q.get(timeout=None if left is None else min(left, self.WARM_LOOK_S))
-            except queue.Empty:
-                continue
-            if line is None:
-                break
-            if line.startswith("INFO "):
-                for kv in line.split()[1:]:
-                    k, _, v = kv.partition("=")
-                    self.info[k] = int(v) if v.lstrip("-").isdigit() else v
-            if line.startswith("READY"):
-                f = line.split()
-                self.max_context = int(f[1])
-                self.can_stop = "stop" in f[2:]
-                break
-        loading.set()
-        if self.max_context <= 0:
-            if timed_out:                               # still loading, or hung: end it, so the turn is not held for good
+        timed_out = stopped = False
+        log_pos, seen, news = log_start, {}, None        # the start's progress, from the log
+        try:
+            while True:
+                if self.stopping:                        # the server stops while this starts (shutdown())
+                    stopped = True
+                    break
+                if log and ready_deadline is not None:
+                    # every step the engine reports moves the bound on (looked for every WARM_LOOK_S): placing the
+                    # layers and filling the expert cache from the disk, and the warm-up that reads 117-162 GB before
+                    # READY, longer than the bound from a slow disk or a NAS
+                    log_pos, line = start_progress(log, log_pos, seen)
+                    if line is not None:
+                        news, ready_deadline = line, time.monotonic() + ENGINE_READY_S
+                left = None if ready_deadline is None else ready_deadline - time.monotonic()
+                if left is not None and left <= 0:
+                    timed_out = True
+                    break
                 try:
-                    self.proc.kill()
-                except OSError:
+                    line = ready_q.get(timeout=self.WARM_LOOK_S if left is None else min(left, self.WARM_LOOK_S))
+                except queue.Empty:
+                    continue
+                if line is None:
+                    break
+                if line.startswith("INFO "):
+                    for kv in line.split()[1:]:
+                        k, _, v = kv.partition("=")
+                        self.info[k] = int(v) if v.lstrip("-").isdigit() else v
+                if line.startswith("READY"):
+                    f = line.split()
+                    self.max_context = int(f[1])
+                    self.can_stop = "stop" in f[2:]
+                    break
+        except BaseException:                           # Ctrl+C while it starts (main()): the engine goes with it
+            stopped = True
+            raise
+        finally:
+            loading.set()
+            stopped = stopped or self.stopping          # (shutdown() may have killed it: its output ended)
+            if self.max_context <= 0:
+                if timed_out or stopped:                # still loading, or hung: end it, so the turn is not held for
+                    try:                                # good; a start reads no QUIT, and has nothing to save yet
+                        proc.kill()
+                    except OSError:
+                        pass
+                try:                                    # its pipes and our handle on its log (the log stays)
+                    proc.wait(timeout=5)
+                    proc.stdin.close()
+                    proc.stdout.close()
+                    if log:
+                        self.log.close()
+                except (OSError, subprocess.TimeoutExpired):
                     pass
-            try:                                        # its pipes and our handle on its log (the log stays)
-                self.proc.wait(timeout=5)
-                self.proc.stdin.close()
-                self.proc.stdout.close()
-                if log:
-                    self.log.close()
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-            why = (f"the engine did not report READY within {ENGINE_READY_S:.0f} s"
-                   + (f" of its last warm-up progress ({warmed:.1f} GB read)" if warmed is not None else "")
-                   if timed_out else f"the engine exited before it was ready (exit code {self.proc.poll()})")
+        if self.max_context <= 0:
+            last = ("" if news is None else f" of its last warm-up progress ({seen['warm_gb']:.1f} GB read)"
+                    if WARMING.search(news) else f" of its last start line ({news[:120]})")
+            why = ("the server is stopping" if stopped else
+                   f"the engine did not report READY within {ENGINE_READY_S:.0f} s{last}"
+                   if timed_out else f"the engine exited before it was ready (exit code {proc.poll()})")
             # EngineDied, not bare RuntimeError: a request waiting on this load must end with a 503
             # through the request path's handler - a RuntimeError there left the turn with no answer (#1527)
             raise EngineDied(why + (f" (see {log})" if log else "") + start_log_tail(log, log_start))
         self.known_ctx = self.max_context   # survives a failed restart: requests keep their limit and restart it
         self.info["version"] = str(self.info["engine"]) if self.info.get("engine") else None
+        self.ready = True
         self.ended = False                              # READY: alive from here (restart() set it True, #344)
         # the engine's stdout on a thread, so a request can wait with a timeout (heartbeats, cancel checks)
         self.lines: queue.Queue = queue.Queue()
@@ -777,7 +831,7 @@ class StrataEngine:
                             self.proc.wait(timeout=60)
                     except (subprocess.TimeoutExpired, OSError):
                         pass
-                    if i == tries - 1:
+                    if i == tries - 1 or self.stopping:
                         raise
                     print(f"[strata] the engine did not start (try {i + 1} of {tries}); again in "
                           f"{self.RESTART_RETRY_S:g} s", flush=True)
@@ -1065,23 +1119,56 @@ class StrataEngine:
             pass
         return EngineSilent(f"{what}; the server ended the engine")
 
+    def _wait_quit(self) -> None:
+        """Wait up to ENGINE_QUIT_S for the engine to end after QUIT (subprocess.TimeoutExpired when it has not); the
+        server window says what it waits for once that takes longer than QUIT_QUIET_S."""
+        try:
+            self.proc.wait(timeout=QUIT_QUIET_S if ENGINE_QUIT_S is None else min(QUIT_QUIET_S, ENGINE_QUIT_S))
+            return
+        except subprocess.TimeoutExpired:
+            if ENGINE_QUIT_S is not None and ENGINE_QUIT_S <= QUIT_QUIET_S:
+                raise
+        bound = "" if ENGINE_QUIT_S is None else f", up to {ENGINE_QUIT_S:.0f} s"
+        console("[strata] waiting for the engine to end: it saves its expert profile and gives back its memory (the "
+                f"VRAM, the parked conversations, the mapped experts){bound} ...")
+        t0 = time.monotonic() - QUIT_QUIET_S
+        self.proc.wait(timeout=None if ENGINE_QUIT_S is None else ENGINE_QUIT_S - QUIT_QUIET_S)
+        console(f"[strata] the engine ended ({time.monotonic() - t0:.0f} s after QUIT)")
+
+    def shutdown(self):
+        """The server's own stop (main()): no engine is started from here on - a request's restart, a load - and this
+        one ends as close() ends it.  Once: atexit calls it again after main()'s stop, which a second Ctrl+C or
+        EngineStuck may have cut short with a kill - that engine is not sent QUIT and waited for a second time."""
+        if self.stopping:
+            return
+        self.stopping = True
+        self.close()
+
     def close(self):
         """End the engine process: STOP (a running request ends: the engine reads QUIT only between requests) and
-        QUIT first - the engine saves its expert profile (--expert-profile) and frees its memory itself - then
-        terminate, then kill, each given 20 s.  Raises EngineStuck when it still runs after all three."""
+        QUIT - the engine saves its expert profile (--expert-profile) and frees its memory itself - given
+        ENGINE_QUIT_S, then a kill given 20 s (no terminate: strata-glm ignores SIGTERM while the server runs).  Raises
+        EngineStuck when it still runs after that.  An engine that has not said READY yet reads no command (and has
+        nothing to save): it is killed at once."""
         if self.proc is None:
             return
         try:
             if self.proc.poll() is None:
+                if not self.ready:
+                    self.proc.kill()                    # its start (__init__, another thread) then ends too
+                    self.proc.wait(timeout=20)
+                    return
                 try:
                     self.proc.stdin.write("STOP\nQUIT\n")
                     self.proc.stdin.flush()
                     self.proc.stdin.close()
-                    self.proc.wait(timeout=20)
-                except (OSError, ValueError, subprocess.TimeoutExpired):
-                    self.proc.terminate()
-                    self.proc.wait(timeout=20)
+                except (OSError, ValueError):           # its input is gone: it is ending already
+                    pass
+                self._wait_quit()
         except subprocess.TimeoutExpired:
+            if self.ready:                              # (a start that a kill did not end comes here too)
+                console(f"[strata] the engine did not end within {ENGINE_QUIT_S:.0f} s of QUIT: it is killed (this "
+                        "run's expert profile may not be saved; STRATA_ENGINE_QUIT_S gives it longer)")
             self.proc.kill()
             try:
                 self.proc.wait(timeout=20)
@@ -4677,6 +4764,23 @@ def main() -> int:
     template = chat_template_for(files, override)
     eos_ids = end_of_turn_ids(tok)
     hub = hub_from_config(cfg, a.mcp_config)            # before the minutes of loading: a bad entry stops here
+    # Every ordinary stop takes Ctrl+C's path (KeyboardInterrupt, at the end): Ctrl+C (SIGINT), SIGTERM (kill, docker
+    # stop, a systemd stop) and SIGHUP (the terminal was closed). It ends the engine with STOP and QUIT, and the
+    # engine saves its expert profile; the engine runs in a session of its own, so these signals reach only this
+    # process. #96: without a handler, docker stop's SIGTERM does nothing to PID 1. Python's own SIGINT handler
+    # stays, and a SIGINT or SIGHUP ignored from the start stays ignored (nohup's SIGHUP, an & job's SIGINT); SIGTERM
+    # is handled even when the launcher ignored it, or kill, docker stop and systemctl stop would do nothing.
+    def on_stop_signal(signum, frame):
+        if signum == getattr(signal, "SIGHUP", None):   # a closing terminal hangs up more than once (the kernel, the
+            signal.signal(signum, signal.SIG_IGN)       # shell): only Ctrl+C or SIGTERM again hurries the stop
+        raise KeyboardInterrupt
+    for name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, name, None)               # (no SIGHUP on Windows)
+        try:
+            if sig is not None and (name == "SIGTERM" or signal.getsignal(sig) is not signal.SIG_IGN):
+                signal.signal(sig, on_stop_signal)
+        except (ValueError, OSError):                   # not the main thread
+            pass
     if a.engine == "strata":
         if not eos_ids:
             raise SystemExit("[strata] the model's tokenizer has none of GLM's end-of-turn tokens (<|endoftext|>, "
@@ -4702,12 +4806,17 @@ def main() -> int:
         try:
             engine = StrataEngine(exe, engine_args(cfg, eos_ids), cwd=cfg.get("cwd"), log=cfg.get("log"), env=env,
                                   lazy=lazy)
+        except KeyboardInterrupt:                       # stopped while it started: StrataEngine ended the engine
+            console("\n[strata] stopped before the model was ready")
+            return 0
         except (RuntimeError, OSError) as e:            # EngineDied (it ended before READY), or no such program
             print(f"[strata] the engine did not start: {e}\n[strata] check \"exe\" and \"args\" in {a.config} "
                   "(strata-glm stops at an option it does not know); the log has the engine's own words",
                   file=sys.stderr, flush=True)
             return 1
         engine.silence_s = silence                      # an attribute of its own: restart() keeps it
+        import atexit
+        atexit.register(engine.shutdown)                # however main() ends from here, the engine gets QUIT
     else:
         engine, sampling_defaults = MockEngine(tok, a.script or [
             "Thinking about it.</think>Hello from the mock engine."]), {}
@@ -4858,33 +4967,31 @@ def main() -> int:
     if a.open and cfg.get("open_browser") is not False:   # #609: the config's "open_browser": false wins (an older
         import webbrowser                                  # run script still passes --open)
         webbrowser.open(f"http://{'127.0.0.1' if a.host in ('0.0.0.0', '') else a.host}:{a.port}/")
-    # #96: docker stop sends SIGTERM, which Python ignores by default, so the container's PID 1 would be killed after
-    # the grace period with the engine still running. SIGTERM takes Ctrl+C's path below (QUIT to the engine).
-    # SIGINT keeps Python's own handler, so Ctrl+C and a second Ctrl+C work as before.
-    def on_sigterm(signum, frame):
-        raise KeyboardInterrupt
-    try:
-        signal.signal(signal.SIGTERM, on_sigterm)
-    except (ValueError, OSError, AttributeError):         # not the main thread
-        pass
     try:
         while True:
             time.sleep(1)                               # Windows never delivers Ctrl+C to an untimed Event.wait()
     except KeyboardInterrupt:
-        print("\n[strata] stopping (Ctrl+C again to end the engine at once) ...", flush=True)
-        closers = [httpd.shutdown, getattr(engine, "close", None), hub.close if hub is not None else None]
+        try:                                            # a terminal closed during the stop: no hurry either
+            signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        except (ValueError, OSError, AttributeError):
+            pass
+        console("\n[strata] stopping (Ctrl+C again to end the engine at once) ...")
+        closers = [httpd.shutdown, getattr(engine, "shutdown", None), hub.close if hub is not None else None]
         for close in filter(None, closers):
             try:
                 close()
             except KeyboardInterrupt:                   # a second Ctrl+C: don't wait for the engine to free its memory
-                if getattr(engine, "proc", None):
-                    engine.proc.kill()
+                proc = getattr(engine, "proc", None)
+                if proc is not None:
+                    proc.kill()
+            except Exception as e:  # noqa: BLE001 - EngineStuck: said, and the rest still closes
+                console(f"[strata] {e}")
         try:
             from serve import cache_drop
             cache_drop.drop_after_exit(engine)           # opt-in (STRATA_DROP_CACHE_ON_EXIT=1), default unchanged
         except Exception as e:  # noqa: BLE001 - never block the exit
-            print(f"[strata] could not release the model files' cache: {e}", flush=True)
-        print("[strata] stopped", flush=True)
+            console(f"[strata] could not release the model files' cache: {e}")
+        console("[strata] stopped")
     return 0
 
 

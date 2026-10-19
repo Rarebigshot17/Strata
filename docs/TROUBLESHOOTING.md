@@ -168,12 +168,13 @@ the files in its page cache. `--no-warm` in `"args"` skips the warm-up; the firs
 from the disk instead.
 
 **"the engine did not report READY within 900 s"** (with "of its last warm-up progress (N GB read)" once the
-warm-up had begun).
-The server ends a start that makes no progress for 900 seconds. Every warm-up line that moves on starts the 900
-seconds again, so a slow disk that keeps reading is not ended. Other lines do not count: before the warm-up begins
-(mapping the files, placing the layers on the GPUs) the 900 seconds run from the start. If your PC needs longer
-than that before the warm-up begins, or the warm-up stalls for that long, give it more time in the server's
-environment: `STRATA_ENGINE_READY_S=1800 ./run-glm-<size>.sh` (0 waits for ever).
+warm-up had begun, or "of its last start line (...)" before it).
+The server ends a start that makes no progress for 900 seconds. Every step the engine reports in its log starts the
+900 seconds again: a new line (the layers on each GPU, the expert cache) or a warm-up line that moves on, so a slow
+disk that keeps reading is not ended. A line that only repeats does not count. Mapping the files and placing the
+layers on the GPUs print nothing until they are done, so the 900 seconds must cover them. If your PC needs longer
+than that for one step, or the warm-up stalls for that long, give it more time in the server's environment:
+`STRATA_ENGINE_READY_S=1800 ./run-glm-<size>.sh` (0 waits for ever).
 
 ## While running
 
@@ -234,11 +235,10 @@ Several things make the first requests after a start slower than later ones:
   longest prompt there is. `reading the prompt: X of Y tokens` in the server window shows the progress.
 - The VRAM expert cache starts from the expert profile (`--expert-profile`, which setup writes into the run
   config). The engine saves it only when it leaves its request loop: when the server sends it `QUIT` (`/unload`,
-  an idle unload, or a server that is stopped with SIGTERM, as `docker stop` and `kill <server pid>` do), or when
-  the server's end of the pipe closes. strata-glm has no signal handler of its own, so a signal that reaches the
-  engine itself ends it without saving the profile: Ctrl+C in the server's terminal reaches both processes, and so
-  does a systemd stop with the default `KillMode` (`KillMode=mixed` sends SIGTERM to the server only). After such
-  an end, or on the first start ever, the cache fills while it answers.
+  an idle unload, or any ordinary stop of the server: Ctrl+C, closing its terminal, `kill <server pid>`, `docker
+  stop`, `systemctl stop`), or when the server's end of the pipe closes while the engine is idle. It is not saved
+  when the engine itself is killed (`kill -9`, the out-of-memory killer, a crash) or when the server is killed
+  during a request. After such an end, or on the first start ever, the cache fills while it answers.
 - With `--no-warm`, or when Linux gave the page cache to other programs, the experts come from the disk.
 - With `"lazy_load": true` or `"idle_unload_s"`, the first request starts the engine, warm-up included.
 

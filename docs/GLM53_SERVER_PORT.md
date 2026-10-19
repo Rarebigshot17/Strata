@@ -37,8 +37,9 @@ Behaviour the port and its review (D1) settled:
   the run config's `"sampling"` block (the server does not start) are checked too, each with its own wording (a
   shared temperature may go up to 2).
 - **The start**: strata-glm reads the routed experts into the page cache before READY, with progress on stderr
-  (`--no-warm` skips it). The server's start watchdog (`STRATA_ENGINE_READY_S`, 900 s) counts from the warm-up's
-  last progress, so a slow disk that keeps reading is not ended.
+  (`--no-warm` skips it). The server's start watchdog (`STRATA_ENGINE_READY_S`, 900 s) counts from the last step the
+  engine reported (a new start line: the layers on each GPU, the expert cache; a warm-up line that moved on), so a
+  slow disk that keeps reading is not ended.
 - **Request bodies**: the size limit stays (256 MiB, `STRATA_MAX_BODY_MIB`), and at most two bodies over 16 MiB are
   held at once (a third is a 503 with `Retry-After`). Reading a request's headers and body times out after 120 s
   without data; the answer has no limit, so a long stream is never cut off.
@@ -76,7 +77,16 @@ control -> STOP                          ends the last GEN's request, even a que
                                          its expert profile (--expert-profile) and exits
         -> anything else                 <- ERR unsupported command: <word>  (the server's PING probe after an
                                          ERR internal: an engine that still answers is in step)
+        (end of input)                   as QUIT: the server is gone
 ```
+
+The server starts the engine in a session of its own: Ctrl+C and a closed terminal's SIGHUP reach only the server,
+which ends the engine with STOP and QUIT (main(), StrataEngine.shutdown). strata-glm in --serve mode
+(include/strata/glm/serve_signals.hpp) ignores SIGINT, SIGHUP and SIGTERM while the server that started it in a
+session of its own runs (a systemd stop signals every process of the service), ends on them once that server is gone,
+ends at once when the server goes while it still starts (before READY: the parent-death signal), and ends at a broken
+stdout (SIGPIPE, restored even when the launcher ignored it). Run by hand from a shell or by a tool, it is not in a
+session of its own, and Ctrl+C or a `kill` ends it as before.
 
 Engine options (strata-glm --serve): `-m <first shard> --ctx N --eos-ids a,b,c [--devices 0,1,2]
 [--split w,w,w] [--threads N] [--vram-reserve GB] [--expert-profile FILE] [--max-swaps N] [--no-expert-cache]

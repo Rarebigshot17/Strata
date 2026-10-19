@@ -10,6 +10,7 @@
 #include "strata/glm/cpu_ref.hpp"
 #include "strata/glm/engine.hpp"
 #include "strata/glm/serve_loop.hpp"
+#include "strata/glm/serve_signals.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -123,6 +124,7 @@ int main(int argc, char** argv) {
         else return usage();
     }
     if (serve && !model_path.empty()) {
+        strata::glm::serve_signals_starting();   // ends with its server while it starts (serve_signals.hpp)
         try {
             strata::glm::Model model(model_path);
             strata::glm::GpuEngine eng(model, opt);
@@ -144,6 +146,7 @@ int main(int argc, char** argv) {
             so.info.push_back("backend=cuda");
             so.info.push_back("expert_slots=" + std::to_string(eng.cache_slots()));
             so.info.push_back("expert_cache_mib=" + std::to_string(eng.cache_bytes() >> 20));
+            strata::glm::serve_signals_serving();   // the server ends it with QUIT, which saves the profile below
             const int rc = strata::glm::serve_loop(ev, so);
             eng.save_profile();
             return rc;

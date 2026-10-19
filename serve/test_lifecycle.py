@@ -10,7 +10,7 @@ import urllib.request
 from unittest import mock
 
 from serve.glm_fixtures import GlmTokenizer, glm_template
-from serve.server import EngineDied, EngineStuck, MockEngine, Service, StrataEngine, serve
+from serve.server import QUIT_QUIET_S, EngineDied, EngineStuck, MockEngine, Service, StrataEngine, serve
 
 
 class ResidentEngine(StrataEngine):
@@ -71,9 +71,9 @@ class Lifecycle(unittest.TestCase):
                 self.assertTrue(engine.ended)
                 self.assertIsNone(engine.progress)
                 self.assertEqual(engine.last, {})
-                if running:
-                    proc.terminate.assert_called_once()
-                    proc.wait.assert_called_once_with(timeout=20)
+                if running:                             # its input is gone: it is ending, and is waited for
+                    proc.terminate.assert_not_called()
+                    proc.wait.assert_called_once_with(timeout=QUIT_QUIET_S)
                 else:
                     proc.terminate.assert_not_called()
                     proc.wait.assert_not_called()
@@ -112,19 +112,20 @@ class Lifecycle(unittest.TestCase):
         with self.assertRaisesRegex(EngineStuck, "still releasing"):
             engine.close()
         self.assertIs(engine.proc, proc)
-        proc.terminate.assert_called_once()
+        proc.terminate.assert_not_called()              # strata-glm ignores SIGTERM while the server runs
         proc.kill.assert_called_once()
 
-    def test_close_terminates_before_it_kills(self):
-        # an engine that does not end on QUIT is terminated first (as the unload always did); kill is the last resort
+    def test_close_waits_for_an_engine_slow_to_end_after_quit(self):
+        # saving the expert profile and giving the memory back can take a while: neither terminated nor killed
         engine = StrataEngine("missing-executable", [], lazy=True)
         proc = mock.Mock()
         proc.stdin, proc.stdout = io.StringIO(), io.StringIO()
         proc.poll.side_effect = [None, 0]
-        proc.wait.side_effect = [subprocess.TimeoutExpired("engine", 20), 0]
+        proc.wait.side_effect = [subprocess.TimeoutExpired("engine", QUIT_QUIET_S), 0]
         engine.proc = proc
-        engine.close()
-        proc.terminate.assert_called_once()
+        with mock.patch("builtins.print"):
+            engine.close()
+        proc.terminate.assert_not_called()
         proc.kill.assert_not_called()
         self.assertIsNone(engine.proc)
 
