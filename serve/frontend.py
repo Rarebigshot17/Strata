@@ -1033,6 +1033,16 @@ def parse_tool_call(body: str, tools: list[dict] | None = None) -> ToolCall:
 
 
 RCALL_MAX = 32768        # the most of a `<tool_call>` inside the reasoning that is held while waiting for its end (#804)
+GAP_MAX = 64             # the most newlines held before a call that may follow (dropped if one does): more are content
+
+
+def _gap(text: str, end: int) -> int:
+    """Where the newlines right before `end` in `text` start, GAP_MAX of them at most (a run of newline tokens is held
+    in a bounded buffer, not rescanned whole on every token)."""
+    j = end
+    while j > 0 and end - j < GAP_MAX and text[j - 1] == "\n":
+        j -= 1
+    return j
 
 
 class OutputParser:
@@ -1269,9 +1279,7 @@ class OutputParser:
                 if i < 0:
                     # Hold a partial tag AND the newlines before it: if a tool call follows, they are dropped,
                     # so emitting them early would make streamed and whole outputs differ.
-                    j = len(self.buf) - _partial(self.buf, (CALL_START,))
-                    while j > 0 and self.buf[j - 1] == "\n":
-                        j -= 1
+                    j = _gap(self.buf, len(self.buf) - _partial(self.buf, (CALL_START,)))
                     if j > 0:
                         out.append(Event("content", self._track(self.buf[:j])))
                         self.buf = self.buf[j:]
@@ -1283,9 +1291,7 @@ class OutputParser:
                     out.append(Event("content", self._track(self.buf[:i + len(CALL_START)])))
                     self.buf = self.buf[i + len(CALL_START):]
                     continue
-                j = i
-                while j > 0 and self.buf[j - 1] == "\n":
-                    j -= 1
+                j = _gap(self.buf, i)
                 if j > 0:
                     out.append(Event("content", self._track(self.buf[:j])))
                     self.buf, i = self.buf[j:], i - j

@@ -7,13 +7,14 @@ random pieces, with the event contract the API layers rely on (tool_start / tool
 import json
 import random
 import sys
+import time
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from serve.frontend import (RCALL_MAX, CallReader, OutputParser, forced_call, parse_tool_call,  # noqa: E402
-                            value_end)
+from serve.frontend import (GAP_MAX, RCALL_MAX, CallReader, OutputParser, forced_call,  # noqa: E402
+                            parse_tool_call, value_end)
 
 TOOLS = [{"name": "read_file", "parameters": {"type": "object", "properties": {
     "path": {"type": "string"}, "lines": {"type": "integer"}, "opts": {"type": "object"}}}},
@@ -156,6 +157,24 @@ class ReasoningAndContent(Base):
     def test_leading_newlines_are_not_content(self):
         self.assertEqual(self.text("x</think>\n\nHello\n"), "Hello\n")
         self.assertEqual(self.text("x</think>" + READ + "\n\nDone"), "Done")
+
+    def test_newlines_held_before_a_call_are_bounded(self):
+        # the newlines before a call are dropped if one follows, so they are held - at most GAP_MAX of them: a reply
+        # of newline tokens ("\n", "\n\n" in turn, which #606's same-token stop does not end) rescanned the whole
+        # held run on every token, and 20,000 of them took 25 s
+        p = OutputParser(thinking=False, tools=TOOLS, stream_tools=False)
+        events, start = p.feed("Answer."), time.perf_counter()
+        for k in range(20000):
+            events += p.feed("\n" if k % 2 else "\n\n")
+            self.assertLessEqual(len(p.buf), GAP_MAX)
+        self.assertLess(time.perf_counter() - start, 5.0)
+        events += p.feed(READ) + p.finish()
+        newlines = 30000 - GAP_MAX                               # the ones before the last GAP_MAX are content
+        self.assertEqual(normal(events), [("content", "Answer." + "\n" * newlines),
+                                          ("tool_call", "read_file", READ_ARGS)])
+        self.assertEqual(self.parse("Answer." + "\n" * 30000 + READ, thinking=False, stream_tools=False),
+                         normal(events))
+        self.assertEqual(self.text("x</think>Hi\n\n" + READ), "Hi")
 
     def test_held_text_and_state_for_the_server(self):
         p = OutputParser(thinking=True, tools=TOOLS)
