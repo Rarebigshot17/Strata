@@ -23,7 +23,7 @@ from serve.server import EngineDied, EngineError, Service, StrataEngine, serve
 # The first GEN line fails as --mode says; every later one (and every one after a restart: the state file says the
 # first was attempted) answers "Z" and GLM's end of turn, <|user|> (259 in GlmTokenizer).
 FAKE = r'''
-import sys
+import sys, time
 from pathlib import Path
 state = Path(sys.argv[sys.argv.index('--state') + 1])
 mode = sys.argv[sys.argv.index('--mode') + 1]
@@ -34,6 +34,8 @@ for line in sys.stdin:
     if line.startswith('QUIT'):
         break
     if not line.startswith('GEN '):
+        if line.strip() not in ('', 'STOP'):          # as strata-glm: an unknown command is answered
+            print('ERR unsupported command: ' + line.split()[0])
         continue
     n = len(line.split()[-1].split(','))
     if not state.exists():
@@ -41,10 +43,15 @@ for line in sys.stdin:
         if mode == 'invalid':
             print('ERR the prompt (%d tokens) does not fit the context (4096)' % n)
             continue
-        if mode == 'late':
+        if mode in ('late', 'stopped'):
             print('T 90')
+        if mode == 'stopped':                           # fails while the stopped request is drained
+            sys.stdin.readline()
         print('ERR internal: CUDA error 700 (an illegal memory access was encountered)')
         if mode in ('internal', 'late'):
+            sys.exit(1)
+        if mode in ('slow-exit', 'stopped'):            # strata-glm unwinds first: a CUDA context, 100+ GB mapped
+            time.sleep(2)
             sys.exit(1)
         continue
     print('T 90')
@@ -117,6 +124,27 @@ class FatalRecovery(unittest.TestCase):
         result = self.run_request(svc)
         self.assertEqual(e.proc.pid, pid)
         self.assertEqual((self.content(result), result[-1][1]['finish']), ('Z', 'stop'))
+
+    def test_the_request_after_a_fatal_error_starts_a_new_engine(self):
+        # the engine exits after ERR internal only once it has unwound: the request queued behind the failed one must
+        # start a new engine at once, not write into the dying one (EngineDied, a second failed request)
+        e = self.engine('slow-exit')
+        svc = self.service(e)
+        with self.assertRaises(EngineError):
+            self.run_request(svc)
+        self.assertFalse(e.alive())
+        self.assertIn('exited (code 1) after it reported: internal: CUDA error 700', e.death_note())
+        result = self.run_request(svc)
+        self.assertEqual((self.content(result), result[-1][1]['finish']), ('Z', 'stop'))
+
+    def test_a_fatal_error_while_a_stopped_request_drains(self):
+        e = self.engine('stopped')
+        svc = self.service(e)
+        gen = e.generate([1], 8, {}, threading.Event())
+        self.assertEqual(next(gen), 90)
+        gen.close()                                     # STOP; the engine fails and exits while it is drained
+        self.assertFalse(e.alive())
+        self.assertEqual(self.content(self.run_request(svc)), 'Z')
 
     def test_internal_error_after_the_first_tokens(self):
         e = self.engine('late')

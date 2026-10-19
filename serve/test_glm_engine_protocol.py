@@ -58,6 +58,8 @@ for line in sys.stdin:
     if line == "QUIT":
         break
     if not line.startswith("GEN "):
+        if line not in ("", "STOP"):                    # as strata-glm: an unknown command is answered
+            print("ERR unsupported command: " + line.split()[0])
         continue
     try:
         mode = open(os.environ["FAKE_MODE"], encoding="utf-8").read().strip()

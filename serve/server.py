@@ -873,6 +873,7 @@ class StrataEngine:
                     done = True
                     why = line[4:].strip()
                     if why.startswith("internal:"):       # the engine failed, not the request
+                        self._after_failure()
                         raise EngineError("the engine failed: " + why[len("internal:"):].strip())
                     raise ValueError(why)
         finally:
@@ -896,13 +897,45 @@ class StrataEngine:
                     except queue.Empty:
                         raise self._silent("the engine did not finish the request after it was stopped (STOP) "
                                            f"within {allow:.0f} s") from None
-                    if line is None or line.startswith("ERR"):
+                    if line is None:
+                        break
+                    if line.startswith("ERR"):
+                        if line[4:].strip().startswith("internal:"):
+                            self._after_failure()
                         break
                     if line.startswith("DONE"):
                         self._parse_done(line)
                         break
                     if not self.can_stop:
                         heard = time.monotonic()
+
+    ERR_PROBE_S = 60.0       # how long _after_failure waits for the engine to answer or to exit
+
+    def _after_failure(self) -> None:
+        """After `ERR internal:` the engine may exit (a CUDA fault: it cannot drop the request's state), but only once
+        it has unwound - seconds (a CUDA context, 100+ GB mapped) in which it still looks alive, so the next request
+        was written into the dying process and failed too (EngineDied).  An unknown command tells the two apart while
+        the turn is still held: an engine that carries on answers it at once (`ERR unsupported command: PING`), one
+        that is exiting never reads it and its output closes (the pump marks it ended).  One that does neither within
+        ERR_PROBE_S is ended here.  Either way the next request starts a new engine."""
+        try:
+            self.proc.stdin.write("PING\n")
+            self.proc.stdin.flush()
+        except OSError:
+            pass                                        # its input is closed: it is exiting, its output closes next
+        deadline = time.monotonic() + self.ERR_PROBE_S
+        while (left := deadline - time.monotonic()) > 0:
+            try:
+                line = self.lines.get(timeout=left)
+            except queue.Empty:
+                break
+            if line is None or line.startswith("ERR"):
+                return                                  # gone, or in step
+        self.ended = True
+        try:
+            self.proc.kill()
+        except OSError:
+            pass
 
     def _activity(self) -> tuple[float, int] | None:
         """#1317: (CPU seconds, I/O bytes) the engine process has used so far, or None when they cannot be read."""
