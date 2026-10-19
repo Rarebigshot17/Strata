@@ -67,7 +67,6 @@ from serve.responses import ResponsesError, error_body as responses_error_body  
 
 DEFAULT_PORT = 8101
 MODEL_NAME = "glm-5.3-flash"           # the model's name when its GGUF has no general.name
-ISSUES = "https://github.com/Rarebigshot17/Strata/issues"
 # GLM's turn ends: the reply is over when the model would write the end of the text, the user's turn or a tool's
 # result.  With the GGUF's own eos / eot / eom ids they are the server's stop ids and the engine's --eos-ids.
 END_OF_TURN = ("<|endoftext|>", "<|user|>", "<|observation|>")
@@ -761,15 +760,15 @@ class StrataEngine:
         proc = self.proc                                 # None while a restart has not started the next one yet
         rc = proc.poll() if proc is not None else None
         if rc is not None and rc >= 0 and self.last_err:  # its own last words on stdout: they say why
-            return (f"The engine exited (code {rc}) after it reported: {self.last_err} - please report it at "
-                    f"{ISSUES} with the log.")
+            return (f"The engine exited (code {rc}) after it reported: {self.last_err} - the engine's log has the "
+                    "rest.")
         # the engine's last line that is not the server's own or a cache summary: "strata-glm: ...", and the kernel
         # failures that exit at once ("glm gpu kernel ...", "glm prefill kernel ...", "kda_conv_rows: ...")
         last = next((x.strip() for x in reversed(tail.splitlines())
                      if x.strip() and not x.strip().startswith(("[strata]", "conversations:"))), "")
         if rc is not None and rc >= 0 and last:          # it ended by itself: its own last words say why (#215)
-            return (f"The engine exited (code {rc}). Its last log line: {last} - if that does not explain it, please "
-                    f"report it at {ISSUES} with the log.")
+            return (f"The engine exited (code {rc}). Its last log line: {last} - if that does not explain it, the "
+                    "engine's log has the rest (docs/TROUBLESHOOTING.md says what to keep).")
         return ("The usual cause is running out of RAM: Linux then ends the biggest program (check: sudo dmesg | "
                 "grep -i -E 'killed process|out of memory'). GLM-5.3-Flash reads its experts from the model files "
                 "through the page cache, but the engine's own buffers and the parked conversations (--park-mib) are "
@@ -1109,8 +1108,8 @@ class StrataEngine:
         """#481: end an engine that lost step with the server (its main thread waits for a command the server never
         sends), so the next request starts it again: killed now, its GPU and RAM go back with the process."""
         self.silent_note = ("The engine and the server lost step (a very slow PC can raise \"engine_silence_s\" in the "
-                            "config, 0 = wait forever). If it happens again, please report it with the end of the "
-                            f"engine log at {ISSUES}.")
+                            "config, 0 = wait forever). If it happens again, keep the end of the engine log: it "
+                            "shows where the engine stopped.")
         self.ended = True                               # not alive from now: the next request restarts it
         proc = self.proc
         try:
@@ -2543,8 +2542,8 @@ class Service:
             elif repeated:
                 print(f"[strata] the reply repeated one token ({self.tok.decode([run_tok])!r}) "
                       f"{run_len} times in a row: ended as \"length\" (repeat_stop_tokens in the run config; 0 "
-                      "turns this off). If a new request with a short prompt does the same, restart the server "
-                      "and report it (#606)", flush=True)
+                      "turns this off). If a new request with a short prompt does the same, restart the server; "
+                      "the engine's state is broken (#606)", flush=True)
         except GeneratorExit:                           # the client disconnected mid-stream
             finish = "disconnect"
             raise

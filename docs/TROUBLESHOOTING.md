@@ -211,7 +211,8 @@ While a request runs, the engine prints a line at least every few seconds (a tok
 heartbeat while it is busy). When it prints nothing for 300 seconds (longer while it reads the first part of a
 long prompt), the server takes it as lost and ends it; the next request starts it again. If that was a slow PC
 and not a hang, raise `"engine_silence_s"` in the run config (0 waits for ever). If it happens again on a working
-PC, please report it with the end of the engine log.
+PC, keep the end of the engine log ([what to collect](#what-to-collect-when-something-goes-wrong)): it shows where
+the engine stopped.
 
 **"the engine said nothing for N s and used no CPU or disk in that time (frozen ...)"**.
 The engine was silent for 90 seconds and did no work in that time, so the server ended it without waiting for the
@@ -337,9 +338,9 @@ Open WebUI runs in Docker, so `127.0.0.1` inside its container is the container 
 A request from inside the container answers when the address and the firewall are right, for example
 `docker exec <container> curl -s http://172.17.0.1:8101/health` (if its image has `curl`).
 
-## Opening an issue
+## What to collect when something goes wrong
 
-Search [the open issues](https://github.com/Rarebigshot17/Strata/issues) first, then open one with:
+To find out what happened (or to hand it to whoever helps), keep:
 
 - what you did, what you expected and what happened, with the exact message;
 - the commit (`git rev-parse --short HEAD`) and the engine version (`build_info` in
@@ -352,4 +353,4 @@ Search [the open issues](https://github.com/Rarebigshot17/Strata/issues) first, 
 - for a crash, the `dmesg` lines above.
 
 Leave out conversations and API keys. `STRATA_DEBUG=1` output contains parts of what was asked, so read it before
-you attach it.
+you pass it on.

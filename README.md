@@ -151,7 +151,7 @@ anything. On napster-ai (192 GB) setup recommends the 3-bit size.
   reaches the host at: `http://172.17.0.1:8101/v1` on Docker's default bridge, or `http://100.126.222.90:8101/v1`
   over Tailscale on napster-ai (the agents and the Discord bot can use that address too). Clients send the key as
   `Authorization: Bearer <key>` or `x-api-key`; the web page asks for it. Without a key, anyone who can reach the
-  port can use the model: [SECURITY.md](SECURITY.md).
+  port can use the model: [what the server exposes](docs/DETAILS.md#security).
 - **Thinking:** GLM-5.3-Flash thinks before it answers, or it does not. It has no levels. In the web app, open
   the sampling settings and choose Thinking **Off** or **On**. In the API, `reasoning_effort: "none"` turns it off,
   and low, medium and high all mean on. `"chat_template_kwargs": {"enable_thinking": false}` and
@@ -210,9 +210,9 @@ model servers under llama-swap: [docs/LLAMA_SWAP.md](docs/LLAMA_SWAP.md).
   host names it knows (an IP address always passes). Set an API key (see [Using it](#using-it)), or add the name to
   `"allowed_hosts"` in the run config.
 
-More problems and their fixes: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). Still stuck? Open an
-[issue](https://github.com/Rarebigshot17/Strata/issues) and attach the engine's log, `strata-glm-<size>.log` in the
-Strata folder. Found a security problem? Report it privately: [SECURITY.md](SECURITY.md).
+More problems and their fixes: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). Still stuck? Keep the engine's
+log, `strata-glm-<size>.log` in the Strata folder, and the server window's output:
+[what to collect](docs/TROUBLESHOOTING.md#what-to-collect-when-something-goes-wrong).
 
 ## How does it work?
 
