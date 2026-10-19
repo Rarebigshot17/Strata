@@ -629,12 +629,15 @@ class StrataEngine:
         of its log), else RAM."""
         if getattr(self, "silent_note", None):          # #481: the server ended it, not the OS or the engine itself
             return self.silent_note
-        tail = ""
+        tail, start = "", getattr(self, "log_start", 0)
         try:
             with open(self.log_path, "rb") as f:
                 f.seek(0, 2)
-                f.seek(max(0, f.tell() - 65536))  # its last words can sit behind many "conversations:" lines
+                at = max(start, f.tell() - 65536)  # its last words can sit behind many "conversations:" lines;
+                f.seek(at)                         # this run's only: the log keeps the earlier runs' last words
                 tail = f.read().decode("utf-8", "replace")
+                if at > start:
+                    tail = tail.partition("\n")[2]  # not a line cut in half
         except (OSError, TypeError):
             pass
         proc = self.proc                                 # None while a restart has not started the next one yet
@@ -642,7 +645,10 @@ class StrataEngine:
         if rc is not None and rc >= 0 and self.last_err:  # its own last words on stdout: they say why
             return (f"The engine exited (code {rc}) after it reported: {self.last_err} - please report it at "
                     f"{ISSUES} with the log.")
-        last = next((x.strip() for x in reversed(tail.splitlines()) if x.strip().startswith(("strata", "ERR"))), "")
+        # the engine's last line that is not the server's own or a cache summary: "strata-glm: ...", and the kernel
+        # failures that exit at once ("glm gpu kernel ...", "glm prefill kernel ...", "kda_conv_rows: ...")
+        last = next((x.strip() for x in reversed(tail.splitlines())
+                     if x.strip() and not x.strip().startswith(("[strata]", "conversations:"))), "")
         if rc is not None and rc >= 0 and last:          # it ended by itself: its own last words say why (#215)
             return (f"The engine exited (code {rc}). Its last log line: {last} - if that does not explain it, please "
                     f"report it at {ISSUES} with the log.")

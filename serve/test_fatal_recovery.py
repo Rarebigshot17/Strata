@@ -47,8 +47,14 @@ for line in sys.stdin:
             print('T 90')
         if mode == 'stopped':                           # fails while the stopped request is drained
             sys.stdin.readline()
-        print('ERR internal: CUDA error 700 (an illegal memory access was encountered)')
+        if mode != 'kernel':
+            print('ERR internal: CUDA error 700 (an illegal memory access was encountered)')
         if mode in ('internal', 'late'):
+            sys.exit(1)
+        if mode == 'kernel':                            # a failed kernel launch: glm gpu kernel's check() exits 1
+            sys.stderr.write('conversations: 0 parked, 0 checkpoints, 0.000 of 0.0 MiB\n')
+            sys.stderr.write('glm gpu kernel rms_norm: no kernel image is available for execution on the device\n')
+            sys.stderr.flush()
             sys.exit(1)
         if mode in ('slow-exit', 'stopped'):            # strata-glm unwinds first: a CUDA context, 100+ GB mapped
             time.sleep(2)
@@ -145,6 +151,21 @@ class FatalRecovery(unittest.TestCase):
         gen.close()                                     # STOP; the engine fails and exits while it is drained
         self.assertFalse(e.alive())
         self.assertEqual(self.content(self.run_request(svc)), 'Z')
+
+    def test_death_note_quotes_this_runs_last_engine_line(self):
+        # the log is kept across runs: an earlier run's last words must not explain this one's end, and the kernel
+        # failures (glm gpu kernel ..., glm prefill kernel ..., glm route: ..., kda_conv_rows: ...) are the engine's
+        log = self.root / 'engine.log'
+        log.write_text('strata-glm: cannot open /old/model-00001-of-00004.gguf\n', encoding='utf-8')
+        e = StrataEngine(str(self.script), ['--state', str(self.root / 'state'), '--mode', 'kernel'], log=str(log))
+        self.addCleanup(e.close)
+        with self.assertRaises(EngineDied):
+            list(e.generate([1], 8, {}, threading.Event()))
+        self.wait_dead(e)
+        note = e.death_note()
+        self.assertIn('exited (code 1)', note)
+        self.assertIn('glm gpu kernel rms_norm: no kernel image is available', note)
+        self.assertNotIn('/old/model', note)
 
     def test_internal_error_after_the_first_tokens(self):
         e = self.engine('late')
