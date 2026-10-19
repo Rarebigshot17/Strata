@@ -67,6 +67,14 @@ bool SamplingParams::set(const std::string& key, const std::string& value) {
 
 std::string SamplingParams::check(int64_t n_vocab) const {
     if (!bias_error.empty()) return bias_error;
+    // a draw needs finite weights: an infinite or NaN value, or a repetition penalty of 0 or below (a positive logit
+    // over 0 is infinite; a negative one turns a ban's -inf into +inf), leaves none, and a banned token can come out
+    const std::pair<const char*, float> values[] = {{"temperature", temperature},       {"top_p", top_p},
+                                                    {"min_p", min_p},                   {"penalty_repeat", penalty_repeat},
+                                                    {"penalty_freq", penalty_freq},     {"penalty_present", penalty_present}};
+    for (const auto& [key, v] : values)
+        if (!std::isfinite(v)) return std::string(key) + " must be a finite number";
+    if (penalty_repeat <= 0.0f) return "penalty_repeat must be above 0";
     int64_t banned = 0;
     for (const auto& [id, v] : logit_bias) {
         if (id < 0 || id >= n_vocab) return "logit_bias ID outside the vocabulary";

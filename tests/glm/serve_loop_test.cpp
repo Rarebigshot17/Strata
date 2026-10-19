@@ -297,6 +297,12 @@ int main() {
                l);
     }
     {
+        const auto l = run("plain", "GEN 1 penalty_repeat=0 1,2\nGEN 1 temperature=inf 1,2\n");
+        expect(has(l, "ERR penalty_repeat must be above 0") && has(l, "ERR temperature must be a finite number") &&
+                   !starts(l, "T "),
+               "sampling values that leave nothing to draw from are refused", l);
+    }
+    {
         // 4294967297 and -4294967295 are 1 in 32 bits
         const auto l = run("plain", "GEN 1 4294967297\nGEN 1 2,-4294967295\n");
         expect(count(l, "ERR malformed GEN line") == 2 && !starts(l, "T "),
