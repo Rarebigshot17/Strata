@@ -18,7 +18,7 @@ its design, its server and its web app, replaces the engine, and runs GLM-5.3-Fl
 | | |
 | --- | --- |
 | **Graphics cards** | **NVIDIA**, compute capability 7.5 or newer (GeForce RTX 20 series and newer). One card or several: the model's layers are split over them. Driver **580** or newer: setup stops with an older one. |
-| **RAM** | Every expert of the model stays in RAM: about 117 GB at 3-bit, about 162 GB at 4-bit (calculated). Setup wants at least 12 GB left beside them for Linux and the server, and recommends a size only when 40 GB are left. So about **130 GB** at the least for the 3-bit size and about **175 GB** for the 4-bit size. [Which size](#which-size-should-i-pick). |
+| **RAM** | Every expert of the model stays in RAM: about 117 GB at 3-bit, about 162 GB at 4-bit (calculated). Setup wants at least 12 GB left beside them for Linux and the server, and calls a size a good fit when 40 GB are left. So about **130 GB** at the least for the 3-bit size and about **175 GB** for the 4-bit size. [Which size](#which-size-should-i-pick). |
 | **Disk** | About 120 GB free for the 3-bit download, about 170 GB for the 4-bit one, and about 10 GB more when setup installs the CUDA toolkit. An SSD helps: the first start after a reboot reads every expert from it. |
 | **System** | **Linux** only: setup stops on any other system. A CPU with **AVX2**: without it setup warns, because the experts the cards do not hold run on the CPU. |
 
