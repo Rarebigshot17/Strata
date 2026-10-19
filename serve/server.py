@@ -4109,7 +4109,16 @@ def make_handler(svc: Service):
                 check_request_sampling(req)                   # the request is also the sampling dict (see below)
             except ValueError as e:                           # its message starts with the field's name: the param
                 raise ResponsesError(str(e), str(e).partition(":")[0]) from None
+            vocab = len(getattr(svc.tok, "tokens", ())) or None
+            try:
+                bias_api.normalize(req.get("logit_bias"), vocab)   # ... and so is a bad logit_bias, as on chat
+            except ValueError as e:
+                raise ResponsesError(str(e), "logit_bias") from None
             svc.load()
+            try:
+                bias_api.validate_request(req, svc.engine, vocab)  # an engine that takes no biases: known once loaded
+            except ValueError as e:
+                raise ResponsesError(str(e), "logit_bias") from None
             # #924 (opt-in): a Codex compaction request is rendered with its conversation's tools, so its prompt
             # starts as the cached one did; the parser and the response keep the request's own tools
             shown = responses_api.prompt_tools(req, tools) if svc.codex_compaction_cache else tools
@@ -4144,6 +4153,7 @@ def make_handler(svc: Service):
             messages, tools, kw = anthropic_to_messages(req, svc.anthropic_think_unasked)
             stop_strings(req)                                 # the same 400 as the request itself would get
             check_request_sampling(req)                       # ... likewise a sampling field of the wrong type
+            bias_api.normalize(req.get("logit_bias"), len(getattr(svc.tok, "tokens", ())) or None)   # ... and a bias
             self._json(200, {"input_tokens": len(svc.encode_prompt(messages, tools, kw))})
 
         def _anthropic(self, req):
@@ -4157,7 +4167,10 @@ def make_handler(svc: Service):
             svc.reasoning_budget(req)                         # a bad value is a 400 before anything is sent
             stop_strings(req)                                 # ... and so is a bad stop / stop_sequences
             check_request_sampling(req)                       # ... and a sampling field of the wrong type
+            # ... and a bad logit_bias (the request is the sampling: unchecked, the engine refused it mid-stream)
+            bias_api.normalize(req.get("logit_bias"), len(getattr(svc.tok, "tokens", ())) or None)
             svc.load()                                        # only now: a refused request does not load the model
+            bias_api.validate_request(req, svc.engine, len(getattr(svc.tok, "tokens", ())) or None)
             ids, thinking, max_new = svc.prepare(messages, tools, kw, max_new, force=force)
             cancel = threading.Event()
             self._watch_client(cancel)                       # #430 #431

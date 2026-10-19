@@ -59,3 +59,47 @@ class LogitBias(unittest.TestCase):
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+    def test_every_route_checks_it_before_the_answer(self):
+        # /v1/messages and /v1/responses pass the request on as the sampling too: a bad bias failed in the engine,
+        # after a stream had started
+        tok = ByteTokenizer()
+        engine = MockEngine(tok, 'ok', max_context=4096)
+        service = Service(engine, tok, ChatTemplate(Path(__file__).parent/'chat_template.jinja'))
+        httpd = serve(service, port=0)
+        base = f'http://127.0.0.1:{httpd.server_address[1]}'
+        msgs = [{'role': 'user', 'content': 'hi'}]
+        routes = {'/v1/chat/completions': {'messages': msgs, 'max_tokens': 2},
+                  '/v1/completions': {'prompt': 'hi', 'max_tokens': 2},
+                  '/v1/messages': {'messages': msgs, 'max_tokens': 2},
+                  '/v1/messages/count_tokens': {'messages': msgs},
+                  '/v1/responses': {'input': 'hi', 'max_output_tokens': 16}}
+
+        def post(path, body):
+            req = urllib.request.Request(base + path, data=json.dumps(body).encode(),
+                                         headers={'Content-Type': 'application/json'})
+            try:
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    return response.status, response.read().decode()
+            except urllib.error.HTTPError as e:
+                with e:
+                    return e.code, e.read().decode()
+        try:
+            for path, body in routes.items():
+                for bias in [True, [[1, True]], {'999999999999': 1}, {'1': -100}]:   # the last: no logit_bias=1
+                    if path.endswith('count_tokens') and bias == {'1': -100}:
+                        continue                                  # counting runs no engine
+                    with self.subTest(path=path, bias=bias):
+                        code, text = post(path, {**body, 'stream': True, 'logit_bias': bias})
+                        self.assertEqual(code, 400, text)
+                        error = json.loads(text)['error']
+                        self.assertIn('logit_bias', error['message'])
+                        if path == '/v1/responses':
+                            self.assertEqual(error.get('param'), 'logit_bias')
+            engine.info = {'logit_bias': 1}                       # an engine that takes them: served
+            for path, body in routes.items():
+                with self.subTest(path=path, bias='valid'):
+                    self.assertEqual(post(path, {**body, 'logit_bias': {'1': -100}})[0], 200)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()

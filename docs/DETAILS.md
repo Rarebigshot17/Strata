@@ -114,7 +114,7 @@ recommendation, temperature 1.0 and top_p 0.95 ([Settings](#sampling-defaults)).
 | `frequency_penalty`, `presence_penalty` | finite numbers | 0 is off |
 | `penalty_last_n` (also `repeat_last_n`) | a whole number up to 2,147,483,647 | the window of the three penalties; 64 when a penalty is on and no window is given |
 | `seed` | a whole number from 1 to 2^64-1 | the same seed and request give the same draw; unset, 0 or negative is random |
-| `logit_bias` | token id -> -100..100 | a per-request token bias, checked before the answer starts on `/v1/chat/completions` and `/v1/completions` ([LOGIT_BIAS.md](LOGIT_BIAS.md)) |
+| `logit_bias` | token id -> -100..100 | a per-request token bias, checked before the answer starts on every route ([LOGIT_BIAS.md](LOGIT_BIAS.md)) |
 
 A value of the wrong type or out of range is a 400 that names the field (`top_p: a number from 0 to 1`). That
 includes NaN and Infinity (which JSON parsers in Python accept), `true` for a number, a number with a decimal point
