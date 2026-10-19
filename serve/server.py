@@ -555,8 +555,17 @@ class StrataEngine:
             except OSError:
                 pass
         self.max_context = 0                             # before the new process is visible: never its predecessor's
-        self.proc = subprocess.Popen([exe, "--serve", *args], cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=self.log, text=True, encoding="utf-8", bufsize=1, env=env)
+        try:
+            self.proc = subprocess.Popen([exe, "--serve", *args], cwd=cwd, stdin=subprocess.PIPE,
+                                         stdout=subprocess.PIPE, stderr=self.log, text=True, encoding="utf-8",
+                                         bufsize=1, env=env)
+        except OSError as e:                             # missing, not executable, being rebuilt (update.sh)
+            loading.set()                                # the narrator stops, and our handle on the log goes
+            if log:
+                self.log.close()
+            # EngineDied, as for a start that ends before READY: a request loading it gets a 503 that says why
+            # (an OSError there read as the client's disconnect: no answer at all), and restart() tries again
+            raise EngineDied(f"the engine could not be started: {e}") from None
         contain(self.proc)                               # ends with the server, however it ends (Windows)
         # the READY read has a timeout (#1317): the lines come from a thread, up to READY, so the rest of the stream
         # stays for _pump (one reader at a time)
@@ -710,7 +719,8 @@ class StrataEngine:
                     break
                 except RuntimeError:
                     try:
-                        self.proc.wait(timeout=60)
+                        if self.proc is not None:       # None: it could not be started at all
+                            self.proc.wait(timeout=60)
                     except (subprocess.TimeoutExpired, OSError):
                         pass
                     if i == tries - 1:

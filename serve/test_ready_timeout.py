@@ -4,7 +4,6 @@ import os
 from pathlib import Path
 import sys
 import tempfile
-import threading
 import time
 import unittest
 import json
@@ -102,6 +101,36 @@ class ReadyTimeout(unittest.TestCase):
         hang.touch()                                             # and its restart never reports READY
         self.assert503(base)
         self.assertFalse(svc.engine.starting)
+
+
+class SpawnFailure(unittest.TestCase):
+    """The engine's program cannot be run (missing, not executable, being rebuilt by update.sh): the start ends
+    cleanly - the start's narrator stops, the log is closed, and the request that was loading it gets a 503 that says
+    why, not a dropped connection."""
+
+    def test_a_missing_engine_on_restart(self):
+        root = Path(tempfile.mkdtemp()); self.addCleanup(lambda: __import__('shutil').rmtree(root, True))
+        narrators = []
+        with mock.patch.object(server, 'narrate_start', lambda *a, **k: narrators.append(a[3])), \
+                mock.patch.object(StrataEngine, 'RESTART_RETRY_S', 0.0), mock.patch('builtins.print'):
+            eng = StrataEngine(str(root / 'no-such-engine'), [], log=str(root / 'engine.log'), lazy=True)
+            self.addCleanup(eng.close)
+            svc = Service(eng, ByteTokenizer(), ChatTemplate(Path(__file__).parent / 'chat_template.jinja'))
+            httpd = serve(svc, port=0)
+            self.addCleanup(httpd.server_close); self.addCleanup(httpd.shutdown)
+            req = urllib.request.Request(f'http://127.0.0.1:{httpd.server_address[1]}/v1/chat/completions',
+                                         data=json.dumps({'messages': [{'role': 'user', 'content': 'hi'}],
+                                                          'max_tokens': 8}).encode(),
+                                         headers={'Content-Type': 'application/json'})
+            with self.assertRaises(urllib.error.HTTPError) as c:
+                urllib.request.urlopen(req, timeout=30)
+        with c.exception as e:
+            self.assertEqual(e.code, 503)
+            self.assertIn('no-such-engine', e.read().decode())
+        self.assertEqual(len(narrators), 3)                      # restart's three tries
+        self.assertTrue(all(done.is_set() for done in narrators), 'a narrator still says "still starting"')
+        self.assertTrue(eng.log.closed)
+        self.assertFalse(eng.starting)
 
 
 if __name__ == '__main__':
