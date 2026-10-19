@@ -25,9 +25,9 @@ The server listens on `http://127.0.0.1:8101` (setup's `--port` changes the port
 | OpenAI (Chat Completions, Completions, Responses) | `http://127.0.0.1:8101/v1` |
 | Anthropic (Messages) | `http://127.0.0.1:8101` (the client adds `/v1/messages`) |
 
-Any model name is accepted. The answer carries the model's own name (the GGUF's `general.name`, else
-`glm-5.3-flash`; the run config's `"model_name"` overrides it), or an alias when the request names one (see
-`"aliases"` under [Settings](#settings)).
+Any model name is accepted. The answer carries the model's own name (the run config's `"model_name"`, which setup
+writes as `glm-5.3-flash`; without it the GGUF's `general.name`, else `glm-5.3-flash`), or an alias when the request
+names one (see `"aliases"` under [Settings](#settings)).
 
 ```bash
 curl http://127.0.0.1:8101/v1/chat/completions -H "Content-Type: application/json" -d '{
@@ -56,7 +56,7 @@ query string and trailing slash are ignored, so `/v1/messages?beta=true` is `/v1
 | POST | `/v1/messages/count_tokens` | Anthropic's token count, `{"input_tokens": N}`: the prompt is rendered and tokenized, the model does not run | yes |
 | POST | `/v1/responses` | OpenAI Responses, stateless ([below](#the-responses-api-and-codex-cli)) | yes |
 | POST | `/v1/responses/<id>...` | 404: the server keeps no responses | yes |
-| GET | `/v1/models` (also `/models`) | The model and its aliases, with `meta.n_ctx` and `status` (`loaded`, `unloaded` or `loading`) | yes |
+| GET | `/v1/models` (also `/models`) | The model and its aliases, with `meta.n_ctx` and `status.value` (`loaded`, `unloaded` or `loading`) | yes |
 | GET | `/health` (also `/api/health`) | `{"status": "ok", "model", "max_context", "loaded", "api_key" (whether one is needed), "images": false, "service": "strata"}` | no |
 | GET | `/status` | What the model is doing now: busy, queued, phase, prompt tokens, tokens so far, the end of the running answer | yes |
 | GET | `/v1/status` | What the server is: model, context, loaded, the APIs, structured-output support, the last request's timings, GPU and RAM | yes |
@@ -90,10 +90,11 @@ Messages:
   and `tool` messages; content as a string or text parts. A system message that is not the first becomes a user
   message in place, so the start of the prompt stays the same from turn to turn.
 - Anthropic: `system` (a string or text blocks), and `text`, `thinking`, `tool_use` and `tool_result` blocks.
-  Claude Code's billing header at the start of its system prompt (`cch=...`, the 4th part of `cc_version=`) changes
-  on every request; the server pins both stamps to `f`s, as llama.cpp does, so the prompt start stays the same.
+  Claude Code's billing header at the start of its system prompt changes (`cch=...` on every request, the 4th part
+  of `cc_version=` on every session); the server pins both stamps to `f`s, as llama.cpp does, so the prompt start
+  stays the same.
 - GLM-5.3-Flash reads text only: a picture in a message is a 400. A picture inside a tool's result becomes the note
-  `[image omitted: this model reads text only]`, so a conversation with one keeps working.
+  `[image omitted: the model reads text only]`, so a conversation with one keeps working.
 - A tool list that comes back with the same tools in another order is put back in the order first seen, so the
   prompt start (the template writes the tools first) does not change.
 
@@ -107,7 +108,7 @@ recommendation, temperature 1.0 and top_p 0.95 ([Settings](#sampling-defaults)).
 | --- | --- | --- |
 | `temperature` | a number >= 0 | 0 is greedy (always the most likely token) |
 | `top_p` | 0 to 1 | 1 is off |
-| `top_k` | a whole number up to 2,147,483,647 | 0 (or more than the vocabulary) is off; a negative value counts as unset |
+| `top_k` | a whole number up to 2,147,483,647 | 0 (or more than the vocabulary) is off; a negative value is not passed on, so the engine's default (off) applies |
 | `min_p` | 0 to 1 | 0 is off |
 | `repetition_penalty` (also `repeat_penalty`) | a number > 0 | 1 is off |
 | `frequency_penalty`, `presence_penalty` | finite numbers | 0 is off |
@@ -116,10 +117,10 @@ recommendation, temperature 1.0 and top_p 0.95 ([Settings](#sampling-defaults)).
 | `logit_bias` | token id -> -100..100 | a per-request token bias, checked before the answer starts on `/v1/chat/completions` and `/v1/completions` ([LOGIT_BIAS.md](LOGIT_BIAS.md)) |
 
 A value of the wrong type or out of range is a 400 that names the field (`top_p: a number from 0 to 1`). That
-includes NaN and Infinity (which JSON parsers in Python accept), `true` for a number, a fraction for a whole number,
-and a whole number too large for the engine. A number sent as a string (`"0.7"`) is read as that number. The engine
-applies the bias, then the penalties, then top-k, top-p and min-p (both at temperature 1), and draws at the
-temperature.
+includes NaN and Infinity (which JSON parsers in Python accept), `true` for a number, a number with a decimal point
+(even `40.0`) for a whole number, and a whole number too large for the engine. A number sent as a string (`"0.7"`)
+is read as that number. The engine applies the bias, then the penalties, then top-k, top-p and min-p (both at
+temperature 1), and draws at the temperature.
 
 #### Output length and the context
 
@@ -144,8 +145,8 @@ never sent. A bad value is a 400 before anything runs.
 #### Thinking
 
 GLM-5.3-Flash thinks before it answers by default. Its chat template has no effort levels: thinking is on or off.
-So `low`, `medium` and `high` (also `xhigh`, `max`) mean "on", and `none`, `off`, `minimal`, `disabled` mean "off".
-Any other value is a 400.
+So `low`, `medium` and `high` (also `xhigh`, `max`, `maximum`) mean "on", and `none`, `off`, `minimal`, `disabled`
+and `false` mean "off". Any other value is a 400.
 
 | API | Thinking off | Thinking on |
 | --- | --- | --- |
@@ -236,7 +237,8 @@ Further rules:
 - With no tools declared, or `tool_choice` `"none"`, nothing becomes a call: the tags are text.
 - Only a declared tool's name followed by `<arg_key>` or `</tool_call>` is a call; anything else after `<tool_call>`
   is prose.
-- A `<tool_call>` inside a code fence, inline code or a `> ` quote line is text.
+- A `<tool_call>` inside a code fence or inline code is text. Inside the thinking, one on a `> ` quote line is text
+  too; in the answer a `> ` line does not stop a call.
 - A call written inside the thinking is held. It becomes a call only when `</think>` or the end of the turn follows it
   (only whitespace or more calls between); any other text after it means it was quoted, and it stays thinking. A turn
   cut off by its output cap keeps such calls as thinking.
@@ -339,8 +341,8 @@ fields, `logit_bias`, `stream` and `stream_options` work as on the chat route; w
 | 502 | A structured answer failed its check |
 | 503 | The engine is starting, died, or cannot be started (too little free VRAM, a failed `before_load`), its output went non-finite twice, or too many large bodies are in the server; often with `Retry-After` |
 
-Errors are `{"error": {"type", "message"}}`; on `/v1/responses` they have the Responses form `{"error": {"message",
-"type", "param", "code"}}`. An engine that died is started again by the next request.
+Errors are `{"error": {"message", ...}}`, most with a `type` as well; on `/v1/responses` they have the Responses form
+`{"error": {"message", "type", "param", "code"}}`. An engine that died is started again by the next request.
 
 ### The Responses API and Codex CLI
 
@@ -393,7 +395,7 @@ show_raw_agent_reasoning = true         # show the model's thinking (it writes n
 name = "Strata (local)"
 base_url = "http://127.0.0.1:8101/v1"
 wire_api = "responses"
-stream_idle_timeout_ms = 600000         # a long first prompt can take minutes to read
+stream_idle_timeout_ms = 600000         # room for reading a long first prompt (prompt speed is not measured yet)
 # env_key = "STRATA_API_KEY"            # only if the server has an API key: the variable that holds it
 ```
 
@@ -407,9 +409,9 @@ model. Codex with Strata's GLM engine has not been tried yet.
   container sees it (`172.17.0.1` on Docker's default bridge), or the machine's Tailscale address; both need the
   server to listen beyond 127.0.0.1 ([Security](#security)).
 - **Claude Code**: `ANTHROPIC_BASE_URL=http://127.0.0.1:8101`, `ANTHROPIC_AUTH_TOKEN` set to the API key (any text
-  without one), and `ANTHROPIC_MODEL` set to a model name Claude Code accepts; Strata answers whatever the name. It
-  sends an effort with every request, which means "think" here; `"reasoning_budget_tokens"` in the run config caps
-  the thinking.
+  without one), and `ANTHROPIC_MODEL` set to a model name Claude Code accepts; Strata answers whatever the name. The
+  upstream project saw it send an effort (`output_config.effort`) with every request; any level but `none` means
+  "think" here. `"reasoning_budget_tokens"` in the run config caps the thinking.
 - **OpenCode** and other OpenAI-compatible agents: base URL `http://127.0.0.1:8101/v1`; set the client's context
   limit to the context chosen in setup, and keep its output limit well under it (or set `"fit_max_tokens": true`).
 - **Zed's llama.cpp provider** reads `/props` and offers tools from `chat_template_caps`. Its generic OpenAI provider
@@ -600,8 +602,9 @@ instead, see [LLAMA_SWAP.md](LLAMA_SWAP.md).
 `--open`. The other options: `--host`, `--port` (default 8101), `--gpu` (one card or a list, as nvidia-smi numbers
 them), `--chat-template FILE`, `--api-key` (also `STRATA_API_KEY`), `--mcp-config FILE`, `--lazy`, `--api-monitor`,
 `--idle-unload SECONDS`, `--min-free-vram-mib N`, `--before-load CMD` and `--fit-max-tokens`. Each has a run config
-key, except `--port`, which the start script passes (`--open` has `"open_browser"`). `--engine mock` runs a scripted
-stand-in for the model (`--script TEXT`), for trying clients without a GPU.
+key, except `--port`, which the start script passes (`--open` has `"open_browser"`). `--engine mock`, the default
+when `--engine` is not given, runs a scripted stand-in for the model (`--script TEXT`), for trying clients without a
+GPU.
 
 ### Environment variables
 
@@ -633,12 +636,12 @@ are the start of the new prompt. To keep each client's conversation anyway, the 
   request that waits its turn, so between two rounds another client's request may run; its conversation is then
   parked and resumed.
 - **Checkpoints.** The server tells the engine where each reply begins (`cp=` on the engine's `GEN` line: the prompt
-  without the generation prompt `<|assistant|><think>`). The next turn renders the earlier reply without its thinking,
-  so it differs from the engine's state from that point on; the engine restarts from the checkpoint and reads the reply
-  and the new message, not the whole conversation. A regenerated reply restarts there too. The engine keeps the two
-  latest checkpoints per conversation, and none closer than 256 tokens to the start (`--checkpoint-min`). The engine's
-  line protocol (`GEN` with `cp=`, `end=`, `logit_bias=` and the sampling keys) is in
-  [GLM53_SERVER_PORT.md](GLM53_SERVER_PORT.md).
+  without the generation prompt `<|assistant|><think>`). Once a user message follows, the template renders the earlier
+  reply without its thinking, so the prompt differs from the engine's state from that point on; the engine restarts
+  from the checkpoint and reads the reply and the new message, not the whole conversation. A regenerated reply
+  restarts there too. The engine keeps the two latest checkpoints per conversation, and none closer than 256 tokens
+  to the start (`--checkpoint-min`). The engine's line protocol (`GEN` with `cp=`, `end=`, `logit_bias=` and the
+  sampling keys) is in [GLM53_SERVER_PORT.md](GLM53_SERVER_PORT.md).
 - **Memory.** `--park-mib` (engine default 8192; setup writes 8192, or 4096 when less than 40 GB of RAM is left
   beside the experts) caps what parked conversations and checkpoints use. The conversation used least recently goes
   first, then the live one's older checkpoints.
@@ -651,8 +654,10 @@ says `... more than --park-mib; not kept`): when another client takes a turn, it
 its next request reads its prompt again from the start. A 1,048,576-token conversation needs `--park-mib` of about
 12,000 or more to be parked, and that RAM must be free beside the experts.
 
-None of this changes the answers: `tools/glm53_park_check.py` checks each resumed reply against a fresh engine's,
-token for token (on the CPU reference engine with small random models).
+On the CPU reference engine this does not change the answers: `tools/glm53_park_check.py` checks each resumed reply
+against a fresh engine's, token for token (with small random models). On the GPU engine, chunked prompts and the
+expert cache change the rounding, so a resumed reply may differ from a fresh one in its later tokens; that check has
+not run on a GPU yet.
 
 The **Conversation cache** card in the Monitor tab shows: the parked conversations and checkpoints and the RAM they
 use against `--park-mib`; how many requests reused part of their prompt; the last request's reused tokens of its
@@ -814,6 +819,6 @@ For reporting a security problem, see [SECURITY.md](../SECURITY.md).
 - **Engine watchdogs.** A running request whose engine says nothing for `engine_silence_s` (300 s; longer while a
   prompt chunk is read) ends with an error, and the next request starts the engine again. An engine that is silent
   for 90 s with no CPU time, no disk I/O and an idle GPU is ended as frozen (`STRATA_ENGINE_STALL_S`, needs psutil).
-  A starting engine must say `READY` within 900 s of its last warm-up progress (`STRATA_ENGINE_READY_S`); the warm-up
-  that reads the experts into memory before `READY` counts as progress while it moves on. How long the warm-up takes
-  on the real model is not measured yet.
+  A starting engine must say `READY` within 900 s (`STRATA_ENGINE_READY_S`); while the warm-up that reads the experts
+  into memory before `READY` moves on (its progress lines in the engine log), the 900 s count from its latest line.
+  How long the warm-up takes on the real model is not measured yet.
