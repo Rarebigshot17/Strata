@@ -187,8 +187,8 @@ What to know about them:
   `./setup.sh --setup --model UD-IQ3_XXS --context 262144`. Without `--setup`, `--model` or `--no-start`, setup
   starts the installed model and `--context` has no effect.
 - **`--setup --yes` takes the recommended answers again.** Name the size, the context and the parking RAM you want
-  (`--model ... --context ... --park-mib ...`), or setup picks its own. Keys you added to the run config by hand are kept
-  ([The run config](#the-run-config)), but `host`, `api_key`, `gpu` and `port` are written from this run's options
+  (`--model ... --context ... --park-mib ...`), or setup picks its own. Keys you added to the run config by hand are
+  kept ([The run config](#the-run-config)), but `host`, `api_key`, `gpu` and `port` are written from this run's options
   only: give `--host`, `--api-key`, `--gpus` and `--port` again, or the model listens on 127.0.0.1:8101 without a key
   on every usable GPU. The earlier config is kept as `strata-glm-<size>.json.bak`.
 - **`--gguf-dir`** takes shards you downloaded yourself (for example with `hf download`), also in a sub-folder. Setup
@@ -350,7 +350,7 @@ server adds `--serve`, `--split` from the config's `split` key, and `--eos-ids` 
 | Option | What it does | Default |
 | --- | --- | --- |
 | `-m FILE` | The model's first GGUF shard. The engine finds the others beside it. | Required. |
-| `--ctx N` | The longest conversation in tokens, up to 1,048,576 ([Choosing the context](#choosing-the-context)). | 32768 |
+| `--ctx N` | The longest conversation in tokens ([Choosing the context](#choosing-the-context)). The model's trained context is 1,048,576, and setup takes no more; the engine itself does not check it. | 32768 |
 | `--park-mib N` | RAM in MiB for parked conversations and checkpoints. 0 = none (every switch of conversation reads the new one from the start). | 8192 |
 | `--checkpoint-min N` | No checkpoint closer than N tokens to the start of a conversation. | 256 |
 | `--expert-profile FILE` | The expert use scores: loaded at start (the VRAM cache starts full), written when the engine ends cleanly. | None |
@@ -405,7 +405,7 @@ explained in [DETAILS.md](DETAILS.md#settings). Keys the server does not know ar
 | `api_monitor` | `true`: keep the last 100 requests' prompts and answers in memory for `/api-monitor` (also `--api-monitor`). | `false` |
 | `mcp_servers` (or `mcpServers`) | MCP servers whose tools the web app's chat can use, in Claude Desktop's format (also `--mcp-config FILE`). Their URLs are shown and logged without user name, password, query or fragment. | None |
 | `mcp_for_api` | `true`: API clients may use those MCP tools too (their requests send `"strata_mcp": true`). Without it only Strata's own page can. | `false` |
-| `mcp` | `timeout_s`, `start_timeout_s`, `max_result_chars`, `max_rounds` for those MCP servers. | |
+| `mcp` | Settings for those MCP servers: `timeout_s` (a tool call), `start_timeout_s` (a server's start), `max_result_chars` (a tool result's text), `max_rounds` (tool rounds in one reply). | 60, 120, 20000, 8 |
 | `codex_thread_titles`, `codex_compaction_cache` | Two opt-in helpers for Codex CLI on `/v1/responses`. | `false` |
 | `prevent_sleep` | Windows only: on Linux the server says so and ignores it. | `false` |
 
@@ -435,8 +435,10 @@ when the attention cache would take more than half of the chosen cards' VRAM; it
 expert cache slows the answers is not measured yet.
 
 A long context also costs RAM when a conversation is parked (several clients taking turns,
-[below](#parking-and-several-clients)): about 0.15 GB for the KDA state plus 11 KB per token. Calculated: about 1.6 GB for a 128K-token conversation, about
-6.1 GB for 512K, about 12 GB for 1M.
+[below](#parking-and-several-clients)): about 0.15 GB for the KDA layers' state, plus about 11.6 KB per token (the
+11 KB latent and, at most, 0.35 KB of the indexer's pooled keys). Calculated: about 1.7 GB for a 128K-token
+conversation, about 6.2 GB for 512K, about 12.3 GB for 1M. The KDA figure assumes a short-convolution width of 4,
+which is read from the model's file; it is not checked on the real GGUF yet.
 
 To change the context of an installed model: `./setup.sh --setup --model <size> --context <tokens>`, or edit `--ctx` in
 the config's `args` and restart.
@@ -490,9 +492,10 @@ has not been run there yet):
 - **Clients:** four agents, a chat and a Discord bot take turns on the one engine. With contexts of 512K-1M tokens,
   the default `--park-mib 8192` keeps at most one 512K conversation and no 1M one
   ([Parking](#parking-and-several-clients)).
-- **Other devices** (over Tailscale, 100.126.222.90): set `--host 0.0.0.0 --api-key <secret>`. A host name such as a
-  Tailscale MagicDNS name works with an API key; without a key it must be added to `allowed_hosts`. See
-  [SECURITY.md](../SECURITY.md).
+- **Other devices** (over Tailscale, 100.126.222.90): set `--host 0.0.0.0 --api-key <secret>`. `--host
+  100.126.222.90` instead listens on the Tailscale address only; the apps on napster-ai itself then use that address
+  too, since 127.0.0.1 no longer answers. A host name such as a Tailscale MagicDNS name works with an API key; without
+  a key it must be added to `allowed_hosts`. See [SECURITY.md](../SECURITY.md).
 
 A command for a first install there, without questions, with the cards named in nvidia-smi's order:
 
@@ -555,7 +558,8 @@ Before you enable it:
 ```
 
 In a git clone it runs `git pull --ff-only`, then `./setup.sh --update`: the Python packages, and the engine compiled
-again when its source changed. It asks nothing, does not touch the model files and does not start the model. Options
+again when its source changed. It asks nothing (unless the C++ compiler or the CUDA toolkit has gone missing: then
+it asks to install them), does not touch the model files and does not start the model. Options
 go on to `setup.py` (`./update.sh --build` compiles the engine even when it is up to date). A running server keeps the
 engine it started; restart the model to use the new one. If `git pull` fails (files you changed can stop it), nothing
 is updated and it says so. If the new engine does not compile, the one you had stays and still starts.
@@ -662,7 +666,8 @@ And start the server from the Strata folder:
 ```
 
 The server's own options (`.venv/bin/python serve/server.py --help`): `--engine` (`strata`, or `mock`: a scripted
-engine and no model, for trying clients), `--config`, `--host`, `--port` (default 8101), `--api-key`, `--gpu`,
+engine and no model, for trying clients, with `--script` for its answers; `mock` is the default, so always pass
+`--engine strata` for the model), `--config`, `--host`, `--port` (default 8101), `--api-key`, `--gpu`,
 `--chat-template`, `--open`, `--fit-max-tokens`, `--mcp-config`, `--lazy`, `--api-monitor`, `--idle-unload`,
 `--min-free-vram-mib`, `--before-load`. Most have a config key too ([The run config](#the-run-config)). What the API
 offers: [DETAILS.md](DETAILS.md#the-api). When something does not work: [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
