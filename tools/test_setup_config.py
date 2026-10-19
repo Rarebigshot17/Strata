@@ -100,6 +100,22 @@ class CarryOver(unittest.TestCase):
             self.assertFalse((Path(d) / f"{CONFIG}.bak").exists())
             self.assertEqual(json.loads(p.read_text(encoding="utf-8")), got)
 
+    def test_a_linked_config_keeps_its_bak_beside_the_file_it_points_at(self):
+        """#1244: in the Docker image the config is a link into the /data volume (REINSTALL=1 runs setup over it):
+        the .bak goes beside the real file, on the volume, and the link stays."""
+        with tempfile.TemporaryDirectory() as d:
+            vol, opt = Path(d) / "data", Path(d) / "opt"
+            vol.mkdir()
+            opt.mkdir()
+            real = vol / CONFIG
+            real.write_text(json.dumps({"exe": "e", "args": []}), encoding="utf-8")
+            (opt / CONFIG).symlink_to(real)
+            quiet(setup.write_setup_config, opt / CONFIG, {"exe": "e2", "args": []})
+            self.assertTrue((opt / CONFIG).is_symlink())
+            self.assertEqual(json.loads(real.read_text(encoding="utf-8"))["exe"], "e2")
+            self.assertEqual(json.loads((vol / f"{CONFIG}.bak").read_text(encoding="utf-8"))["exe"], "e")
+            self.assertEqual([x.name for x in opt.iterdir()], [CONFIG])
+
     def test_an_unreadable_earlier_config_is_replaced_with_a_copy(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / CONFIG

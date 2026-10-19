@@ -871,6 +871,21 @@ class RunScriptAndStart(unittest.TestCase):
                       f"{cfg_path} --port 8101 --open", text)
         self.assertNotIn("--open", setup.write_run_script("glm-ud-iq3_xxs", cfg_path, 8101, False).read_text())
 
+    def test_a_linked_config_is_given_to_the_server_where_it_points(self):
+        """#1244: in the Docker image the config is a link into the /data volume.  The server gets the real file, so
+        the Settings view's .bak and the Chat settings it shares with other apps (<config>.shared-settings.json) are
+        kept beside it on the volume, not in the container."""
+        real = self.root / "data" / "strata-glm-ud-iq3_xxs.json"
+        real.parent.mkdir()
+        real.write_text(json.dumps(self.cfg), encoding="utf-8")
+        link = self.root / "strata-glm-ud-iq3_xxs.json"
+        link.symlink_to(real)
+        cmd = setup.server_command(link, 8101, False)
+        self.assertEqual(cmd[cmd.index("--config") + 1], os.path.realpath(real))
+        plain = self.root / "strata-glm-iq4_xs.json"
+        cmd = setup.server_command(plain, 8101, False)
+        self.assertEqual(cmd[cmd.index("--config") + 1], str(plain))       # a file that is no link: as it is
+
     def start(self, port=None, gpu=None, keep=None, cfg=None):
         p = self.root / "strata-glm-ud-iq3_xxs.json"
         p.write_text(json.dumps({**self.cfg, **(cfg or {})}), encoding="utf-8")

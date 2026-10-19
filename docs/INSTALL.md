@@ -610,9 +610,9 @@ docker run -d --name strata --gpus all \
 - **The first start** runs setup with these choices, `--no-browser`, `--no-start` and `--yes`, and keeps the config on
   the volume. Later starts go straight to the server. `-e REINSTALL=1` runs setup again, to change the settings of a
   size already set up. Switching `MODEL` to a size already on the volume needs no setup pass.
-- **Changing the config:** edit `/data/config/strata-glm-<size>.json` on the volume and restart the container. The
-  web app's Settings view writes the file in `/opt/strata` instead of the link to the volume (read from the code), so
-  a change made there is lost at the next start.
+- **Changing the config:** edit `/data/config/strata-glm-<size>.json` on the volume and restart the container, or use
+  the web app's Settings view: it writes that file through the link, and keeps its `.bak` and the shared Chat
+  settings (`strata-glm-<size>.shared-settings.json`) beside it on the volume.
 - **Health:** the image has a `HEALTHCHECK` on `/health` with a start period of 30 minutes, since the port opens only
   once the model is loaded (and the first start downloads it). `docker logs strata` shows the server's output; the
   engine's log is inside the container: `docker exec strata tail -f /opt/strata/strata-glm-ud-iq3_xxs.log`.

@@ -1298,8 +1298,9 @@ def carry_over(old: dict, cfg: dict) -> list[str]:
 
 def write_setup_config(cfg_path: Path, cfg: dict, source: Path | None = None) -> None:
     """#629: setup's run config, written over an earlier one for the same model without losing what the user added
-    to it (carry_over), the earlier file kept as strata-<model>.json.bak when it changes.  `source`: an earlier
-    install's config to carry the keys over from when this folder has none yet (a copy set up like the last one)."""
+    to it (carry_over), the earlier file kept as strata-<model>.json.bak when it changes (beside the file a linked
+    config points at).  `source`: an earlier install's config to carry the keys over from when this folder has none
+    yet (a copy set up like the last one)."""
     old_path = cfg_path if cfg_path.is_file() else source
     old = None
     if old_path is not None and old_path.is_file():
@@ -1311,9 +1312,10 @@ def write_setup_config(cfg_path: Path, cfg: dict, source: Path | None = None) ->
             old = None
     kept = carry_over(old, cfg) if old is not None else []
     if cfg_path.is_file() and old != cfg:
-        bak = cfg_path.with_name(cfg_path.name + ".bak")
+        real = Path(os.path.realpath(cfg_path))       # a linked config (#1244): beside the file it points at
+        bak = real.with_name(real.name + ".bak")
         try:
-            shutil.copyfile(cfg_path, bak)
+            shutil.copyfile(real, bak)
             say(f"  the earlier run config is kept as {bak.name}")
         except OSError as e:
             warn(f"could not keep a copy of the earlier {cfg_path.name} ({e.strerror or e})")
@@ -1457,8 +1459,11 @@ def model_gb(cfg: dict) -> float:
 
 
 def server_command(cfg_path: Path, port, open_browser: bool) -> list[str]:
-    """The server with this config: .venv's Python, serve/server.py with the strata engine, the port."""
-    return [sys.executable, str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config", str(cfg_path),
+    """The server with this config: .venv's Python, serve/server.py with the strata engine, the port.  A config that
+    is a link (the Docker image links it to the /data volume, #1244) is given as the file it points at: the server
+    keeps the Settings view's .bak and the Chat settings it shares (<config>.shared-settings.json) beside it."""
+    cfg = os.path.realpath(cfg_path) if Path(cfg_path).is_symlink() else str(cfg_path)
+    return [sys.executable, str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config", cfg,
             "--port", str(port)] + (["--open"] if open_browser else [])
 
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import tempfile
 import unittest
 import urllib.error
@@ -100,6 +101,29 @@ class Apply(unittest.TestCase):
         self.assertEqual(got["anthropic_thinking"]["choices"], ["model", "on_request"])
         self.assertNotIn("api_key", got)
         self.assertNotIn("mcp_servers", got)
+
+
+class SaveThroughALink(unittest.TestCase):
+    """The Docker image links /opt/strata/strata-glm-<size>.json to the config on the /data volume (#1244).  A save
+    from the Settings view must write the file the link points at, keep the link, and keep its .bak beside that file:
+    a link replaced by a file leaves the change in the container, and the next start links the old file again."""
+
+    def test_the_file_the_link_points_at_is_written(self):
+        with tempfile.TemporaryDirectory() as d:
+            vol, opt = Path(d) / "data" / "config", Path(d) / "opt"
+            vol.mkdir(parents=True)
+            opt.mkdir()
+            real = vol / "strata-glm-ud-iq3_xxs.json"
+            real.write_text(json.dumps(CFG), encoding="utf-8")
+            link = opt / real.name
+            link.symlink_to(real)
+            new, _ = runconfig.apply(CFG, {"fit_max_tokens": True})
+            bak = runconfig.save(link, new)
+            self.assertTrue(link.is_symlink())
+            self.assertIs(json.loads(real.read_text(encoding="utf-8"))["fit_max_tokens"], True)
+            self.assertEqual(bak, Path(os.path.realpath(vol)) / "strata-glm-ud-iq3_xxs.json.bak")
+            self.assertEqual(json.loads(bak.read_text(encoding="utf-8")), CFG)
+            self.assertEqual([x.name for x in opt.iterdir()], [real.name])           # nothing else in the container
 
 
 class Http(unittest.TestCase):
