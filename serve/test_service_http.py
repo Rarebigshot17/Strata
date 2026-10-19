@@ -501,7 +501,7 @@ class LargeBodies(Http):
         """A chunked body sent as one chunk (a client that streams a buffer): refused once LARGE_BODY of it is in,
         not after the whole chunk was kept - and the answer still arrives (the rest is read and dropped)."""
         import tracemalloc
-        size = 8 << 20
+        size = 16 << 20
         head = (b"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
                 b"Transfer-Encoding: chunked\r\n\r\n%X\r\n" % size)
         data = memoryview(b'{"pad": "' + b"x" * (size - 11) + b'"}')
@@ -529,7 +529,7 @@ class LargeBodies(Http):
                 slots.release()
         self.assertTrue(answer.startswith(b"HTTP/1.0 503"), answer[:80])
         self.assertIn(b"Retry-After:", answer)
-        self.assertLess(peak, 4 << 20, "the server kept the chunk")
+        self.assertLess(peak, 8 << 20, "the server kept the chunk")         # (it keeps about 2 MiB)
 
 
 class ReadTimeout(unittest.TestCase):
