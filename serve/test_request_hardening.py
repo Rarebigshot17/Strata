@@ -93,7 +93,7 @@ class Hardening(unittest.TestCase):
             self.assertEqual(body_limit(), 256 << 20)
 
     # A request whose sampling field has the wrong JSON type is a 400 that names the field, not a greedy reply.
-    # Only types are checked: in-type values of any range, and null fields, answer as before.
+    # Null fields answer as before; a value the engine cannot use is a 400 too (below).
     def test_a_wrong_type_is_a_400_that_names_the_field(self):
         chat = {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 8}
         responses = {"model": "m", "input": "hi", "store": False, "max_output_tokens": 8}
@@ -156,12 +156,50 @@ class Hardening(unittest.TestCase):
                                                        "max_tokens": 8, "repeat_penalty": 1.1, "repeat_last_n": 64})
         self.assertEqual(code, 200, out)
 
+    def test_values_the_engine_cannot_use_are_a_400_that_names_the_field(self):
+        """The engine reads the floats as 32-bit floats and top_k / penalty_last_n as 32-bit ints, divides by the
+        repetition penalty and checks none of them: NaN, an infinity, a penalty of 0 or an int that does not fit made
+        it sample nonsense (one token over and over, or the penalties silently off)."""
+        from serve.server import check_request_sampling
+        nan, inf = float("nan"), float("inf")
+        for bad, field in (({"temperature": nan}, "temperature"), ({"top_p": inf}, "top_p"),
+                           ({"min_p": -inf}, "min_p"), ({"frequency_penalty": nan}, "frequency_penalty"),
+                           ({"presence_penalty": -inf}, "presence_penalty"), ({"presence_penalty": 1e39},
+                                                                                "presence_penalty"),
+                           ({"repetition_penalty": nan}, "repetition_penalty"),
+                           ({"repetition_penalty": 0}, "repetition_penalty"),
+                           ({"repetition_penalty": -1.1}, "repetition_penalty"),
+                           ({"repeat_penalty": 0.0}, "repetition_penalty"),
+                           ({"temperature": -0.5}, "temperature"), ({"temperature": "-1"}, "temperature"),
+                           ({"top_p": 1.5}, "top_p"), ({"top_p": -0.1}, "top_p"), ({"min_p": 2}, "min_p"),
+                           ({"top_k": 2**31}, "top_k"), ({"penalty_last_n": 3000000000}, "penalty_last_n"),
+                           ({"seed": 2**64}, "seed")):
+            with self.subTest(bad=bad), self.assertRaises(ValueError) as c:
+                check_request_sampling(dict(bad))
+            self.assertTrue(str(c.exception).startswith(field + ":"), str(c.exception))
+        edges = {"temperature": 0, "top_p": 0, "min_p": 1, "repetition_penalty": 1e-3, "frequency_penalty": -2,
+                 "presence_penalty": 3.4e38, "top_k": 2**31 - 1, "penalty_last_n": 2**31 - 1, "seed": 2**64 - 1}
+        check_request_sampling(dict(edges))
+        chat = {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 8}
+        for path, body, field in (("/v1/chat/completions", {**chat, "temperature": nan}, "temperature"),
+                                  ("/v1/chat/completions", {**chat, "repetition_penalty": 0}, "repetition_penalty"),
+                                  ("/v1/messages", {**chat, "top_k": 2**31}, "top_k"),
+                                  ("/v1/completions", {"prompt": "hi", "max_tokens": 8, "frequency_penalty": inf},
+                                   "frequency_penalty"),
+                                  ("/v1/responses", {"model": "m", "input": "hi", "store": False,
+                                                     "penalty_last_n": 2**40}, "penalty_last_n")):
+            with self.subTest(path=path, field=field):
+                with mock.patch("builtins.print"):
+                    code, out = self.post(path, body)       # json.dumps writes NaN and Infinity, as some clients do
+                self.assertEqual(code, 400, (path, out))
+                self.assertIn(field, json.dumps(out))
+
     def test_in_type_values_and_nulls_still_answer(self):
         chat = {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 8, "temperature": 0, "top_k": 0,
                 "seed": 7}
         code, out = self.post("/v1/chat/completions", chat)
         self.assertEqual(code, 200, out)
-        code, out = self.post("/v1/messages", {**chat, "temperature": -1, "top_k": 100, "presence_penalty": 0.5,
+        code, out = self.post("/v1/messages", {**chat, "temperature": 1.5, "top_k": 100, "presence_penalty": 0.5,
                                                "penalty_last_n": 64})
         self.assertEqual(code, 200, out)
         code, out = self.post("/v1/responses", {"model": "m", "input": "hi", "store": False, "max_output_tokens": 8,

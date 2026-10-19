@@ -492,6 +492,13 @@ def arg_value(args: list, flag: str, default=None):
 
 
 GLM_CTX = 32768          # strata-glm's own --ctx when the args name none (reported while a lazy start has not run)
+# What the engine can hold of the GEN line's sampling keys (src/glm/sampler.cpp reads them with atof and casts, and
+# checks none): top_k and penalty_last_n are 32-bit ints, the seed a 64-bit unsigned one, the rest 32-bit floats.
+# Beyond these the casts are undefined (a window of 3e9 became 0: the penalties were off) or give an infinity, and NaN
+# or an infinity in a penalty turns the logits it touches into nonsense.
+ENGINE_INT_MAX = 2**31 - 1
+ENGINE_SEED_MAX = 2**64 - 1
+ENGINE_FLOAT_MAX = 3.4028234663852886e38
 
 
 class StrataEngine:
@@ -727,40 +734,43 @@ class StrataEngine:
 
     @staticmethod
     def sampling_keys(sampling: dict) -> str:
+        def num(key):                                   # a value the engine holds as a float (ENGINE_FLOAT_MAX)
+            v = sampling.get(key)
+            ok = isinstance(v, (int, float)) and not isinstance(v, bool) and abs(v) <= ENGINE_FLOAT_MAX
+            return float(v) if ok else None             # (NaN fails the comparison too)
+
         keys = ""
-        t = sampling.get("temperature")
-        if isinstance(t, (int, float)) and float(t) > 0.0:
-            keys += f" temperature={float(t)!r}"
-        tp = sampling.get("top_p")
-        if isinstance(tp, (int, float)) and float(tp) < 1.0:
-            keys += f" top_p={float(tp)!r}"
+        t = num("temperature")
+        if t is not None and t > 0.0:
+            keys += f" temperature={t!r}"
+        tp = num("top_p")
+        if tp is not None and tp < 1.0:
+            keys += f" top_p={tp!r}"
         tk = sampling.get("top_k")
         if isinstance(tk, int) and not isinstance(tk, bool) and tk >= 0:
-            keys += f" top_k={tk}"                      # 0: off (the whole vocabulary)
-        mp = sampling.get("min_p")
-        if isinstance(mp, (int, float)) and 0.0 < float(mp) <= 1.0:
-            keys += f" min_p={float(mp)!r}"
-        rp = sampling.get("repetition_penalty")
-        rp_on = isinstance(rp, (int, float)) and float(rp) != 1.0
-        pf = sampling.get("frequency_penalty")
-        pf_on = isinstance(pf, (int, float)) and float(pf) != 0.0
-        pp = sampling.get("presence_penalty")
-        pp_on = isinstance(pp, (int, float)) and float(pp) != 0.0
+            keys += f" top_k={min(tk, ENGINE_INT_MAX)}"  # 0: off (the whole vocabulary), as is more than it has
+        mp = num("min_p")
+        if mp is not None and 0.0 < mp <= 1.0:
+            keys += f" min_p={mp!r}"
+        rp, pf, pp = num("repetition_penalty"), num("frequency_penalty"), num("presence_penalty")
+        rp_on = rp is not None and rp > 0.0 and rp != 1.0  # the engine divides by it
+        pf_on = pf is not None and pf != 0.0
+        pp_on = pp is not None and pp != 0.0
         if rp_on:
-            keys += f" penalty_repeat={float(rp)!r}"
+            keys += f" penalty_repeat={rp!r}"
         if pf_on:
-            keys += f" penalty_freq={float(pf)!r}"
+            keys += f" penalty_freq={pf!r}"
         if pp_on:
-            keys += f" penalty_present={float(pp)!r}"
+            keys += f" penalty_present={pp!r}"
         if rp_on or pf_on or pp_on:
             # a penalty without a window counts over nothing: the engine's default is the last 64 tokens
             pln = sampling.get("penalty_last_n")
             if isinstance(pln, int) and not isinstance(pln, bool) and pln > 0:
-                keys += f" penalty_last_n={pln}"
+                keys += f" penalty_last_n={min(pln, ENGINE_INT_MAX)}"
             else:
                 keys += " penalty_last_n=64"
         seed = sampling.get("seed")
-        if isinstance(seed, int) and seed > 0:
+        if isinstance(seed, int) and 0 < seed <= ENGINE_SEED_MAX:
             keys += f" seed={seed}"
         return keys + bias_api.engine_key(sampling.get("logit_bias"))
 
@@ -4194,8 +4204,8 @@ def sampling_defaults_from_config(cfg: dict) -> dict:
     for key, value in block.items():
         if value is None:
             continue
-        number = isinstance(value, (int, float)) and not isinstance(value, bool)
-        if key == "temperature":
+        number = isinstance(value, (int, float)) and not isinstance(value, bool) and abs(value) <= ENGINE_FLOAT_MAX
+        if key == "temperature":                       # (json.load reads NaN and Infinity: not a number here)
             if not number or value < 0:
                 raise SystemExit(f"[strata] config sampling.temperature={value!r}: expected a number >= 0 (0 = greedy)")
             out[key] = float(value)
@@ -4239,10 +4249,13 @@ def sampling_defaults_from_config(cfg: dict) -> dict:
 def check_request_sampling(req) -> None:
     """A request's sampling field of the wrong JSON type ("temperature": "0.7", "top_k": 40.0, "seed": true) is a 400
     that names the field, as the same value is through POST /settings or the run config.  Unchecked, the value
-    replaced the configured default in run()'s merge and sampling_keys dropped it, so the reply was greedy.  Only
-    types are checked: a number (int or float, never bool) for temperature, top_p, min_p and the three penalties; an
-    integer (never bool or float) for top_k, penalty_last_n and seed.  Ranges are the engine's (a temperature <= 0 is
-    greedy, top_k 0 is off, a negative top_k or a seed <= 0 is unset), and an absent or null field is not checked."""
+    replaced the configured default in run()'s merge and sampling_keys dropped it, so the reply was greedy.  Types: a
+    number (int or float, never bool) for temperature, top_p, min_p and the three penalties; an integer (never bool
+    or float) for top_k, penalty_last_n and seed.  Ranges: what the engine can use, which checks none itself - a
+    finite number it can hold (no NaN or Infinity, which json.loads reads), temperature >= 0 (0 is greedy), top_p and
+    min_p 0..1, a repetition penalty > 0 (it divides by it; 1 is off), top_k and penalty_last_n up to ENGINE_INT_MAX
+    and a seed up to ENGINE_SEED_MAX (top_k 0 is off; a negative top_k or penalty_last_n, or a seed <= 0, is unset).
+    An absent or null field is not checked."""
     if isinstance(req, dict):      # #1819: llama.cpp's names; the OpenAI-style field wins when both are sent
         if req.get("repeat_penalty") is not None and req.get("repetition_penalty") is None:
             req["repetition_penalty"] = req["repeat_penalty"]
@@ -4270,6 +4283,18 @@ def check_request_sampling(req) -> None:
             req[key] = value = num
         if isinstance(value, bool) or not isinstance(value, int if integer else (int, float)):
             raise ValueError(f"{key}: {'an integer' if integer else 'a number'}")
+        if integer:
+            top = ENGINE_SEED_MAX if key == "seed" else ENGINE_INT_MAX
+            if value > top:
+                raise ValueError(f"{key}: an integer up to {top}")
+        elif not abs(value) <= ENGINE_FLOAT_MAX:        # NaN, an infinity, or beyond a 32-bit float
+            raise ValueError(f"{key}: a finite number")
+        elif key == "temperature" and value < 0:
+            raise ValueError("temperature: a number >= 0 (0: greedy)")
+        elif key in ("top_p", "min_p") and not 0 <= value <= 1:
+            raise ValueError(f"{key}: a number from 0 to 1")
+        elif key == "repetition_penalty" and value <= 0:
+            raise ValueError("repetition_penalty: a number > 0 (1: off)")
 
 
 def config_path_of(cfg: dict, value: str) -> str:
