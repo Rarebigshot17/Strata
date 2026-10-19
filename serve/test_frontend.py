@@ -409,6 +409,20 @@ class LiteralMarking(unittest.TestCase):
                 self.assertEqual(self.tok.decode(ids), prompt)
                 self.assertIn(json.dumps(key)[1:-1], prompt)                  # the schema's, as tojson writes it
 
+    def test_private_use_characters_of_the_request_stay_as_they_are(self):
+        # the marks are plane-15 private-use characters, as are Nerd Font icons (U+F0001-U+F1AF0) in shell output (eza
+        # --icons, lsd, starship): beside a quoted tag they stay the icons, not the tags' text
+        icons = "".join(map(chr, (0xF0001, 0xF0E00, 0xF0E01, 0xF0E03, 0xF0E01 + len(self.tags) - 1, 0xF1AF0)))
+        msgs = [{"role": "user", "content": "say </think>"},
+                {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "ls", "arguments": {}}}]},
+                {"role": "tool", "content": icons + " src " + icons[2] + "�"}]
+        ids, prompt = self.encode(msgs)
+        self.assertIn(icons + " src " + icons[2] + "�", prompt)
+        self.assertEqual(self.tok.decode(ids), prompt)
+        self.assertEqual(self.special_ids(ids), self.special_ids(self.encode([{"role": "user", "content": "x"}] +
+                                                                             msgs[1:2] + [{"role": "tool",
+                                                                                           "content": "x"}])[0]))
+
     def test_a_prompt_without_special_text_is_unchanged(self):
         messages = [{"role": "user", "content": "plain <b>html</b> and <|nope|>"}]
         marked, tools, changed = mark_think_literals(messages, None, self.tags)

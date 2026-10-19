@@ -323,6 +323,11 @@ CALL_TAGS = (CALL_START, CALL_END, KEY_START, KEY_END, VALUE_START, VALUE_END)
 MARK0 = 0xF0E01              # the first mark (plane 15's private use area)
 LITERAL_TAGS = {tag: chr(MARK0 + k) for k, tag in enumerate(GLM_TAGS)}
 LITERAL_MARKS = {v: k for k, v in LITERAL_TAGS.items()}
+# The request's own characters in the marks' range (from ESCAPE to the end of plane 15's private use area: Nerd Font
+# icons in a tool's output are there) are written with ESCAPE before them while the marks are in: they stay what they
+# are, never a mark
+ESCAPE = chr(MARK0 - 1)
+_MARK_RANGE = re.compile("[\U000F0E00-\U000FFFFD]")
 
 
 def literal_tags(texts) -> dict[str, str]:
@@ -338,6 +343,7 @@ def literal_tags(texts) -> dict[str, str]:
 
 
 def _mark(text: str, tags: dict[str, str] = LITERAL_TAGS) -> str:
+    text = _MARK_RANGE.sub(ESCAPE + r"\g<0>", text)
     for tag, mark in tags.items():
         text = text.replace(tag, mark)
     return text
@@ -387,18 +393,24 @@ def mark_think_literals(messages: list[dict], tools: list[dict] | None, tags: di
     return out, _mark_deep(tools, tags), True
 
 
-_LITERAL_MARK_RE = re.compile("|".join(LITERAL_MARKS))
+_LITERAL_MARK_RE = re.compile(ESCAPE + ".|" + "|".join(LITERAL_MARKS), re.S)
 
 
 def unmark_think_literals(prompt: str, tags: dict[str, str] = LITERAL_TAGS) -> tuple[str, list[tuple[int, int]]]:
     """The rendered prompt with the marks turned back into the texts they stand for, and the (start, end) spans of
-    those texts in it: the server encodes them as ordinary text (the tokenizer's encode_plain_spans)."""
+    those texts in it: the server encodes them as ordinary text (the tokenizer's encode_plain_spans).  A character
+    after ESCAPE is the request's own."""
     marks = LITERAL_MARKS if tags is LITERAL_TAGS else {v: k for k, v in tags.items()}
-    mark_re = _LITERAL_MARK_RE if tags is LITERAL_TAGS else re.compile("|".join(map(re.escape, marks)))
+    mark_re = _LITERAL_MARK_RE if tags is LITERAL_TAGS else re.compile(
+        ESCAPE + ".|" + "|".join(map(re.escape, marks)), re.S)
     out, spans, pos, n = [], [], 0, 0
     for m in mark_re.finditer(prompt):
         out.append(prompt[pos:m.start()])
         n += m.start() - pos
+        if m.group(0)[0] == ESCAPE:
+            out.append(m.group(0)[1:])
+            n, pos = n + 1, m.end()
+            continue
         tag = marks[m.group(0)]
         out.append(tag)
         spans.append((n, n + len(tag)))
