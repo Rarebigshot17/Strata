@@ -1,200 +1,249 @@
-# Installing Strata for a user (instructions for AI agents)
+# Setting up Strata for a user (instructions for AI assistants)
 
-This page is written for an AI coding assistant (Claude Code, Cursor, Codex, GitHub Copilot, ...) that a user asked to
-set up Strata on their PC. Strata runs the Qwen3.8-Flash-Next model locally on one NVIDIA or AMD graphics card plus
-system RAM, and serves an OpenAI- and Anthropic-compatible API on `http://127.0.0.1:8080`. The human-oriented
-version of everything below is [INSTALL.md](INSTALL.md).
+This page is for an AI coding assistant (Claude Code, Codex, Cursor, ...) that a user asked to set up Strata on their
+PC. Strata runs one model, GLM-5.3-Flash, on Linux with NVIDIA GPUs and system RAM, and serves an OpenAI-, Anthropic-
+and Responses-compatible API and a chat page on `http://127.0.0.1:8101`. The version for people, with every detail,
+is [INSTALL.md](INSTALL.md).
 
-Work through the steps in order. Tell the user what you are doing in plain words; they may not be technical.
+Work through the steps in order. Tell the user what you are doing in plain words.
 
-## 0. Ground rules
+> **Nothing has run on a GPU or on the real model yet.** The project has no measured speeds, load times or memory
+> figures. The sizes below are calculated. Do not promise the user a speed or a load time. If you time something on
+> their PC, say what you timed and that it was one run on their PC.
 
-- **Never expose the server without an API key.** Keep the default `--host 127.0.0.1`. Only if the user asks for
-  access from other devices, use `--host 0.0.0.0` **together with** `--api-key <a long random secret>`, and give the
-  user the key. Never put a tunnel or port forward in front of a server without a key.
-- Do not change the user's system beyond what setup does (setup installs Python for the user account if needed,
-  and everything else inside the Strata folder and its `Strata-data` folder). Ask before installing drivers.
-- The model download is ~70 GB (94 GB for Unsloth's UD-IQ4_XS, 111 GB for UD-Q4_K_XL). Confirm the user is fine with that before you
-  start, especially on a metered connection.
-- Setup is long-running (an hour or more on a slow connection). Run it in the background or with a long timeout and
-  poll its output; do not kill it because it is quiet for a while. It is resumable: running the same command again
-  continues where it stopped.
+## 0. Rules
 
-## 1. Check the PC
+- **Never expose the server beyond `127.0.0.1` without an API key.** Keep the default host. Only when the user asks
+  for access from other devices, use `--host 0.0.0.0` **together with** `--api-key <a long random secret>`, and give
+  the user the key. Make one with `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`. Never put a tunnel,
+  a port forward or a published Docker port in front of a server without a key. The Docker image listens on
+  `0.0.0.0` without a key unless you set `API_KEY`: publish it as `-p 127.0.0.1:8101:8101`.
+- **You cannot type the user's sudo password.** `./setup.sh` uses sudo to install Python with venv when it is
+  missing, and setup uses sudo to install the C++ compiler and the CUDA toolkit when they are missing. Check for them
+  first (step 2). If something is missing, ask the user to run the commands in step 4 in their own terminal.
+- **Do not install or change NVIDIA drivers** unless the user asks. Strata needs driver 580 or newer.
+- **The download is big:** about 120 GB for the 3-bit size, about 170 GB for the 4-bit. Ask the user before you start,
+  especially on a metered connection. At 100 Mbit/s, 120 GB takes about 2.7 hours (calculated).
+- **Setup runs for a long time** (the build, the download). Run it in the background or with a long timeout and read
+  its output; do not stop it because it is quiet for a while. It is resumable: the same command again continues where
+  it stopped.
+- **Always pass `--yes`.** Without a terminal, setup stops at its first question ("input ended before a setup answer
+  was received").
+- **Do not edit setup's or the server's code** to get past an error. Report the error to the user.
 
-The quickest way is setup's own check, which prints the GPU(s), driver, RAM, CPU, free disk and whether this PC can run
-Strata, and installs nothing except Python and the `.venv` it needs to run (step 2 gets the repository first):
+## 1. Get Strata
 
+```bash
+git clone -b glm53-flash https://github.com/Rarebigshot17/Strata.git
+cd Strata
 ```
-Windows:  START-HERE.bat --check
-Linux:    ./setup.sh --check
+
+Without git: download https://github.com/Rarebigshot17/Strata/archive/refs/heads/glm53-flash.zip and unzip it. The
+model files go to a `Strata-GLM-data` folder **next to** the Strata folder, so pick a drive with room for them, or use
+`--data-dir <folder on a bigger drive>` in step 4.
+
+## 2. Check the PC
+
+Setup's own check prints the GPUs, the driver, the RAM, the CPU and, for each size, whether it fits this PC's RAM and
+free disk space. It installs, moves and writes nothing, and runs with the system Python:
+
+```bash
+python3 setup.py --check
 ```
 
-To check by hand:
+It ends with `This PC can run GLM-5.3-Flash (<size> recommended)` and exit code 0, or with exit code 1: no NVIDIA GPU
+(`nvidia-smi did not answer`), a driver older than 580, or `neither size fits <N> GB of RAM`.
 
-| What | Windows (PowerShell) | Linux |
+Check the rest by hand:
+
+| What | Command | What it must show |
 | --- | --- | --- |
-| OS | `[Environment]::OSVersion` | `cat /etc/os-release` |
-| NVIDIA GPU, VRAM, driver | `nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv` | the same |
-| AMD GPU | `Get-CimInstance Win32_VideoController \| Select-Object Name, AdapterRAM` (AdapterRAM is capped at 4 GB; trust the model name) | `lspci \| grep -i -E 'vga\|display'`; VRAM: `cat /sys/class/drm/card*/device/mem_info_vram_total` (bytes); `rocm-smi` only if ROCm is installed |
-| RAM | `(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB` | `free -g` |
-| Free disk | `Get-PSDrive -PSProvider FileSystem` | `df -h .` |
+| OS | `cat /etc/os-release` | Linux. Ubuntu 22.04 or 24.04 lets setup install the CUDA toolkit itself. |
+| GPUs, VRAM, driver | `nvidia-smi --query-gpu=index,name,memory.total,compute_cap,driver_version --format=csv` | Compute capability 7.5 or newer (RTX 20, 30, 40, 50 series), driver 580 or newer. |
+| RAM | `free -g` (the `total` of `Mem:`) | See step 3. |
+| Free disk | `df -h .` (and the drive for `--data-dir`) | 120 GB (3-bit) or 170 GB (4-bit), plus about 8-10 GB if the CUDA toolkit is to be installed. |
+| CPU | `grep -m1 -ow avx2 /proc/cpuinfo` | `avx2`. Without it setup goes on with a warning. |
+| CUDA toolkit | `nvcc --version`, or `ls /usr/local/cuda*/bin/nvcc /opt/cuda*/bin/nvcc` | 12.0 or newer (13.0 or newer for an RTX 50 card). Missing: step 4. |
+| C++ compiler | `g++ --version` | Present. Missing: step 4. |
+| Python | `python3 -c "import sys, venv, ensurepip; print(sys.version)"` | 3.10 or newer, no error. On Ubuntu a missing `ensurepip` means `python3-venv` is missing. |
 
-Requirements (details: [INSTALL.md](INSTALL.md#what-you-need)):
+If the PC does not meet these, tell the user which part is missing and stop. Details:
+[INSTALL.md](INSTALL.md#what-you-need).
 
-- **GPU:** NVIDIA RTX 20, 30, 40 or 50 series, or AMD Radeon RX 7900 XT / XTX, RX 7800 XT / 7700 XT, RX 9060 XT,
-  RX 9070 / 9070 XT, Radeon AI PRO R9700, RX 6800 / 6900 series; 12 GB of VRAM or more (an NVIDIA card with 8 GB runs,
-  slowly). GTX 10 series and older, and integrated GPUs, are not supported; Pascal / Volta cards (P40, V100) and some
-  older AMD cards have experimental paths the user opts into ([OLDER_GPUS.md](OLDER_GPUS.md)).
-- **Driver:** NVIDIA 580 or newer. AMD on Linux: the kernel's amdgpu driver; on Windows: a current AMD Adrenalin
-  driver. If the driver is missing or too old, tell the user to update it (NVIDIA App / nvidia.com/drivers, or AMD
-  Software) and restart; do not install drivers yourself unless they ask.
-- **RAM:** 32 GB or more (see step 3). **Disk:** ~80 GB free, ideally on an NVMe SSD. **CPU:** x86-64 with AVX2. Without AVX2 (Xeon E5 v1/v2 and older) setup still installs, as an experimental and slow build it compiles on the PC (10-20 minutes): tell the user that before starting ([INSTALL.md](INSTALL.md#older-cpus-experimental)).
-- **OS:** Windows 10/11 or Linux (Ubuntu 22.04/24.04 are fully automatic).
+## 3. Pick the size and the context
 
-If the PC does not meet them, say which part is missing and stop.
+Every routed expert stays in RAM. Setup compares the RAM `/proc/meminfo` reports (the `total` of `free -g`) with what
+each size's experts take (calculated, from `setup.py`):
 
-## 2. Get Strata
-
-```
-git clone https://github.com/Niko1221/Strata.git
-```
-
-Without git: download https://github.com/Niko1221/Strata/archive/refs/heads/main.zip and unzip it. Pick a drive with
-enough free space: the model files go to a `Strata-data` folder **next to** the Strata folder (or `--data-dir <path>`
-on another drive).
-
-## 3. Pick the model
-
-By the PC's RAM (ask the user whether they mainly want it for code - then the Coder is a good pick at any RAM size):
-
-| RAM | `--family` / `--model` | Notes |
+| RAM (`free -g`) | Size | Why |
 | --- | --- | --- |
-| 32 GB | `--family coder` (size IQ1_M) | for code; with a 24 GB card Q2_0 and IQ2_XS also run (setup picks the low-RAM mode) |
-| 48 GB | `--family qwen --model IQ2_XS` | or `Q2_0` (fastest) |
-| 64 GB | `--family qwen --model IQ2_XS` (recommended) | `IQ3_XXS` / `IQ3_S` are slower and a bit better |
-| 96 GB+ | `--family qwen --model IQ3_S` | `--family unsloth --model UD-IQ4_XS` (~4-bit, 94 GB, part of the experts read from the SSD under ~80 GB of RAM); `--model UD-Q4_K_XL` is experimental: NVIDIA only, NVMe SSD, 7-8.5 tokens/s on 64 GB |
+| 202 GB or more | `--model IQ4_XS` (4-bit) | Its ~162 GB of experts leave 40 GB or more. Setup recommends it. |
+| 174-201 GB | `--model UD-IQ3_XXS` (3-bit) | Recommended. The 4-bit would leave under 40 GB: setup allows it with a warning and gives parked conversations 4096 MiB. |
+| 157-173 GB | `--model UD-IQ3_XXS` | Recommended; the 4-bit does not fit. |
+| 129-156 GB | `--model UD-IQ3_XXS` | Tight: setup warns and gives parked conversations 4096 MiB. Tell the user to close other big programs while it runs. |
+| under 129 GB | none | Neither size fits. Tell the user. Setup can be forced (`--model UD-IQ3_XXS --yes`), but the OS would then read experts from the disk: very slow, or no start at all. |
 
-`--family swift` (Swift 1.5, a fine-tune that thinks shorter; sizes Q2_0, IQ2_XS, IQ3_XXS) is the alternative to
-`qwen`. With `--yes` and no `--model`, setup picks the recommended size for the RAM itself. More: [MODELS.md](MODELS.md).
+When the repository has no IQ4_XS files, the 4-bit size takes UD-Q4_K_XL instead; setup says so and works out what it
+leaves of the RAM.
+
+Ask the user how long their conversations get (chats, files, tool output together), and pick the context from that.
+Each token takes 11 KB of VRAM, which the GPUs' expert cache gives up (calculated):
+
+| `--context` | VRAM for the attention cache |
+| --- | --- |
+| 32768 | 0.4 GB |
+| 131072 | 1.5 GB (setup's default when the GPUs have 16 GB of VRAM or more in all) |
+| 262144 | 3.0 GB |
+| 524288 | 5.9 GB |
+| 1048576 | 11.8 GB (the model's whole context) |
+
+If several apps or agents will take turns on long conversations, read
+[Parking and several clients](INSTALL.md#parking-and-several-clients) and tell the user about `--park-mib`.
 
 ## 4. Run setup without questions
 
-From the Strata folder (Windows: in `cmd`, or `cmd /c START-HERE.bat ...` from PowerShell):
+If step 2 found no C++ compiler or no CUDA toolkit, ask the user to run these first (Ubuntu 24.04; for 22.04 use
+`ubuntu2204`), or to run `./setup.sh` once in their own terminal, where setup asks and uses sudo itself:
 
+```bash
+sudo apt-get install -y build-essential python3-venv
+wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+sudo dpkg -i cuda-keyring_1.1-1_all.deb
+sudo apt-get update
+sudo apt-get install -y cuda-toolkit-13-0
 ```
-Windows:  START-HERE.bat --yes --family qwen --model IQ2_XS --no-start
-Linux:    ./setup.sh --yes --family qwen --model IQ2_XS --no-start
+
+Then, from the Strata folder:
+
+```bash
+nohup ./setup.sh --yes --model UD-IQ3_XXS --context 131072 --gpus all --no-browser --no-start > setup.out 2>&1 &
+tail -f setup.out
 ```
 
-The flags (all of them: `START-HERE.bat --help`):
-
-| Flag | Meaning |
+| Option | Why |
 | --- | --- |
-| `--yes` | take the recommended answer to every question (no prompts) |
-| `--family qwen\|swift\|coder\|unsloth` | the model version |
-| `--model Q2_0\|IQ2_XS\|IQ3_XXS\|IQ3_S\|IQ1_M\|UD-IQ4_XS\|UD-Q4_K_XL` | the size (the Coder is IQ1_M, Unsloth UD-IQ4_XS or UD-Q4_K_XL) |
-| `--context N` | context in tokens; default by VRAM: 32768 under 14 GB, 65536 under 20 GB, else 131072 |
-| `--vision yes\|no\|gpu\|cpu` | read pictures; `--yes` leaves images off. AMD cards: `cpu` |
-| `--gpu N` / `--gpus 0,1` / `--gpus all` | one card, or several sharing the model (default: the card with the most VRAM) |
-| `--backend cuda\|hip` | NVIDIA or AMD engine; chosen by itself on a PC with only one kind of card |
-| `--data-dir PATH` | where the 70-120 GB of model files go |
-| `--port N` | the server port (default 8080) |
-| `--host H --api-key K` | listen beyond this PC; **only together with a key** |
-| `--no-start` | install only, do not start the server |
-| `--setup` | install another model or change settings of an installed one |
-| `--check` | only check the PC |
+| `--yes` | The recommended answer to every question; no prompts. |
+| `--model UD-IQ3_XXS` or `IQ4_XS` | The size from step 3. With `--yes`, naming it is also the user's consent to a size setup would otherwise stop at. |
+| `--context N` | The context from step 3. |
+| `--gpus all` | Every usable card, written into the config in nvidia-smi's order (or `--gpus 0,2` for some of them). Without it the engine uses CUDA's own order. |
+| `--no-browser` | Do not open a browser when the model is ready. |
+| `--no-start` | Install only. Setup would otherwise run the server in the foreground and block your shell. |
+| `--data-dir DIR` | Only when the drive next to the Strata folder has no room: the model files go there (remembered). |
+| `--host 0.0.0.0 --api-key KEY` | Only when the user asked for access from other devices, and always both. |
 
-`--no-start` is recommended for agents: the server runs in the foreground until its window is closed, which would
-block your shell. Start it separately in step 6.
+Every option: `./setup.sh --help`, or [INSTALL.md](INSTALL.md#setups-options).
 
-Notes:
-- **Linux:** setup uses `sudo apt` (or dnf/pacman) to install Python with venv if it is missing, and on AMD may need
-  `build-essential` and `git`. You cannot type the user's password: if a `sudo` step is needed, ask the user to run it
-  (e.g. `sudo apt install python3-venv build-essential git`) and then rerun setup.
-- **AMD on Linux:** setup installs ROCm into `.venv` (~10 GB, no sudo) unless a system ROCm 7 exists, and compiles the
-  engine for the card (10-20 minutes, once).
-- **AMD on Windows (new in 0.1.34):** setup downloads the ready-made AMD engine (~550 MB, ROCm included) - nothing
-  is compiled and only the AMD driver is needed. Before the model download it runs `engine\strata-device.exe
-  --list-devices`; if that does not list the card, the driver is the problem (tell the user to update AMD Software).
-  One card per model and no images on Windows for now. It is new: ask the user to report how it runs (docs/AMD_HIP.md).
-- **NVIDIA with no ready-made engine for the card:** setup offers to install build tools and compile (20-40 minutes);
-  `--yes` accepts.
+Setup prints `=== Step N: ... ===` for its six steps. The first build takes a while (setup says 10-20 minutes; not
+measured on this engine), then the download, then a SHA-256 check of each file. It succeeded when it prints
+`[ok] run config: strata-glm-<size>.json; start script: run-glm-<size>.sh`, then `All set.` and the addresses, and
+exits with code 0. A line starting with `[X]` is the reason it stopped, with a hint below it. A line starting with
+`[!]` is a warning: pass it on to the user.
 
-## 5. While it downloads, tell the user
+## 5. Start the server
 
-- It downloads about 70 GB from Hugging Face; how long depends on their connection (at 100 Mbit/s roughly 1.5-2
-  hours). It can be stopped and continues where it left off.
-- Then it prepares the model for their PC (a few minutes) and, on AMD on Linux, compiles the engine.
-- **When the model starts, the PC can be slow or stop responding for 1-3 minutes** (longest the first time): Strata
-  loads 35-55 GB into RAM and locks part of it for the graphics card. That is normal; they should not close the window.
-- Nothing leaves their PC: the model runs locally.
-
-## 6. Start the server
-
-Setup prints the start script it wrote (`start script: run-<model>.bat`). The name is the family tag plus the size,
-lower case: `run-iq2_xs`, `run-swift-iq2_xs`, `run-coder-iq1_m`, `run-unsloth-ud-iq4_xs`.
-
-```
-Windows (PowerShell):  Start-Process -FilePath ".\run-iq2_xs.bat"            (opens its own window)
-Linux:                 nohup ./run-iq2_xs.sh > strata-server.out 2>&1 &
+```bash
+nohup ./run-glm-ud-iq3_xxs.sh > strata-server.out 2>&1 &
+echo $! > strata-server.pid
 ```
 
-Or `START-HERE.bat` / `./setup.sh` without flags, which starts the installed model (it asks which one when several are
-installed; add `--yes` to take the first). The server opens the user's browser on `http://127.0.0.1:8080` when it is
-ready. Closing its window (or stopping the process) stops the model.
+The script name is the one setup printed (`run-glm-iq4_xs.sh` for the 4-bit). For a server that starts with the PC,
+use the systemd unit in [INSTALL.md](INSTALL.md#running-it-as-a-service) instead, with the user's consent (it needs
+sudo).
 
-## 7. Verify
+The port opens only when the engine is ready. Before that, the engine reads every routed expert into memory: about
+117 GB (3-bit) or 162 GB (4-bit). At 550 MB/s, the top speed of a SATA SSD, that is about 3.5 or 5 minutes
+(calculated, not measured). `strata-server.out` shows the progress (`[strata] reading the experts into memory ...`,
+then `warming the experts: X of Y GB` about every 20 seconds). The server gives up when the engine has not said it
+is ready within 900 seconds; each step of the warm-up's progress starts those 900 seconds again. The start is done
+when the output has a line `ready: http://127.0.0.1:8101/v1 ...`.
 
-The HTTP server answers once the model is loaded (30-90 s on later starts, a few minutes the first time). Poll:
+To stop it: `kill $(cat strata-server.pid)`. That sends SIGTERM to the server alone; it stops the engine, and the
+engine saves its expert profile. Do not `kill -9` it and do not kill `strata-glm` itself: the profile of that run is
+then lost.
 
+## 6. Verify
+
+Poll until the port answers (connection refused means it is still loading):
+
+```bash
+curl -s http://127.0.0.1:8101/health
 ```
-curl http://127.0.0.1:8080/health
+
+It answers `{"status": "ok", "max_context": ..., "model": "...", "images": false, "api_key": false, "loaded": true,
+"service": "strata"}`. `/health` needs no key. Then:
+
+```bash
+curl -s http://127.0.0.1:8101/v1/models
+curl -s http://127.0.0.1:8101/v1/chat/completions -H "Content-Type: application/json" \
+  -d '{"model": "glm-5.3-flash", "messages": [{"role": "user", "content": "Say hello in five words."}],
+       "max_tokens": 64, "reasoning_effort": "none"}'
 ```
 
-It returns `{"status": "ok", "model": ..., "max_context": ..., "images": ..., "api_key": ..., "loaded": true, ...}`.
-Then:
+With an API key, add `-H "Authorization: Bearer <key>"` to the `/v1` requests. `"reasoning_effort": "none"` turns the
+model's thinking off for this test, so the 64 tokens go to the answer; without it, the model thinks first and its
+thinking comes back in `reasoning_content`. The engine's log is `strata-glm-<size>.log` in the Strata folder.
 
-```
-curl http://127.0.0.1:8080/v1/models
-curl http://127.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json" -d "{\"model\": \"strata\", \"messages\": [{\"role\": \"user\", \"content\": \"Say hello in five words.\"}], \"max_tokens\": 64, \"reasoning_effort\": \"none\"}"
-```
+## 7. Connect the user's apps
 
-With an API key, add `-H "Authorization: Bearer <key>"`. The server window prints a `ready: http://127.0.0.1:8080/v1`
-line when it is ready; the engine log is `strata-<model>.log` in the Strata folder.
-
-## 8. Connect the user's apps
-
-- **Browser:** `http://127.0.0.1:8080` - Chat, a live Monitor, and About (settings and addresses).
-- **Any OpenAI-compatible app or agent:** base URL `http://127.0.0.1:8080/v1`, any API key (or the configured one),
-  any model name.
-- **Anthropic-compatible apps:** `http://127.0.0.1:8080/v1/messages`.
-- **Codex CLI and other Responses API apps:** `http://127.0.0.1:8080/v1/responses` (stateless; Codex's
-  `config.toml`: [DETAILS.md](DETAILS.md#the-responses-api-and-codex-cli)).
-- **Claude Code:** `ANTHROPIC_BASE_URL=http://127.0.0.1:8080`, `ANTHROPIC_MODEL` set to a Claude model name it knows
-  (Strata ignores the name), and any `ANTHROPIC_AUTH_TOKEN` (or the configured key).
-- **Thinking level:** `"reasoning_effort": "none" | "low" | "medium" | "high"` (default high).
-- Strata answers one request at a time; `"parallel": N` in the model's config (or setup `--parallel N`) decodes up to
-  N together ([BATCHING.md](BATCHING.md)). API details: [DETAILS.md](DETAILS.md#using-it).
-
-## 9. When something fails
-
-| Symptom | What to do |
+| App | Setting |
 | --- | --- |
-| `the NVIDIA driver is too old` | The user updates the driver (NVIDIA App or nvidia.com/drivers) and restarts; rerun setup. |
-| Download or install stopped | Rerun the same setup command; it continues. |
-| `port 8080 is already in use` | Strata is already running (check `/health`), or use `--port 8081`. |
-| Very slow, disk busy, or "the engine stopped unexpectedly" | Not enough free RAM: close programs, or set up a smaller size (`--setup --model Q2_0` or IQ2_XS). |
-| `ExpertCache: cudaMalloc(...) failed: out of memory` with free VRAM (Windows) | The page file is off or tiny: set a fixed size (Custom size, the same initial and maximum size, e.g. 65536 MB) and restart; a page file Windows grows on demand ("System managed") may not grow in time (#60). |
-| `prompt ... exceeds the context` | Rerun setup with `--setup --context <bigger>`. |
-| No AMD GPU found (Linux) | The amdgpu driver lists no GPU; check the card and driver. Integrated GPUs are not supported. |
-| Python or build tools could not be installed | Install what the message names (links are printed), then rerun. |
+| Browser | `http://127.0.0.1:8101/`: chat, a live monitor, settings. |
+| Any OpenAI-compatible app | Base URL `http://127.0.0.1:8101/v1`. API key: the configured one, or any text when there is none. Model name: any (`/v1/models` lists `glm-5.3-flash`). |
+| Anthropic-compatible apps | Base URL `http://127.0.0.1:8101` (they call `/v1/messages`). Claude Code: `ANTHROPIC_BASE_URL=http://127.0.0.1:8101`, `ANTHROPIC_AUTH_TOKEN=<the key, or any text>`; the model name it sends is ignored. |
+| Codex CLI and other Responses API apps | `http://127.0.0.1:8101/v1/responses` ([DETAILS.md](DETAILS.md#the-api)). |
+| Open WebUI | Admin Panel, Settings, Connections, OpenAI API: URL `http://127.0.0.1:8101/v1` and the key. If Open WebUI runs in Docker, `127.0.0.1` there is the container itself: with host networking the URL above works; otherwise Strata must listen beyond `127.0.0.1` (`--host 0.0.0.0 --api-key KEY`, rule 0) and Open WebUI uses `http://host.docker.internal:8101/v1` (on Linux the container needs `--add-host=host.docker.internal:host-gateway`). |
 
-More: [TROUBLESHOOTING.md](TROUBLESHOOTING.md) and the [full table](DETAILS.md#troubleshooting). If it still fails,
-collect `strata-<model>.log` and the setup output, and suggest an issue at https://github.com/Niko1221/Strata/issues.
+What the user should know about it:
 
-## Alternative: the MCP server
+- **One request at a time.** Every app shares the one engine; requests wait in the order they came. A long answer for
+  one app delays the others.
+- **Thinking:** on by default. `"reasoning_effort": "none"` turns it off for a request; `low`, `medium` and `high` all
+  mean on (GLM has no levels). `"reasoning_effort"` in the run config sets the default.
+- **Agents that run tools** (a shell, the web): the model's tool calls come back as tool calls only when the request
+  declares tools, and not with `"tool_choice": "none"`. When the model's tokenizer has GLM's tags as special tokens, a
+  call is read only from those tokens, so call-like text copied from a tool result, a web page or the user stays text
+  and is never run. Whether the real GGUF has them as special tokens is still to be checked on a real install
+  ([GLM53_SERVER_PORT.md](GLM53_SERVER_PORT.md)). The agent still decides what it runs: keep its own confirmation for
+  shell commands.
+- **MCP tools** set up in Strata's run config run for Strata's own chat page only, unless the config says
+  `"mcp_for_api": true`.
+- API details: [DETAILS.md](DETAILS.md#the-api); every config key: [INSTALL.md](INSTALL.md#the-run-config).
 
-Strata also has an MCP server, so an AI tool can check, install, start and stop Strata through tool calls
-(`strata_status`, `strata_models`, `strata_install`, `strata_start`, `strata_stop`, `strata_logs`) instead of the
-shell commands above. See [MCP_SERVER.md](MCP_SERVER.md).
+## 8. When something fails
+
+| What it says | What to do |
+| --- | --- |
+| `no NVIDIA GPU found (nvidia-smi did not answer)` | The NVIDIA driver is missing or not loaded. The user installs it (Ubuntu: `sudo ubuntu-drivers install`) and restarts. |
+| `the NVIDIA driver is too old` | The user updates it to 580 or newer and restarts; then run setup again. |
+| `input ended before a setup answer was received` | Add `--yes`. |
+| `the build tools are needed`, or a sudo password prompt | Ask the user to run the commands in step 4, then run setup again. |
+| `the CUDA Toolkit can be installed automatically on Ubuntu 22.04 / 24.04 only` | The user installs the toolkit from their distribution or https://developer.nvidia.com/cuda-downloads. |
+| `not enough free disk space in ...` | Run setup again with `--data-dir <a folder on a bigger drive>`. |
+| `cannot list the model's files` | No connection to huggingface.co. Check the network, or set `HF_ENDPOINT` to a mirror. |
+| `... do not fit beside Linux and the server ...` | Not enough RAM for that size: choose the 3-bit size, or tell the user. |
+| A download stopped | Run the same command again; it continues. |
+| `port 8101 is already in use` | Strata (or another server) already runs: check `curl http://127.0.0.1:8101/health`. Or start with `--port N`. |
+| `the engine did not start`, `the engine exited before it was ready`, `the engine did not report READY within 900 s` | Read the end of `strata-glm-<size>.log` and report it. |
+| `... is not an address of this PC` | The `host` in the run config is wrong. |
+| HTTP 401 | The server has an API key: send it. |
+| HTTP 403 `Host ... is not allowed (DNS rebinding protection)` | The app uses a host name: set an API key, or add the name to `"allowed_hosts"` in the run config. |
+
+More: [TROUBLESHOOTING.md](TROUBLESHOOTING.md) and [the README](../README.md#something-went-wrong). If it still fails,
+collect the setup output, `strata-server.out` and `strata-glm-<size>.log`, and tell the user what you saw.
+
+## 9. What to report to the user
+
+When you are done, tell the user:
+
+- **What is installed:** the size, the context, the GPUs (in their order), the Strata folder, the data folder with the
+  model files, the run config (`strata-glm-<size>.json`) and the log.
+- **How to start and stop it:** `./setup.sh` or `./run-glm-<size>.sh` in a terminal (Ctrl+C or closing it stops the
+  model; both also end the engine at once, so that run's expert profile is not saved; `kill <the server's PID>` keeps
+  it), or the service if you set one up.
+- **The addresses:** the chat page, the OpenAI base URL, the Anthropic base URL. If you set an API key: the key, and
+  that it is stored in plain text in the run config.
+- **What you checked:** the `/health` answer and the test answer.
+- **Every warning setup printed** (a `[!]` line): little RAM left, a long context on little VRAM, no AVX2.
+- **What you could not do:** a sudo step, a driver, anything the user still has to run.
+- **That speeds and load times of this model are not measured yet** by the project. If you timed something, say what
+  and that it was one run on their PC.
