@@ -159,7 +159,8 @@ PP_SLACK = 3.0
 # Reads that had no timeout (#1317).  A blocking read of the engine's READY line that never returned held the request
 # turn for good: every later request queued behind it.  Generous on purpose: a cold model load (the experts are read
 # into the page cache before READY), a slow disk or a slow CPU is not a hang.  Only a process that says nothing at all
-# for this long is ended; the next request starts it again.
+# for this long is ended - the warm-up's progress lines in its log count: the bound runs from the last one that moved
+# on - and the next request starts it again.
 # STRATA_ENGINE_READY_S overrides it (0 = wait for ever).
 
 
@@ -410,6 +411,24 @@ def narrate_start(log_path: str, offset: int, model_path: str | None, done: thre
                   f"[strata] still starting ({time.time() - t0:.0f} s) - please wait ...", flush=True)
 
 
+WARMING = re.compile(r"warming the experts: ([\d.]+) of ")
+
+
+def warm_progress(log_path: str, pos: int) -> tuple[int, float | None]:
+    """How far the engine's expert warm-up before READY has got, by its log from `pos` on (strata-glm writes
+    "warming the experts: X of Y GB (...)" to stderr every 2 s): (where the next look reads on, the latest X in GB, or
+    None when no whole line since `pos` reports it)."""
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(pos)
+            chunk = f.read()
+    except OSError:
+        return pos, None
+    cut = chunk.rfind(b"\n") + 1                       # whole lines only: the rest is read next time
+    found = WARMING.findall(chunk[:cut].decode("utf-8", "replace"))
+    return pos + cut, float(found[-1]) if found else None
+
+
 class ConvCacheLog:
     """#596: the engine's parked conversations and checkpoints as its log tells it (src/glm/serve_loop.cpp writes
     "conversations: parked N tokens (X MiB, T ms) for ...", "conversations: resumed ... at N of M prompt tokens ...",
@@ -573,9 +592,16 @@ class StrataEngine:
         threading.Thread(target=self._ready_pump, args=(self.proc, ready_q), daemon=True).start()
         ready_deadline = None if ENGINE_READY_S is None else time.monotonic() + ENGINE_READY_S
         timed_out = False
+        warm_pos, warmed = log_start, None               # the warm-up's progress, from the log
         while True:
             left = None if ready_deadline is None else ready_deadline - time.monotonic()
             if left is not None and left <= 0:
+                # the warm-up reads 120-170 GB before READY, longer than the bound from a slow disk or a NAS: while
+                # it moves on, the bound counts from its last progress
+                warm_pos, done = warm_progress(log, warm_pos) if log else (warm_pos, None)
+                if done is not None and (warmed is None or done > warmed):
+                    warmed, ready_deadline = done, time.monotonic() + ENGINE_READY_S
+                    continue
                 timed_out = True
                 break
             try:
@@ -608,8 +634,9 @@ class StrataEngine:
                     self.log.close()
             except (OSError, subprocess.TimeoutExpired):
                 pass
-            why = (f"the engine did not report READY within {ENGINE_READY_S:.0f} s" if timed_out else
-                   f"the engine exited before it was ready (exit code {self.proc.poll()})")
+            why = (f"the engine did not report READY within {ENGINE_READY_S:.0f} s"
+                   + (f" of its last warm-up progress ({warmed:.1f} GB read)" if warmed is not None else "")
+                   if timed_out else f"the engine exited before it was ready (exit code {self.proc.poll()})")
             # EngineDied, not bare RuntimeError: a request waiting on this load must end with a 503
             # through the request path's handler - a RuntimeError there left the turn with no answer (#1527)
             raise EngineDied(why + (f" (see {log})" if log else "") + start_log_tail(log, log_start))

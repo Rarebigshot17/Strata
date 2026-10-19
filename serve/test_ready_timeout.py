@@ -34,6 +34,29 @@ for line in sys.stdin:
         print('T 90\nDONE 1 1 0 1 stop', flush=True)
 '''
 
+# reads the experts into the page cache before READY, reporting on stderr as strata-glm does (every 2 s there): longer
+# than the READY bound in all, but moving on all the time
+WARMING_SLOWLY = r'''
+import sys, time
+for i in range(1, 9):
+    sys.stderr.write('warming the experts: %.1f of 8.0 GB (%d s, 1.00 GB/s)\n' % (i, i))
+    sys.stderr.flush()
+    time.sleep(0.25)
+print('READY 4096 stop', flush=True)
+for line in sys.stdin:
+    if line.startswith('QUIT'):
+        break
+'''
+
+# reports once, then only the same figure: the disk read is stuck
+WARMING_STUCK = r'''
+import sys, time
+while True:
+    sys.stderr.write('warming the experts: 1.0 of 8.0 GB (1 s, 1.00 GB/s)\n')
+    sys.stderr.flush()
+    time.sleep(0.1)
+'''
+
 
 @unittest.skipIf(os.name == "nt", "the .cmd wrapper keeps the pipe open after the kill (only the wrapper dies), so the "
                                   "close of its stdout waits for the sleeping child; a real engine is one process")
@@ -78,6 +101,23 @@ class ReadyTimeout(unittest.TestCase):
             self.assertIn('did not report READY', body)
             self.assertIn('next request restarts it', body)
         self.assertLess(time.monotonic() - t0, 60)
+
+    def test_a_warm_up_that_moves_on_is_not_ended(self):
+        # a cold start from a slower disk: 150 GB at 150 MB/s is more than the bound, and the engine says how far it is
+        log = self.root / 'engine.log'
+        with mock.patch('builtins.print'):
+            eng = StrataEngine(self.make_script('warming', WARMING_SLOWLY), [], log=str(log))
+        self.addCleanup(eng.close)
+        self.assertTrue(eng.alive())
+        self.assertEqual(eng.max_context, 4096)
+
+    def test_a_warm_up_that_stops_moving_is_ended(self):
+        log = self.root / 'engine.log'
+        t0 = time.monotonic()
+        with mock.patch('builtins.print'), self.assertRaises(server.EngineDied) as c:
+            StrataEngine(self.make_script('stuck', WARMING_STUCK), [], log=str(log))
+        self.assertIn('did not report READY', str(c.exception))
+        self.assertLess(time.monotonic() - t0, 10)
 
     def test_ready_timeout_on_lazy_load_answers_the_request(self):
         # lazy start: restart()'s own bookkeeping must not crash on the missing slot_cv either (#1527)
