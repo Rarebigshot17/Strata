@@ -8,7 +8,13 @@ json_schema is checked against its schema when the package is installed - withou
 JSON object, and the server says so once.
 """
 import json
+import re
 import threading
+import time
+
+import regex
+
+PATTERN_TIME_S = 2.0                   # the most time a schema's patterns may take on one answer, all together
 
 
 class StructuredOutputError(RuntimeError):
@@ -30,6 +36,25 @@ class _ObjectError:
 
 _jsonschema = None                     # (validators, SchemaError, Registry, NoSuchResource), False when not installed
 _jsonschema_lock = threading.Lock()
+_patterns_end = threading.local()      # .end: when this thread's validation stops its patterns (time.monotonic())
+
+
+class _TimedRe:
+    """`re` as jsonschema's keywords see it.  `pattern` and `patternProperties` are the client's regular expressions,
+    run on the model's answer: one such as ^(a|a)+$ doubles its time with each character, and re cannot be stopped
+    (nor does it let other threads run).  The `regex` module runs them instead, with re's syntax, and stops them
+    once the answer's patterns took PATTERN_TIME_S (TimeoutError)."""
+
+    def __getattr__(self, name):
+        return getattr(re, name)
+
+    @staticmethod
+    def search(pattern, string):
+        end = getattr(_patterns_end, "end", None)
+        left = PATTERN_TIME_S if end is None else end - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("regex timed out")
+        return regex.search(pattern, string, timeout=left)
 
 
 def jsonschema_modules():
@@ -38,10 +63,12 @@ def jsonschema_modules():
     with _jsonschema_lock:
         if _jsonschema is None:
             try:
-                from jsonschema import validators
+                from jsonschema import _keywords, _legacy_keywords, _utils, validators
                 from jsonschema.exceptions import SchemaError
                 from referencing import Registry
                 from referencing.exceptions import NoSuchResource
+                for module in (_keywords, _legacy_keywords, _utils):   # where jsonschema 4 runs re.search
+                    module.re = _TimedRe()
                 _jsonschema = (validators, SchemaError, Registry, NoSuchResource)
             except ImportError:
                 _jsonschema = False
@@ -208,10 +235,17 @@ def validated_json(text, validator, finish):
         canonical = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
     except (ValueError, TypeError) as exc:
         raise StructuredOutputError(f"model did not return valid JSON: {exc}") from exc
+    _patterns_end.end = time.monotonic() + PATTERN_TIME_S
     try:
         error = next(validator.iter_errors(value), None)
+    except TimeoutError as exc:
+        raise StructuredOutputError(f"the response_format schema's patterns took more than {PATTERN_TIME_S:g} s on "
+                                    "the answer and were stopped (a pattern such as ^(a|a)+$ doubles its time with "
+                                    "each character)") from exc
     except Exception as exc:
         raise StructuredOutputError(f"could not validate structured output: {exc}") from exc
+    finally:
+        _patterns_end.end = None
     if error is not None:
         path = "/" + "/".join(str(part) for part in error.absolute_path)
         raise StructuredOutputError(f"model output failed the JSON Schema at {path}: {error.message}")
