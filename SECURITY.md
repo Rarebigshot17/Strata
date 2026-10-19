@@ -19,15 +19,16 @@ code too is worth reporting there as well, through its own Security tab.
 ## What the server exposes
 
 Strata runs a model on your PC and serves it over HTTP (`serve/server.py`, port 8101). Out of the box it is reachable
-from this PC only. Every setting below is a key of the run config (`strata-glm-<size>.json`):
-[docs/DETAILS.md](docs/DETAILS.md#settings) and [the run config](docs/INSTALL.md#the-run-config).
+from this PC only. The settings named below in quotes are keys of the run config (`strata-glm-<size>.json`), the
+others are command-line options or environment variables: [docs/DETAILS.md](docs/DETAILS.md#settings) and
+[the run config](docs/INSTALL.md#the-run-config).
 
 - **Where it listens.** `127.0.0.1` by default. `--host 0.0.0.0` (or `"host"` in the run config) opens it to your
   network, and the server then warns when no API key is set.
 - **API key.** `"api_key"` in the run config (or `--api-key`, or `STRATA_API_KEY`; several keys separated by
   commas) is required on `/v1/*`, on every endpoint that shows the model's state, requests or answers (`/status`,
-  `/metrics`, `/settings`, `/mcp`, `/props`, `/slots`, `/api/requests`, `/config`) and on every `POST`. Clients send
-  it as `Authorization: Bearer <key>` or `x-api-key`. It is compared in constant time. An empty `--api-key` or
+  `/metrics`, `/settings`, `/mcp`, `/props`, `/slots`, `/api/requests`, `/config`) and on every `POST`. `/health`
+  and the web page's own files stay open. Clients send it as `Authorization: Bearer <key>` or `x-api-key`. It is compared in constant time. An empty `--api-key` or
   `STRATA_API_KEY` stops the server at start; an empty `"api_key"` in the run config gets a warning and leaves the
   server without a key. Set a key before you open the server to your network, to a
   Docker bridge or to Tailscale, or put a tunnel in front of it.
@@ -39,8 +40,9 @@ from this PC only. Every setting below is a key of the run config (`strata-glm-<
   `Origin` header) gets 403 unless that origin is Strata's own page, `localhost`, an allowed host, or listed in
   `"trusted_origins"` / `"cors_origins"`. Changing settings (`/settings`, and `/config`: the few run config keys the
   page's Settings view may change, never the network, key, MCP or program keys), `/load` and `/unload` and the MCP
-  tools are accepted only as JSON from Strata's own page (or a `"trusted_origins"` origin), so a page elsewhere
-  cannot change settings or run tools.
+  tools are accepted only as JSON, and a request that carries an `Origin` header must come from Strata's own page
+  (or a `"trusted_origins"` origin), so a page elsewhere cannot change settings or run tools. A client that is no
+  browser sends no `Origin`; it needs the API key when one is set.
 - **CORS** is off unless `"cors_origins"` lists origins, and then only for `/v1/*`.
 - **Tool calls** are read from the model's own special tokens only (when the tokenizer has GLM's tags as special
   tokens, as the real GGUF does). A call the model copies as plain text, from a tool result, a web page or the user,

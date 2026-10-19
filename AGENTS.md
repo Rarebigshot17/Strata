@@ -25,7 +25,7 @@ API key (`--api-key`). The server's port is 8101.
 | `tests/glm/` | The engine's C++ unit tests (sampler, serve loop): no GPU, no model file. |
 | `serve/` | The server: `server.py` (HTTP, the engine driver, the queue), `frontend.py` (chat template, output parser for thinking and tool calls), `responses.py`, `mcp.py`, `structured.py`, `runconfig.py`, `prometheus.py`, `web/` (the web app), and the tests `test_*.py`. |
 | `setup.py`, `setup.sh`, `update.sh` | The installer, its launcher and the updater. |
-| `tools/` | The GLM checks (`glm53_*`), the setup tests (`test_*.py`), `strata_bench.py` (`./bench.sh`), and helpers. |
+| `tools/` | The GLM checks (`glm53_*`), the tests of setup and of the tools (`test_*.py`), `strata_bench.py` (`./bench.sh`), and helpers. |
 | `docs/` | The user docs, and the port's record: [GLM53_PORT.md](docs/GLM53_PORT.md) (the engine, and the steps to run on the owner's machine) and [GLM53_SERVER_PORT.md](docs/GLM53_SERVER_PORT.md) (the server's decisions, the engine protocol, the plan's state). |
 
 How it works: [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md). The API and every setting:
