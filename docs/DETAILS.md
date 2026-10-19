@@ -589,9 +589,11 @@ The model loads when the server starts, and the port opens once the engine is re
   ```
 
 - `"min_free_vram_mib": N` (or `--min-free-vram-mib N`): an unloaded model is loaded again only when every GPU of
-  the config (the first card when it names none) has N MiB free (waiting up to 15 s for memory another program just
-  gave back); otherwise the request gets a 503 with `Retry-After` that names the fullest card. A layer split needs its
-  share on each card, so a program on any of them is in the way; a card NVML cannot read is left out.
+  the config has N MiB free (waiting up to 15 s for memory another program just gave back); otherwise the request
+  gets a 503 with `Retry-After` that names the fullest card. A config that names no GPU (setup's when every card can
+  run the engine) means every card, as the engine uses them all; the first only when `CUDA_VISIBLE_DEVICES` is set
+  in the server's environment. A layer split needs its share on each card, so a program on any of them is in the
+  way; a card NVML cannot read is left out.
 - `"before_load": "<command>"` (a string or a list; or `--before-load`): a command run before the model is loaded
   again, for example another server's unload. It may run `"before_load_timeout_s"` seconds (default 120). When it
   fails, the model is loaded anyway, unless `min_free_vram_mib` is set and too little VRAM is free (503).

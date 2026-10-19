@@ -2908,9 +2908,33 @@ class SharingTheGpu(unittest.TestCase):
             self.assertEqual(self.svc.free_vram_mib(), 3000)
             free.update({1: None, 2: None})
             self.assertIsNone(self.svc.free_vram_mib())
-            self.svc.gpu_indices = []                                # a config that names no GPU: the first card
-            free[0] = 4000
-            self.assertEqual(self.svc.free_vram_mib(), 4000)
+            self.svc.gpu_indices = []                                # a config that names no GPU, without NVML
+            free[0] = 4000                                           # to count the cards: the first card
+            with mock.patch("serve.telemetry.gpu_reader", lambda index=0: mock.Mock(ok=lambda: False)):
+                self.assertEqual(self.svc.free_vram_mib(), 4000)
+
+    def test_min_free_vram_reads_every_card_when_the_config_names_none(self):
+        # setup names no GPU when every card can run the engine (napster-ai's three), and the engine then splits the
+        # layers over all the cards it sees: a program on the third card is in the way as on the first
+        free = {0: 20000, 1: 20000, 2: 1500}
+        self.svc.gpu_index, self.svc.gpu_indices = 0, []
+        self.svc.min_free_vram_mib = 8000
+        self.svc.vram_free_wait_s = 0.2
+        self.svc.unload()
+        cards = mock.patch("serve.telemetry.gpu_reader", lambda index=0: mock.Mock(ok=lambda: index in free))
+        with cards, mock.patch("serve.telemetry.free_vram_mib", lambda index=0: free.get(index)), \
+                mock.patch.dict(os.environ):
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+            s, b = self.chat()
+            self.assertEqual(s, 503, b)
+            self.assertIn("1500 MiB of VRAM free on GPU 2", b["error"]["message"])
+            self.assertFalse(self.engine.alive())
+            # CUDA_VISIBLE_DEVICES in the server's environment hides cards whose NVML numbers are unknown: the first
+            os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+            self.assertEqual(self.svc.free_vram_mib(), 20000)
+            free[2] = 9000
+            del os.environ["CUDA_VISIBLE_DEVICES"]
+            self.assertEqual(self.chat()[0], 200)
 
     def test_min_free_vram_unreadable_loads(self):
         self.svc.min_free_vram_mib = 8000

@@ -1573,13 +1573,30 @@ class Service:
         try:
             from serve.telemetry import free_vram_mib
             least = None
-            for index in getattr(self, "gpu_indices", None) or [int(getattr(self, "gpu_index", 0) or 0)]:
+            for index in self.vram_cards():
                 free = free_vram_mib(index)
                 if free is not None and (least is None or free < least):
                     least, self.vram_gpu = free, index
             return least
         except Exception:  # noqa: BLE001 - no NVML, no reading
             return None
+
+    def vram_cards(self) -> list[int]:
+        """The cards free_vram_mib() reads, numbered as nvidia-smi numbers them: the config's GPUs.  A config that
+        names none (setup's when every card can run the engine) lets the engine split the layers over every card it
+        sees, so every card NVML counts - or the first card only when CUDA_VISIBLE_DEVICES in the server's environment
+        hides some, since its numbers need not be NVML's."""
+        named = getattr(self, "gpu_indices", None)
+        if named:
+            return list(named)
+        first = int(getattr(self, "gpu_index", 0) or 0)
+        if os.environ.get("CUDA_VISIBLE_DEVICES") is not None:
+            return [first]
+        from serve.telemetry import gpu_reader
+        cards = []
+        while len(cards) < 64 and gpu_reader(len(cards)).ok():
+            cards.append(len(cards))
+        return cards or [first]
 
     def ensure_loaded(self):
         """Start the engine if it is not running (unloaded, or it died - issue #27), after the before_load hook and
