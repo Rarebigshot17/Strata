@@ -3707,7 +3707,7 @@ def make_handler(svc: Service):
             if title is not None:
                 return self._responses_ready(req, title)
             try:
-                ids, thinking, tools, max_new, asm, validator, req = self._responses_prepare(req)
+                ids, thinking, tools, max_new, asm, validator, req, force = self._responses_prepare(req)
             except ResponsesError as e:
                 return self._json(e.status, e.body())
             except ModelBusy as e:
@@ -3723,7 +3723,7 @@ def make_handler(svc: Service):
             def events():
                 yield from asm.start()
                 done = None
-                for kind, x in svc.run(ids, thinking, tools, max_new, req, cancel):
+                for kind, x in svc.run(ids, thinking, tools, max_new, req, cancel, force):
                     if kind == "ping":
                         yield None
                     elif kind == "event":
@@ -3812,6 +3812,15 @@ def make_handler(svc: Service):
                 noted.update(skipped)
             if req.get("max_output_tokens") is None and "max_tokens" in svc.shared:   # the shared Chat settings
                 req = {**req, "max_output_tokens": svc.shared["max_tokens"]}
+            choice = req.get("tool_choice")              # "required" or a named tool: the reply opens with the call,
+            if isinstance(choice, dict) and choice.get("type") in ("function", "custom") and tools:   # as on chat
+                name = choice.get("name")               # a namespace's or custom tool: the name the template shows
+                shows = {t["name"] for t in tools}
+                if name not in shows:
+                    name = next((flat for flat, (_ns, own, _kind) in names.items()
+                                 if own == name and flat in shows), name)
+                choice = {"type": "function", "name": name}
+            force = forced_call(choice, tools)
             try:
                 svc.reasoning_budget(req)                    # a bad value is a 400 before anything is sent
             except ValueError as e:
@@ -3830,12 +3839,14 @@ def make_handler(svc: Service):
             shown = responses_api.prompt_tools(req, tools) if svc.codex_compaction_cache else tools
             try:
                 try:
-                    ids, thinking, max_new = svc.prepare(messages, shown, kw, req.get("max_output_tokens") or 0)
+                    ids, thinking, max_new = svc.prepare(messages, shown, kw, req.get("max_output_tokens") or 0,
+                                                         force=force)
                 except ValueError:
                     if shown is tools:
                         raise
                     shown = tools                            # too long with the kept tools: the request as sent
-                    ids, thinking, max_new = svc.prepare(messages, shown, kw, req.get("max_output_tokens") or 0)
+                    ids, thinking, max_new = svc.prepare(messages, shown, kw, req.get("max_output_tokens") or 0,
+                                                         force=force)
             except ResponsesError:
                 raise
             except ValueError as e:                          # too long for the context, a picture
@@ -3848,7 +3859,7 @@ def make_handler(svc: Service):
             asm = responses_api.Assembler(req, svc.model_for(req), len(ids), names,
                                           "reasoning.encrypted_content" in include, validator is not None)
             # the request is also the sampling dict, as on the chat path (temperature, top_p, top_k, seed, ...)
-            return ids, thinking, responses_api.parser_tools(tools, names), max_new, asm, validator, req
+            return ids, thinking, responses_api.parser_tools(tools, names), max_new, asm, validator, req, force
 
         def _count_tokens(self, req):
             """Anthropic's token count, which Claude Code asks for its context figures: the prompt this server would

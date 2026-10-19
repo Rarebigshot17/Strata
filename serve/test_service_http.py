@@ -230,6 +230,30 @@ class ResponsesLikeChat(Http):
         self.svc.shared = {"reasoning_effort": "high"}
         self.assertTrue(self.prompt_end("/v1/responses", {"input": "x"}).endswith("<think>"))
 
+    def test_tool_choice_forces_the_call(self):
+        """tool_choice "required" or a named function makes the reply a call, as on the chat route."""
+        params = {"type": "object", "properties": {"cmd": {"type": "string"}}}
+        chat_tools = [{"type": "function", "function": {"name": n, "parameters": params}} for n in ("run", "read")]
+        tools = [{"type": "function", "name": n, "parameters": params} for n in ("run", "read")]
+        for choice, chat_choice, end in (("required", "required", "<tool_call>"),
+                                         ({"type": "function", "name": "run"},
+                                          {"type": "function", "function": {"name": "run"}}, "<tool_call>run")):
+            with self.subTest(choice=choice):
+                chat = self.prompt_end("/v1/chat/completions", {
+                    "messages": [{"role": "user", "content": "x"}], "tools": chat_tools, "tool_choice": chat_choice,
+                    "reasoning_effort": "none"})
+                responses = self.prompt_end("/v1/responses", {"input": "x", "tools": tools, "tool_choice": choice,
+                                                              "reasoning": {"effort": "none"}})
+                self.assertTrue(chat.endswith(end), chat)
+                self.assertEqual(responses, chat)
+        # a namespace's tool named by its own name: the name the template shows
+        ns = [{"type": "namespace", "name": "shell", "tools": [{"type": "function", "name": "run",
+                                                                "parameters": params}]},
+              {"type": "function", "name": "read", "parameters": params}]
+        self.assertTrue(self.prompt_end("/v1/responses", {
+            "input": "x", "tools": ns, "tool_choice": {"type": "function", "name": "run"},
+            "reasoning": {"effort": "none"}}).endswith("<tool_call>shell.run"))
+
 
 if __name__ == "__main__":
     unittest.main()
