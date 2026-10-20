@@ -3,8 +3,8 @@
 A fake engine process (FAKE_ENGINE below) speaks strata-glm's serve protocol: INFO with park_mib and logit_bias,
 READY, then for each GEN line RESUME, PP, HB, T and DONE (or ERR / ERR internal), and its "conversations:" lines on
 stderr; it records its argv and every line it reads.  It is driven through StrataEngine and, over HTTP, through the
-Service.  The other tests use the GLM chat template (serve/fixtures/glm47_flash.jinja) with a byte tokenizer, and a
-small GGUF that holds a GLM-style tokenizer and template.
+Service.  The other tests use GLM-5.3-Flash's chat template (serve/chat_template.jinja, the real GGUF's) with a byte
+tokenizer, and a small GGUF that holds a GLM-style tokenizer and template.
 
     python3 -m unittest serve.test_glm_engine_protocol -v
 """
@@ -31,7 +31,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 from serve import server as S  # noqa: E402
 from serve.frontend import ChatTemplate  # noqa: E402
 
-GLM_TEMPLATE = ROOT / "serve" / "fixtures" / "glm47_flash.jinja"
+GLM_TEMPLATE = ROOT / "serve" / "chat_template.jinja"
 
 FAKE_ENGINE = r'''
 import os, sys
@@ -289,19 +289,27 @@ class CheckpointTests(unittest.TestCase):
         self.assertEqual(self.svc.engine.last_checkpoint, cp)
         self.assertIsNone(self.svc.checkpoint.at)       # taken by that run, not left for another
 
-    def test_the_next_turn_goes_on_from_the_checkpoint(self):
-        # the next turn's prompt starts with this one's up to the checkpoint; after it the reply is written again
-        # without its reasoning, so the engine's state after the generation prompt could not have been continued
+    def test_the_next_turn_goes_on_from_the_reply(self):
+        # the next turn's prompt starts with this one's and the reply as the model wrote it (GLM-5.3-Flash's template
+        # keeps the reasoning of earlier turns: clear_thinking is false by default), so the engine's state after the
+        # reply is continued; with clear_thinking true the reply is written again without its reasoning, and the
+        # engine goes on from the checkpoint
         turn1 = self.messages[:2]
         ids1, _, _ = self.svc.prepare(turn1, None, {})
         cp1 = self.svc.checkpoint.at
         turn2 = turn1 + [{"role": "assistant", "content": "Hello!", "reasoning_content": "Greet back."},
                          {"role": "user", "content": "More"}]
         ids2, _, _ = self.svc.prepare(turn2, None, {})
+        reply = self.tok.encode("Greet back.</think>Hello!<|user|>", parse_special=True)
+        self.assertEqual(ids2[:len(ids1) + len(reply)], ids1 + reply)
+        self.assertEqual(self.tok.decode(ids2[cp1:]),
+                         "<|assistant|><think>Greet back.</think>Hello!<|user|>More<|assistant|><think>")
+        self.assertEqual(self.svc.checkpoint.at, len(ids2) - 2)
+        ids2, _, _ = self.svc.prepare(turn2, None, {"clear_thinking": True})
         self.assertEqual(ids2[:cp1], ids1[:cp1])
-        self.assertNotEqual(ids2[:len(ids1)], ids1)
-        self.assertEqual(self.tok.decode(ids2[cp1:]), "<|assistant|></think>Hello!<|user|>More<|assistant|><think>")
-        self.assertGreater(self.svc.checkpoint.at, cp1)
+        self.assertNotEqual(ids2[:len(ids1) + len(reply)], ids1 + reply)
+        self.assertEqual(self.tok.decode(ids2[cp1:]),
+                         "<|assistant|><think></think>Hello!<|user|>More<|assistant|><think>")
 
     def test_no_checkpoint_when_the_conversation_is_not_a_prefix(self):
         self.svc.template = ChatTemplate(

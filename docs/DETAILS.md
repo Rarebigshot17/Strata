@@ -162,10 +162,9 @@ and `false` mean "off". Any other value is a 400.
   `budget_tokens` that is not a whole number is a 400.
 - The thinking comes back as `reasoning_content` (OpenAI, in the stream's deltas and the message), as `thinking`
   blocks (Anthropic, with an empty `signature`) or as a `reasoning` output item (Responses). Send it back with the
-  conversation as the API does. GLM's template keeps the thinking of the turns after the last user message and drops
-  the older ones, unless `"chat_template_kwargs": {"clear_thinking": false}` (this is the behaviour of the template
-  Strata falls back to, `serve/chat_template.jinja`; the server uses the template inside the model's GGUF, which is
-  still to be checked on the real file).
+  conversation as the API does. GLM-5.3-Flash's template keeps the thinking of every earlier turn, unless the
+  request sends `"chat_template_kwargs": {"clear_thinking": true}` (the template in the real GGUF; Strata's
+  fallback, `serve/chat_template.jinja`, is a copy of it).
 
 **The reasoning budget.** `"reasoning_budget_tokens": N` in a request (chat, Anthropic or Responses), Anthropic's
 `thinking.budget_tokens`, the shared settings' or the run config's caps the thinking at N tokens, in that order: a

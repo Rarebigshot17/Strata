@@ -414,8 +414,9 @@ class LiteralThinkTags(unittest.TestCase):
                      {"role": "tool", "content": f"file has {lit} in it"},
                      {"role": "user", "content": f"why did you write {lit}"}],
                     [{"name": "write", "description": f"writes text (may contain {lit})", "parameters": {}}])
-        # clear_thinking false: the history turn's reasoning is rendered too; by default it is dropped
-        for kw in ({"clear_thinking": False}, {}):
+        # the history turn's reasoning is rendered too (clear_thinking is false by default); clear_thinking true
+        # drops it
+        for kw in ({}, {"clear_thinking": True}):
             for lit in self.TAGS:
                 with self.subTest(literal=lit, **kw):
                     ids = self.ids(*messages(lit), **kw)
@@ -427,13 +428,15 @@ class LiteralThinkTags(unittest.TestCase):
                              f"why did you write {lit}", f"may contain {lit}"]
                     for part in parts + ([] if lit in self.CALL_TAGS else [f"It wrote {lit} here."]):
                         self.assertIn(part, text)
-                    self.assertEqual(f"the {lit} tag" in text, kw == {"clear_thinking": False})
-        # the reasoning markers: the history turn's <think>...</think> (only </think> once its reasoning is dropped)
+                    self.assertEqual(f"the {lit} tag" in text, kw == {})
+        # the reasoning markers: the history turn's <think>...</think> (<think></think> once its reasoning is dropped)
         # and the generation prompt's <think>
-        ids = self.ids(*messages("X"), clear_thinking=False)
-        self.assertEqual((ids.count(self.open), ids.count(self.close)), (2, 1))
         ids = self.ids(*messages("X"))
-        self.assertEqual((ids.count(self.open), ids.count(self.close)), (1, 1))
+        self.assertEqual((ids.count(self.open), ids.count(self.close)), (2, 1))
+        self.assertIn("<think>the X tag</think>", self.tok.decode(ids))
+        ids = self.ids(*messages("X"), clear_thinking=True)
+        self.assertEqual((ids.count(self.open), ids.count(self.close)), (2, 1))
+        self.assertIn("<|assistant|><think></think>It wrote X here.", self.tok.decode(ids))
 
     def test_call_text_in_an_assistant_reply(self):
         # a call left in an assistant's content is one the server read as text (a quote, ordinary tokens copied from
@@ -442,25 +445,27 @@ class LiteralThinkTags(unittest.TestCase):
         msgs = [{"role": "user", "content": "go"}, {"role": "assistant", "content": "Saving </think> it." + call},
                 {"role": "user", "content": "again"}]
         ids = self.ids(msgs)
-        # the prompt's <think> and the history's </think> (the template's: the quoted one is text)
-        self.assertEqual(self.counts(ids), [1, 1, 0, 0, 0, 0, 0, 0, 0, 0])
+        # the history's <think></think> and the prompt's <think> (the template's: the quoted one is text)
+        self.assertEqual(self.counts(ids), [2, 1, 0, 0, 0, 0, 0, 0, 0, 0])
         self.assertIn("Saving </think> it." + call, self.tok.decode(ids))
 
     def test_a_client_that_sends_the_reasoning_inline(self):
         # an assistant turn whose content opens with its own <think>...</think> block keeps that block's markers: the
-        # template splits the reasoning off there (and drops it once a user turn follows), the quoted tag stays text
+        # template splits the reasoning off there (and keeps it, unless clear_thinking is true), the quoted tag stays
+        # text
         msgs = [{"role": "user", "content": "hi"},
                 {"role": "assistant",
                  "content": "<think>\nplan: say </x> hello\n</think>\n\nHello, </think> is a tag."},
                 {"role": "user", "content": "again"}]
         ids = self.ids(msgs)
-        self.assertEqual((ids.count(self.open), ids.count(self.close)), (1, 1))   # the history's </think>, the prompt's
-        text = self.tok.decode(ids)
-        self.assertIn("<|assistant|></think>Hello, </think> is a tag.<|user|>again", text)
-        self.assertNotIn("plan:", text)
-        ids = self.ids(msgs, clear_thinking=False)
         self.assertEqual((ids.count(self.open), ids.count(self.close)), (2, 1))   # the inline block's two, the prompt's
-        self.assertIn("<think>plan: say </x> hello</think>Hello, </think> is a tag.", self.tok.decode(ids))
+        self.assertIn("<think>\nplan: say </x> hello\n</think>Hello, </think> is a tag.<|user|>again",
+                      self.tok.decode(ids))
+        ids = self.ids(msgs, clear_thinking=True)
+        self.assertEqual((ids.count(self.open), ids.count(self.close)), (2, 1))   # the history's <think></think>, ...
+        text = self.tok.decode(ids)
+        self.assertIn("<|assistant|><think></think>Hello, </think> is a tag.<|user|>again", text)
+        self.assertNotIn("plan:", text)
 
     def test_the_real_tokenizer_reads_the_tag_as_text(self):
         import strata_tokenizer as ST
@@ -519,8 +524,9 @@ class LiteralControlTokens(unittest.TestCase):
                      {"role": "tool", "content": f"file has {lit} in it"},
                      {"role": "user", "content": f"why did you write {lit}"}],
                     [{"name": "write", "description": f"writes text (may contain {lit})", "parameters": {}}])
-        # clear_thinking false: the history turn's reasoning is rendered too; by default it is dropped
-        for kw in ({"clear_thinking": False}, {}):
+        # the history turn's reasoning is rendered too (clear_thinking is false by default); clear_thinking true
+        # drops it
+        for kw in ({}, {"clear_thinking": True}):
             for lit in ByteTokenizer.SPECIALS:
                 with self.subTest(literal=lit, **kw):
                     ids = self.ids(*messages(lit), **kw)
@@ -529,7 +535,7 @@ class LiteralControlTokens(unittest.TestCase):
                     for part in (f"The stop string is {lit}.", f"It wrote {lit} here.", f"a {lit} b",
                                  f"file has {lit} in it", f"why did you write {lit}", f"may contain {lit}"):
                         self.assertIn(part, text)
-                    self.assertEqual(f"the {lit} token" in text, kw == {"clear_thinking": False})
+                    self.assertEqual(f"the {lit} token" in text, kw == {})
 
     def test_beside_a_quoted_think_tag(self):
         text = "</think> and <|user|> are both quoted here"
@@ -560,14 +566,15 @@ class LiteralControlTokens(unittest.TestCase):
 
 
 class CheckpointAtTheAnswer(unittest.TestCase):
-    """The engine's checkpoint (cp=) is where the generation prompt starts.  GLM's template switches thinking on or
-    off only there (<|assistant|><think> or <|assistant|></think>) and has no effort levels, so a request that
-    changes the effort keeps the cached conversation, and the next turn starts with the tokens before the checkpoint
-    (#458 asked this of Qwen's effort turn, which needed an option)."""
+    """The engine's checkpoint (cp=) is where the generation prompt starts (<|assistant|><think>).  GLM-5.3-Flash's
+    template writes the effort as the prompt's first turn ("<|system|>Reasoning Effort: Low|High|Max", right after
+    [gMASK]<sop>): requests of one level share the cached conversation, thinking on or off, and a request of another
+    level is another prompt from its first turn.  The template keeps the reasoning of earlier turns (clear_thinking is
+    false by default), so the next turn's prompt starts with this one's and the reply as the model wrote it."""
 
     CHAT = [{"role": "system", "content": "You are a careful assistant. " * 40},
             {"role": "user", "content": "Explain the conversation cache. " * 20}]
-    REPLY = {"role": "assistant", "content": "It keeps the prompt's state. " * 20,
+    REPLY = {"role": "assistant", "content": ("It keeps the prompt's state. " * 20).strip(),
              "reasoning_content": "The user wants the cache explained."}
     NEXT = {"role": "user", "content": "And the checkpoints?"}
 
@@ -582,23 +589,27 @@ class CheckpointAtTheAnswer(unittest.TestCase):
         return ids, thinking, self.svc.checkpoint.at
 
     def test_the_checkpoint_is_before_the_generation_prompt(self):
-        conversation = self.tok.encode(self.svc.template.render(self.CHAT, add_generation_prompt=False),
-                                       parse_special=True)
-        for kw, opening in (({}, "<think>"), ({"reasoning_effort": "low"}, "<think>"),
-                            ({"reasoning_effort": "high"}, "<think>"), ({"enable_thinking": False}, "</think>")):
+        for kw, level, opening in (({}, "Max", "<think>"), ({"reasoning_effort": "low"}, "Low", "<think>"),
+                                   ({"reasoning_effort": "high"}, "High", "<think>"),
+                                   ({"enable_thinking": False}, "Max", "<think></think>")):
             with self.subTest(kw=kw):
+                conversation = self.tok.encode(self.svc.template.render(self.CHAT, add_generation_prompt=False, **kw),
+                                               parse_special=True)
                 ids, thinking, cp = self.prepared(self.CHAT, **kw)
                 self.assertEqual((cp, ids[:cp]), (len(conversation), conversation))
+                self.assertTrue(self.tok.decode(ids).startswith(
+                    f"[gMASK]<sop><|system|>Reasoning Effort: {level}<|system|>You are a careful assistant."))
                 self.assertEqual(self.tok.decode(ids[cp:]), "<|assistant|>" + opening)
                 self.assertEqual(thinking, opening == "<think>")
 
-    def test_changing_the_effort_keeps_the_conversation(self):
-        # over HTTP: every effort's prompt is the same conversation up to the checkpoint the engine is given
+    def test_one_effort_keeps_the_conversation(self):
+        # over HTTP: the prompts of one level are the same conversation up to the checkpoint the engine is given,
+        # thinking on or off (off is the template's default level, Max); another level changes the first turn
         httpd = serve(self.svc, port=0)
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
-        heads, tails = [], []
+        efforts, heads, tails = (None, "low", "none", "high", "off"), {}, []
         try:
-            for effort in (None, "low", "none", "medium", "high", "off"):
+            for effort in efforts:
                 body = {"model": "m", "max_tokens": 8, "messages": self.CHAT,
                         **({"reasoning_effort": effort} if effort else {})}
                 req = urllib.request.Request(base + "/v1/chat/completions", data=json.dumps(body).encode(),
@@ -606,26 +617,47 @@ class CheckpointAtTheAnswer(unittest.TestCase):
                 with contextlib.redirect_stdout(io.StringIO()), urllib.request.urlopen(req, timeout=30) as r:
                     self.assertEqual(r.status, 200)
                 cp, ids = self.engine.last_checkpoint, self.engine.last_prompt
-                heads.append(ids[:cp])
+                heads[effort] = ids[:cp]
                 tails.append(self.tok.decode(ids[cp:]))
         finally:
             httpd.shutdown()
             httpd.server_close()
-        self.assertEqual(len({tuple(h) for h in heads}), 1)
-        self.assertGreater(len(heads[0]), 400)
-        self.assertEqual(tails, ["<|assistant|><think>", "<|assistant|><think>", "<|assistant|></think>",
-                                 "<|assistant|><think>", "<|assistant|><think>", "<|assistant|></think>"])
+        self.assertGreater(len(heads[None]), 400)
+        self.assertEqual(heads["none"], heads[None])
+        self.assertEqual(heads["off"], heads[None])
+        self.assertEqual(len({tuple(heads[e]) for e in (None, "low", "high")}), 3)
+        for effort, level in ((None, "Max"), ("low", "Low"), ("high", "High")):
+            self.assertTrue(self.tok.decode(heads[effort]).startswith(
+                f"[gMASK]<sop><|system|>Reasoning Effort: {level}"))
+        self.assertEqual(tails, ["<|assistant|><think>", "<|assistant|><think>", "<|assistant|><think></think>",
+                                 "<|assistant|><think>", "<|assistant|><think></think>"])
 
-    def test_the_next_turn_starts_with_the_checkpoint(self):
-        for kw in ({}, {"enable_thinking": False}):
+    def test_the_next_turn_goes_on_from_the_reply(self):
+        # the reply comes back in the next turn as the model wrote it (thinking on: its reasoning, then </think> and
+        # the answer; thinking off: the answer after the <think></think> the prompt ended with), so the prompt and the
+        # reply are the start of the next turn's prompt: the engine goes on from the end of the reply.  The next
+        # checkpoint is before the next generation prompt.
+        answer = {"role": "assistant", "content": self.REPLY["content"]}
+        for kw, reply, written, opening in (
+                ({}, self.REPLY, reply_text(self.REPLY["reasoning_content"], self.REPLY["content"]), "<think>"),
+                ({"enable_thinking": False}, answer, reply_text(None, self.REPLY["content"]), "<think></think>")):
             with self.subTest(kw=kw):
                 first, _, cp1 = self.prepared(self.CHAT, **kw)
-                second, _, cp2 = self.prepared(self.CHAT + [self.REPLY, self.NEXT], **kw)
-                self.assertEqual(second[:cp1], first[:cp1])       # the whole first conversation is reused
-                self.assertEqual(cp2, len(second) - 2)            # before the two tokens of the generation prompt
-                # the reply's reasoning is gone once a user turn follows: the engine's state after the reply could not
-                # be continued, the checkpoint before it can
-                self.assertNotIn(self.REPLY["reasoning_content"], self.tok.decode(second))
+                second, _, cp2 = self.prepared(self.CHAT + [reply, self.NEXT], **kw)
+                self.assertEqual(second[:cp1], first[:cp1])
+                answered = first + self.tok.encode(written + "<|user|>", parse_special=True)   # its end of turn too
+                self.assertEqual(second[:len(answered)], answered)
+                self.assertEqual(self.tok.decode(second[len(answered):]), "And the checkpoints?<|assistant|>" + opening)
+                self.assertEqual(self.tok.decode(second[cp2:]), "<|assistant|>" + opening)
+        # clear_thinking true: the reply is written again without its reasoning; the engine goes on from the checkpoint
+        first, _, cp1 = self.prepared(self.CHAT, clear_thinking=True)
+        second, _, _ = self.prepared(self.CHAT + [self.REPLY, self.NEXT], clear_thinking=True)
+        self.assertEqual(second[:cp1], first[:cp1])
+        answered = first + self.tok.encode(reply_text(self.REPLY["reasoning_content"], self.REPLY["content"]),
+                                           parse_special=True)
+        self.assertNotEqual(second[:len(answered)], answered)
+        self.assertNotIn(self.REPLY["reasoning_content"], self.tok.decode(second))
+        self.assertIn("<|assistant|><think></think>It keeps", self.tok.decode(second))
 
 
 class StatusNeedsTheKey(unittest.TestCase):

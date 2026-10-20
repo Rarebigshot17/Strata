@@ -386,7 +386,7 @@ explained in [DETAILS.md](DETAILS.md#settings). Keys the server does not know ar
 | --- | --- | --- |
 | `split` | Each card's share of the layers, in the order of `gpu`: `[24, 12, 10]` or `"24,12,10"`. One positive number per card. Passed as `--split`. | Each card's free VRAM |
 | `env` | Extra environment variables for the engine: `{"NAME": "value"}`. | None |
-| `chat_template` | A Jinja file to use instead of the template in the model's GGUF (also `--chat-template`). | The GGUF's, else `serve/chat_template.jinja` |
+| `chat_template` | A Jinja file to use instead of the template in the model's GGUF (also `--chat-template`). | The GGUF's, else `serve/chat_template.jinja` (a copy of the template in the real GLM-5.3-Flash GGUF) |
 | `sampling` | Defaults for requests that set none: `temperature`, `top_p`, `top_k`, `min_p`, `presence_penalty`, `frequency_penalty`, `repetition_penalty` (or `repeat_penalty`), `penalty_last_n` (or `repeat_last_n`), `seed`. A value out of range (NaN, a temperature below 0, a `top_p` outside 0-1, a repetition penalty of 0 or less) stops the start and names the key. A request's own values win. | temperature 1.0, top_p 0.95 |
 | `reasoning_effort` | Thinking for requests that do not say: `none` turns it off; `low`, `medium` and `high` turn it on (GLM thinks or does not, it has no levels). | On |
 | `reasoning_budget_tokens` | The most tokens a request may think, then the model is told to wrap up. 0 = no cap. A request can set its own. | No cap |

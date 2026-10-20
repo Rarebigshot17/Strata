@@ -4771,8 +4771,8 @@ def config_path_of(cfg: dict, value: str) -> str:
 
 def chat_template_for(model: ModelFiles | None, override: str | None) -> ChatTemplate:
     """The chat template: `override` (--chat-template, the config's "chat_template") when given, else the model's own
-    (its GGUF's tokenizer.chat_template), else serve/chat_template.jinja (GLM's).  SystemExit for a file that cannot be
-    read or a template that does not compile."""
+    (its GGUF's tokenizer.chat_template), else serve/chat_template.jinja (GLM-5.3-Flash's, copied from the real GGUF).
+    SystemExit for a file that cannot be read or a template that does not compile."""
     try:
         if override:
             return ChatTemplate(override)
@@ -4781,7 +4781,8 @@ def chat_template_for(model: ModelFiles | None, override: str | None) -> ChatTem
     except Exception as e:  # noqa: BLE001 - a file that cannot be read, a template that does not compile
         raise SystemExit(f"[strata] the chat template cannot be used: {type(e).__name__}: {e}")
     if model is not None:
-        print("[strata] the model's GGUF has no chat template: using serve/chat_template.jinja (GLM's)", flush=True)
+        print("[strata] the model's GGUF has no chat template: using serve/chat_template.jinja (GLM-5.3-Flash's, "
+              "copied from the real GGUF)", flush=True)
     return ChatTemplate(ROOT / "serve" / "chat_template.jinja")
 
 

@@ -4,6 +4,7 @@ its capabilities, thinking and template kwargs, and the marking of special-token
     python -m unittest serve.test_frontend -v
 """
 import copy
+import hashlib
 import json
 import os
 import sys
@@ -22,6 +23,10 @@ from serve.frontend import (IMAGE_OMITTED, LITERAL_TAGS, ChatTemplate, TemplateR
                             mark_think_literals, merge_template_kwargs, openai_to_messages, unmark_think_literals)
 
 TEMPLATE = Path(__file__).with_name("chat_template.jinja")
+# GLM-5.3-Flash's own template, as the real UD-IQ3_XXS GGUF holds it (tools/glm53_template_probe.py on napster-ai)
+REAL_SHA256 = "a4fddbbf0b432101a296c17094f8bc5a2b0d30713b5b5cd92f86be78511aa724"
+# GLM-4.7-Flash's (the template the server fell back to before the real one was known): it has an enable_thinking
+# switch and drops earlier reasoning by default
 FIXTURE = Path(__file__).with_name("fixtures") / "glm47_flash.jinja"
 TOOLS = [{"type": "function", "function": {"name": "read_file", "description": "Read a file", "parameters": {
     "type": "object", "properties": {"path": {"type": "string"}, "lines": {"type": "integer"}}}}}]
@@ -45,7 +50,9 @@ class Template(unittest.TestCase):
         self.t = ChatTemplate(TEMPLATE)
 
     def test_the_fallback_is_glms_template(self):
-        self.assertEqual(TEMPLATE.read_text(encoding="utf-8"), FIXTURE.read_text(encoding="utf-8"))
+        # byte for byte the template in the real GLM-5.3-Flash GGUF (10648 characters)
+        data = TEMPLATE.read_bytes()
+        self.assertEqual((len(data), hashlib.sha256(data).hexdigest()), (10648, REAL_SHA256))
 
     def test_from_a_path_or_the_text(self):
         source = TEMPLATE.read_text(encoding="utf-8")
@@ -59,10 +66,10 @@ class Template(unittest.TestCase):
 
     def test_generation_prompt_opens_thinking(self):
         out = self.t.render([{"role": "user", "content": "Hi"}])
-        self.assertTrue(out.startswith("[gMASK]<sop>"))
-        self.assertTrue(out.endswith("<|user|>Hi<|assistant|><think>"))
+        self.assertEqual(out, "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>Hi<|assistant|><think>")
+        # the template has no enable_thinking switch: it always opens the thinking (Service.prepare closes it)
         off = self.t.render([{"role": "user", "content": "Hi"}], enable_thinking=False)
-        self.assertTrue(off.endswith("<|assistant|></think>"))
+        self.assertEqual(off, out)
 
     def test_tools_and_tool_results(self):
         messages, tools, kwargs = openai_to_messages({"tools": TOOLS, "messages": [
@@ -74,7 +81,7 @@ class Template(unittest.TestCase):
             {"role": "tool", "tool_call_id": "c2", "content": [{"type": "text", "text": "more"}]}]})
         out = self.t.render(messages, tools=tools, **kwargs)
         self.assertIn('"name": "read_file"', out)
-        self.assertIn("<|assistant|></think><tool_call>read_file<arg_key>path</arg_key><arg_value>/a</arg_value>"
+        self.assertIn("<|assistant|><think></think><tool_call>read_file<arg_key>path</arg_key><arg_value>/a</arg_value>"
                       "<arg_key>lines</arg_key><arg_value>3</arg_value></tool_call>", out)
         self.assertIn("<|observation|><tool_response>file text</tool_response><tool_response>more</tool_response>",
                       out)
@@ -105,23 +112,25 @@ class Capabilities(unittest.TestCase):
             "supports_parallel_tool_calls": False, "supports_preserve_reasoning": False})
 
     def test_a_template_that_refuses_a_role(self):
-        source = FIXTURE.read_text(encoding="utf-8").replace(
+        source = TEMPLATE.read_text(encoding="utf-8").replace(
             "{%- elif m.role == 'system' -%}", "{%- elif m.role == 'system' -%}{{ raise_exception('no system') }}")
         caps = ChatTemplate(source=source).caps
         self.assertFalse(caps["supports_system_role"])
         self.assertTrue(caps["supports_tool_calls"])
 
     def test_one_call_per_turn_only(self):
-        source = FIXTURE.read_text(encoding="utf-8").replace(
+        source = TEMPLATE.read_text(encoding="utf-8").replace(
             "{% for tc in m.tool_calls %}", "{% for tc in m.tool_calls[:1] %}")
         caps = ChatTemplate(source=source).caps
         self.assertTrue(caps["supports_tool_calls"])
         self.assertFalse(caps["supports_parallel_tool_calls"])
 
     def test_reasoning_kept_without_clear_thinking(self):
-        # GLM's template keeps earlier reasoning only when asked (clear_thinking false); dropping it always is no
-        source = FIXTURE.read_text(encoding="utf-8").replace("(clear_thinking is defined and not clear_thinking) or ",
-                                                             "")
+        # GLM-5.3-Flash's template keeps earlier reasoning unless clear_thinking is true, GLM-4.7-Flash's only when it
+        # is false: both preserve it; dropping it always is no
+        self.assertTrue(ChatTemplate(FIXTURE).caps["supports_preserve_reasoning"])
+        source = TEMPLATE.read_text(encoding="utf-8").replace("not clear_thinking or ", "")
+        self.assertNotEqual(source, TEMPLATE.read_text(encoding="utf-8"))
         self.assertFalse(ChatTemplate(source=source).caps["supports_preserve_reasoning"])
 
 
@@ -173,7 +182,7 @@ class EmptyAssistantHistory(unittest.TestCase):
     def test_final_empty_assistant_turn_is_kept(self):
         prompt = self.template.render([{"role": "user", "content": "hi"}, {"role": "assistant", "content": ""}],
                                       add_generation_prompt=False)
-        self.assertTrue(prompt.endswith("<|user|>hi<|assistant|></think>"))
+        self.assertTrue(prompt.endswith("<|user|>hi<|assistant|><think></think>"))
 
     def test_empty_user_and_tool_turns_are_kept(self):
         prompt = self.template.render([{"role": "user", "content": ""}, {"role": "tool", "content": ""},
@@ -288,11 +297,13 @@ class ContentParts(unittest.TestCase):
 
     def test_a_users_picture_is_found(self):
         # the server refuses it (this model reads no images): images_of finds it, and the template renders the text
+        # and its image placeholder
         messages, tools, kwargs = openai_to_messages({"messages": [
             {"role": "user", "content": [{"type": "text", "text": "describe"},
                                          {"type": "image_url", "image_url": "image.png"}]}]})
         self.assertEqual(images_of(messages), ["image.png"])
-        self.assertIn("<|user|>describe<|assistant|>", ChatTemplate(TEMPLATE).render(messages, tools, **kwargs))
+        self.assertIn("<|user|>describe<|begin_of_image|><|image|><|end_of_image|><|assistant|>",
+                      ChatTemplate(TEMPLATE).render(messages, tools, **kwargs))
 
 
 class ThinkingKwargs(unittest.TestCase):
@@ -355,14 +366,18 @@ class ThinkingKwargs(unittest.TestCase):
                     convert({"messages": msgs, "chat_template_kwargs": ["enable_thinking"]})
 
     def test_clear_thinking_keeps_earlier_reasoning(self):
+        # GLM-5.3-Flash's template keeps the reasoning of earlier turns unless the client sends clear_thinking true
         history = [{"role": "user", "content": "a"},
                    {"role": "assistant", "content": "A", "reasoning_content": "thought about a"},
                    {"role": "user", "content": "b"}]
         t = ChatTemplate(TEMPLATE)
-        for keep in (False, True):
-            req = {"messages": history, **({"chat_template_kwargs": {"clear_thinking": False}} if keep else {})}
-            messages, tools, kwargs = openai_to_messages(req)
-            self.assertEqual("<think>thought about a</think>A" in t.render(messages, tools, **kwargs), keep)
+        for ctk, keep in ((None, True), ({"clear_thinking": False}, True), ({"clear_thinking": True}, False)):
+            with self.subTest(chat_template_kwargs=ctk):
+                req = {"messages": history, **({"chat_template_kwargs": ctk} if ctk else {})}
+                messages, tools, kwargs = openai_to_messages(req)
+                out = t.render(messages, tools, **kwargs)
+                self.assertEqual("<think>thought about a</think>A" in out, keep)
+                self.assertEqual("<|assistant|><think></think>A" in out, not keep)
 
     def test_merge(self):
         self.assertEqual(merge_template_kwargs({"reasoning_effort": "low"}, None), {"reasoning_effort": "low"})

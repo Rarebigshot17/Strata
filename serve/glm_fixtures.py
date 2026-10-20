@@ -3,8 +3,8 @@
     from serve.glm_fixtures import GlmTokenizer, glm_template, call_text, reply_text, free_port
 
 GlmTokenizer is server.py's byte tokenizer with GLM's reasoning and tool tags as type-4 tokens (matched always,
-as the real GGUF's tags are assumed to be), so a MockEngine script can hold them as one token each. glm_template()
-is the fallback template the server ships (GLM-4.7-Flash's format). call_text() and reply_text() write a reply
+as the real GGUF's tags are), so a MockEngine script can hold them as one token each. glm_template() is the
+fallback template the server ships (GLM-5.3-Flash's own, from the real GGUF). call_text() and reply_text() write a reply
 the way GLM writes it, for MockEngine scripts.  IdEngine's scripts can also hold plain() text: a tag's text as
 ordinary tokens, the way a model writes it when it copies the tag from its context.
 """

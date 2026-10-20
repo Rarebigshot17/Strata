@@ -182,8 +182,8 @@ tokens more slowly than the engine wrote them (now each pass ends where the serv
 Nothing here has run on a GPU or on the real model; the server is tested on the CPU engine with small random
 models.
 
-- The real GLM-5.3 template (the tests use GLM-4.7-Flash's): its generation prompt, effort or thinking kwargs,
-  `strftime_now`, the tool dict shape. `tools/glm53_inspect.py` prints it; the server reads it from the GGUF.
+- The real GLM-5.3 template is known now (`tools/glm53_template_probe.py` on the real UD-IQ3_XXS GGUF, napster-ai,
+  2026-10-20). `serve/chat_template.jinja` is that template, byte for byte, and the tests use it.
 - Token types of `<think>`, `<tool_call>`, `<arg_key>` ... in the real GGUF (type 3 or 4). If any of the tags is not
   a special token there, `output_tags` is empty and the parser reads the tags from the text, so a call the model
   copies from a tool result could be read as a call again. The server's start line says which (`tag_mode_line`: a

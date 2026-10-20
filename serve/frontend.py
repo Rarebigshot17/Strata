@@ -3,8 +3,8 @@
 Everything here is text: no model, no GPU. The engine consumes token ids and produces text deltas; this module
 
   * normalizes OpenAI Chat Completions and Anthropic Messages requests into the chat template's message form,
-  * renders the model's own Jinja chat template (GLM's, from the GGUF; `serve/chat_template.jinja` is GLM-4.7-Flash's,
-    the same format) exactly as Hugging Face does,
+  * renders the model's own Jinja chat template (GLM's, from the GGUF; `serve/chat_template.jinja` is GLM-5.3-Flash's,
+    copied byte for byte from the real UD-IQ3_XXS GGUF) exactly as Hugging Face does,
   * parses the streamed output incrementally into reasoning (`<think>...</think>`), content and tool calls in
     GLM's form (`<tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value>...</tool_call>`), never emitting a
     partial tag to the client.

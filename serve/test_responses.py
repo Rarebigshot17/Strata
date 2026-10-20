@@ -705,11 +705,12 @@ class CodexCompactionOverHttp(Server):
         prompt, code, r = self.compaction(codex_meta("compaction"))
         self.assertEqual(code, 200, r)
         # the cached conversation: the turn's prompt up to its generation prompt, where the engine checkpointed it
-        # (once a user message follows, GLM's template writes the turn's answer again without its reasoning)
+        # (GLM-5.3-Flash's template writes the turn's answer again after it, with its reasoning: clear_thinking is
+        # false by default)
         turn = self.first_prompt[:-len("<|assistant|><think>")]
         self.assertEqual(self.first_cp, len(self.first_ids) - 2)
         self.assertEqual(self.engine.last_prompt[:self.first_cp], self.first_ids[:self.first_cp])
-        self.assertTrue(prompt.startswith(turn + "<|assistant|></think>Checking."
+        self.assertTrue(prompt.startswith(turn + "<|assistant|><think>Let me look.</think>Checking."
                                           + call_text("exec_command", cmd="cat a.txt")
                                           + "<|observation|><tool_response>before</tool_response>"))
         self.assertIn("multi_agent_v1.spawn_agent", prompt[:prompt.index("<|user|>")])

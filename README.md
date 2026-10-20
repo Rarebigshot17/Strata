@@ -249,8 +249,9 @@ What is **not** checked yet:
 
 - **The GPU engine** (`strata-glm`) is written but has never run on a GPU. Its logits have not been compared with
   llama.cpp's on the real model.
-- **The real model** has not run in Strata. The tests use GLM-4.7-Flash's chat template. GLM-5.3-Flash's own
-  template and special tokens are read from its GGUF, and have not been checked against the server yet.
+- **The real model** has not run in Strata. Only its tokenizer and chat template were read from the real GGUF, on
+  napster-ai (`tools/glm53_template_probe.py`): the server ships that template (`serve/chat_template.jinja`), and the
+  tests use it.
 - **No speed, load time or memory use is measured.** Every such figure in these docs is calculated.
 - **A full install** that ends with the real model answering has not run yet.
 
