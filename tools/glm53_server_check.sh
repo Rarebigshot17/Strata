@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # serve/server.py end to end on strata-glm, with a small random GLM-5.3-Flash that has a real GLM-style tokenizer and
-# chat template.
+# GLM-5.3-Flash's own chat template (serve/chat_template.jinja).
 #
 #   tools/glm53_server_check.sh LLAMA_DIR ENGINE
 #
 # LLAMA_DIR: the llama.cpp checkout from tools/glm53_ref/build.sh (its build/ has test-llama-archs and
-# llama-tokenize; its models/templates has GLM's template; its gguf-py is used). ENGINE: strata-glm (GPU) or
-# strata-glm-ref (CPU). The server starts the engine from a run config written here (-m the synthetic model,
-# --ctx 512), reads the tokenizer and the chat template from the model's GGUF, and is checked through its API: the
-# tokenizer against llama.cpp's, then /health, /v1/models, a chat completion, a streamed one, a second turn that
-# resumes from the first one's checkpoint (cp=), a completion, /metrics, a slot save (501) and a request that does
-# not fit the context.
+# llama-tokenize; its gguf-py is used). ENGINE: strata-glm (GPU) or strata-glm-ref (CPU). The server starts the
+# engine from a run config written here (-m the synthetic model, --ctx 512), reads the tokenizer and the chat template
+# from the model's GGUF, and is checked through its API: the tokenizer against llama.cpp's, then /health, /v1/models,
+# a chat completion, a streamed one, a second turn that resumes from the first one's checkpoint (cp=), a completion, a
+# request with thinking off and one at reasoning_effort low (each prompt counted against the text the template must
+# make), /metrics, a slot save (501) and a request that does not fit the context.
 set -uo pipefail
 LD="${1:?llama.cpp dir}"
 ENGINE="$(cd "$(dirname "${2:?strata-glm or strata-glm-ref}")" && pwd)/$(basename "$2")"
@@ -23,8 +23,8 @@ cleanup() { [ -n "${SRV:-}" ] && kill "$SRV" 2>/dev/null && wait "$SRV" 2>/dev/n
 trap cleanup EXIT
 
 "$LD/build/bin/test-llama-archs" -a glm5-next -o "$W/" > /dev/null 2>&1 || { echo "FAIL test-llama-archs"; exit 1; }
-python3 "$HERE/glm53_synth_model.py" "$W/glm5-next-moe.gguf" "$LD/models/templates/GLM-4.7-Flash.jinja" \
-    "$W/synth.gguf" > /dev/null || exit 1
+python3 "$HERE/glm53_synth_model.py" "$W/glm5-next-moe.gguf" "$ROOT/serve/chat_template.jinja" "$W/synth.gguf" \
+    > /dev/null || exit 1
 echo "tokenizer: $(python3 "$HERE/glm53_tokcheck.py" "$W/synth.gguf" "$LD/build/bin/llama-tokenize" | tail -1)"
 
 # --checkpoint-min 1: the engine keeps a checkpoint even this close to the start, so the short second turn below
@@ -68,6 +68,23 @@ check turn2-resumes "curl -s $U/v1/chat/completions $J -d '{\"messages\":[{\"rol
     "d['usage']['prompt_tokens_details']['cached_tokens']>0" json
 check completion "curl -s $U/v1/completions $J -d '{\"prompt\":\"The quick\",\"max_tokens\":4,\"temperature\":0}'" \
     "d['usage']['completion_tokens']==4 and d['object']=='text_completion'" json
+# The prompts the chat template makes, counted against the text they must be (a completion's prompt is read as it is
+# given, special tokens' texts as those tokens): the level line first; thinking off ends with <think></think>, the
+# </think> written by the server (the template always opens the thinking). The reply with thinking off is all answer:
+# <think>, with which a model may open its thinking again, is banned in that request.
+tokens() {
+    curl -s $U/v1/completions $J -d "$(python3 -c 'import json, sys
+print(json.dumps({"prompt": sys.argv[1], "max_tokens": 1}))' "$1")" |
+        python3 -c 'import json, sys; print(json.load(sys.stdin)["usage"]["prompt_tokens"])'
+}
+THINK=$(python3 -c 'import gguf, sys
+print(gguf.GGUFReader(sys.argv[1]).fields["tokenizer.ggml.tokens"].contents().index("<think>"))' "$W/synth.gguf")
+OFF=$(tokens "[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>Hello<|assistant|><think></think>")
+LOW=$(tokens "[gMASK]<sop><|system|>Reasoning Effort: Low<|user|>Hello<|assistant|><think>")
+check thinking-off "curl -s $U/v1/chat/completions $J -d '{\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}],\"max_tokens\":8,\"temperature\":0,\"reasoning_effort\":\"none\",\"logit_bias\":{\"$THINK\":-100}}'" \
+    "d['usage']['prompt_tokens']==$OFF and d['usage']['completion_tokens']>=1 and not d['choices'][0]['message'].get('reasoning_content')" json
+check effort-low "curl -s $U/v1/chat/completions $J -d '{\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}],\"max_tokens\":4,\"reasoning_effort\":\"low\"}'" \
+    "d['usage']['prompt_tokens']==$LOW and d['usage']['completion_tokens']>=1" json
 check metrics "curl -s $U/metrics" \
     "d['engine']['backend']=='cpu-reference' or d['engine']['backend']=='cuda'" json
 check slot-save "curl -s -o /dev/null -w '%{http_code}' $U/slots/0?action=save $J -d '{\"filename\":\"x\"}'" \
