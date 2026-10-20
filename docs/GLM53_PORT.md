@@ -19,7 +19,8 @@ memory figure on this page is calculated from the model's shapes, not measured, 
 ## The model
 
 From the transformers config defaults and llama.cpp's `src/models/glm5-next.cpp`. `tools/glm53_inspect.py` checks
-each value against the real GGUF before code depends on it.
+each value against the real GGUF before code depends on it; what it found in the 3-bit file is under "The real file"
+below.
 
 | | GLM-5.3-Flash | Qwen3.8-Flash-Next (the upstream engine's model) |
 |---|---|---|
@@ -123,6 +124,20 @@ Two things found while writing the reference, both checked against llama.cpp's c
   (`build_delta_net_autoregressive`) broadcasts the decay over the other axis.
 - Below 2,048 tokens of context the indexer selects every pool, so attention is plain causal there. The
   indexer only changes results on longer contexts, which is why the test variants shrink its top-k.
+
+The real file, as `tools/glm53_inspect.py` read the 3-bit GGUF (UD-IQ3_XXS) on napster-ai on 2026-10-20, differs
+from what the plan took in these:
+
+- `attention.indexer.kpool` is 4, not 16: the indexer pools its keys over 4 tokens, and picks 512 pools for its
+  2,048 tokens. The engine reads the value from the file. The pooled keys take 4 times the VRAM the plan counted
+  ("Memory on napster-ai").
+- `attention.indexer.types` is missing. llama.cpp then gives every layer its own (full) indexer, and so does the
+  engine.
+- `attention.indexer.kpool_select_tail` is missing. llama.cpp then selects the incomplete tail pool (its default is
+  true), and so does the engine. The small test models always carry the key (llama.cpp's model saver writes it), so
+  the checks could not see which default the engine took.
+- `block_count` is 46 with `nextn_predict_layers` 1: `blk.45` is the MTP layer. The engine runs the 45 layers before
+  it and does not load it, so its Q2_K experts, the only Q2_K tensors in the file, need no kernel.
 
 ## What to run on napster-ai
 
