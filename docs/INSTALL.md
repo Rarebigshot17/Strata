@@ -483,12 +483,13 @@ Which order and split are fastest is not measured yet.
 
 ## On napster-ai
 
-The owner's PC: Linux, Xeon E5-2699 v4 (AVX2), 192 GB of DDR4, an RTX 3090 Ti (24 GB), an RTX 3080 Ti (12 GB) and an
-RTX 3080 (10 GB), all compute capability 8.6, and a SATA SSD. What setup does there, from its code and its tests (it
-has not been run there yet):
+The owner's PC: Linux, Xeon E5-2699 v4 (AVX2), 192 GB of DDR4 (planned; 91 GiB for now), an RTX 3090 Ti (24 GB), an
+RTX 3080 Ti (12 GB) and an RTX 3080 (10 GB), all compute capability 8.6, and a SATA SSD. What setup does there, from
+its code and its tests (it has not been run there yet):
 
-- **Size:** the 3-bit `UD-IQ3_XXS` is recommended (about 79 GiB of RAM left beside its experts, if `/proc/meminfo`
-  says 188 GiB as the tests assume). The 4-bit is tight (about 37 GiB left) and gets `--park-mib 4096`.
+- **Size:** with 192 GB the 3-bit `UD-IQ3_XXS` is recommended (about 79 GiB of RAM left beside its experts, if
+  `/proc/meminfo` says 188 GiB as the tests assume). The 4-bit is tight (about 37 GiB left) and gets
+  `--park-mib 4096`. With the 91 GiB it has for now neither size fits: setup says so and asks before it installs.
 - **Build:** all three cards can run the engine, so setup uses all three and builds for `86` only.
 - **Context:** the three cards have 46 GB of VRAM in all, so setup recommends 128K. 512K takes 6.6 GB and 1M 13.3 GB
   of it (calculated); neither is more than half, so setup does not warn.

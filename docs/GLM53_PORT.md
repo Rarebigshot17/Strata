@@ -6,8 +6,9 @@ how Strata works: every routed expert in system RAM, the most-used experts cache
 the CPU, one model compiled for speed. GLM-5.3-Flash replaces Qwen3.8-Flash-Next. Nothing of the Qwen model
 stays.
 
-Target machine: napster-ai (Xeon E5-2699 v4 with AVX2, 192 GB DDR4, RTX 3090 Ti 24 GB + RTX 3080 Ti 12 GB + RTX
-3080 10 GB, all sm_86, Linux). CUDA only: the SYCL (Intel) engine and HIP (AMD) are removed on this branch.
+Target machine: napster-ai (Xeon E5-2699 v4 with AVX2, 192 GB DDR4 planned and 91 GiB for now, RTX 3090 Ti 24 GB +
+RTX 3080 Ti 12 GB + RTX 3080 10 GB, all sm_86, Linux). CUDA only: the SYCL (Intel) engine and HIP (AMD) are removed
+on this branch.
 
 Estimated effort when the port was planned: about 5-6 months of engineering. Code is written off the machine and
 tested on napster-ai by hand, so every milestone ends with commands to run and output to paste back.
@@ -48,9 +49,19 @@ below are calculated, not measured.
 `setup.py` uses the same figures (its `MODELS` table, in GB) and prints what is left beside the experts in GiB,
 taken from the RAM Linux reports (`/proc/meminfo`), which is a few GiB under the installed 192 GB: setup's tests
 take 188 GiB. With less than 40 GiB left it calls a size tight and gives parked conversations 4096 MiB instead of
-8192 (`--park-mib`); below 12 GiB it asks before it installs. On napster-ai it therefore recommends the 3-bit model,
+8192 (`--park-mib`); below 12 GiB it asks before it installs. With 192 GB it therefore recommends the 3-bit model,
 and keeps the 4-bit one when you choose it. For UD-Q4_K_XL setup takes the experts as the same share of its files as
-for IQ4_XS.
+for IQ4_XS. The 3-bit row takes IQ3_XXS for every expert; the real 3-bit file's experts are IQ2_S, IQ3_S, IQ4_XS and
+Q3_K ("The real file" below), and the inspector's section 5 gives their size.
+
+For now napster-ai has 91 GiB of RAM (at the first run, 2026-10-20); more is planned. With setup's figures neither
+size fits there: setup wants at least 12 GiB left beside the experts, so about 121 GiB of RAM for the 3-bit size
+(149 GiB to call it a fit) and about 163 GiB for the 4-bit size (191 GiB). On 91 GiB setup says the experts do not
+fit and asks before it installs. The steps that run the real model (6-8) need the RAM in place: with less RAM than
+the experts, Linux reads them from the disk while the model runs, which is very slow or does not start at all. They
+also need the Qwen service stopped, as step 4 does, since it holds most of the VRAM and RAM while it runs. Step 5's
+download and inspector need only the disk; the inspector prints this machine's RAM beside the experts it counts in
+the file.
 
 The MLA cache stores a 512-wide latent per token in each of the 11 MLA layers. The engine keeps it in f16, as
 llama.cpp does by default: 11 KB per token (an 8-bit cache would halve that). Each layer's indexer adds one pooled
@@ -213,9 +224,9 @@ ran on napster-ai on 2026-10-20; steps 6-8 have not run yet. Run them from the S
    The inspector flags an expert type the GPU kernels cannot read only where a layer the engine runs uses it; the
    MTP layer (the last block, `blk.45` in the 3-bit file) is listed apart, since Strata does not load it. The 3-bit
    file's experts are IQ2_S, IQ3_S, IQ4_XS and Q3_K (its inspector output on napster-ai), and the kernels take each;
-   its Q2_K tensors are only in the MTP layer. With the 4-bit file about 37 GiB of RAM is left beside the
-   experts (calculated, of the 188 GiB Linux reports), so parked conversations get less of it (`--park-mib 4096`;
-   setup does this itself).
+   its Q2_K tensors are only in the MTP layer. On 192 GB (188 GiB reported) the 4-bit file leaves about 37 GiB of
+   RAM beside the experts (calculated), so parked conversations get less of it (`--park-mib 4096`; setup does this
+   itself). Steps 6-8 need the RAM in place and the Qwen service stopped ("Memory on napster-ai").
 
 6. **Reference logits from llama.cpp** on the real model. `--n-cpu-moe` keeps that many layers' experts on the
    CPU; lower it until VRAM runs out, then raise it by a few:

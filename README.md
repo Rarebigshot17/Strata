@@ -27,10 +27,10 @@ How much VRAM the part they must hold takes is not measured yet. Setup installs 
 Python (through apt, dnf or pacman), the C++ compiler (through apt) and the CUDA toolkit (by itself on Ubuntu 22.04
 and 24.04 only).
 
-**The reference machine** is the owner's PC, napster-ai: a Xeon E5-2699 v4 (AVX2, no AVX-512), 192 GB of DDR4, an
-RTX 3090 Ti 24 GB + RTX 3080 Ti 12 GB + RTX 3080 10 GB (all compute capability 8.6), a SATA SSD, Linux. Strata is
-planned for it: port 8101 (3000, 8000 and 8080 are taken there), contexts up to 512K-1M tokens, and four agents, a
-chat and a Discord bot taking turns on one engine.
+**The reference machine** is the owner's PC, napster-ai: a Xeon E5-2699 v4 (AVX2, no AVX-512), 192 GB of DDR4
+(planned; 91 GiB for now), an RTX 3090 Ti 24 GB + RTX 3080 Ti 12 GB + RTX 3080 10 GB (all compute capability 8.6), a
+SATA SSD, Linux. Strata is planned for it: port 8101 (3000, 8000 and 8080 are taken there), contexts up to 512K-1M
+tokens, and four agents, a chat and a Discord bot taking turns on one engine.
 
 The full list: [docs/INSTALL.md](docs/INSTALL.md#what-you-need).
 
@@ -127,7 +127,8 @@ What is left beside the experts holds Linux, the server, your other programs and
 
 The RAM Linux reports in this table is about 2% under the RAM installed (188 GiB for 192 GB, as setup's tests
 take it); it differs a little from PC to PC. `./setup.sh --check` prints the figures for your PC without installing
-anything. On napster-ai (192 GB) setup recommends the 3-bit size.
+anything. On napster-ai with 192 GB setup recommends the 3-bit size; with the 91 GiB it has for now, neither size
+fits.
 
 ## Using it
 
