@@ -82,7 +82,7 @@ struct Config {
     int64_t indexer_head_size = 0;
     int64_t indexer_top_k = 0;
     int64_t indexer_kpool = 0;
-    bool indexer_select_tail = false;
+    bool indexer_select_tail = true;  ///< read_config's default too: the released GGUF lacks the key
 
     // mHC
     int64_t hc = 0;

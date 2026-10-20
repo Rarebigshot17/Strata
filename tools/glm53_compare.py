@@ -9,10 +9,22 @@ Reports, per position and in total:
   top-1 agreement     whether both pick the same most likely token
   max |logit diff|
 
-Usage:  python tools/glm53_compare.py REF.bin STRATA.bin [--kl-max 0.01] [--top1-min 0.98] [--rows N]
+Usage:  python tools/glm53_compare.py REF.bin STRATA.bin [--kl-max 0.01] [--top1-min 0.98] [--tie-margin 0.01]
+                                      [--diff-max D] [--rows N]
 
-Exit code 0 when mean KL <= --kl-max and top-1 agreement >= --top1-min, 1 otherwise. The defaults are a first
-guess for two engines running the same quantized file; tighten them once the first layers match.
+Exit code 0 when mean KL <= --kl-max, top-1 agreement >= --top1-min and (with --diff-max) max |logit diff| <= D,
+1 otherwise. The defaults are a first guess for two engines running the same quantized file; tighten them once the
+first layers match.
+
+A row where the two pick different tokens is a tie, and counts as agreeing, when each engine has the other's token
+within --tie-margin of its own: then the two tokens are about as likely as each other (a logit gap of 0.01 is a 1%
+difference in probability) and rounding decides which comes first. Measured on seeds 1-100 of glm53_selftest.sh's
+models (strata-glm-ref against llama.cpp's CPU build with an f32 cache, 2026-10-20): every top-1 disagreement had
+both gaps at most 0.0017. With llama.cpp's default f16 cache, which made the indexer select other pools in 5 of
+those seeds, the rows that changed had one gap of 0.08 or more, all but one: seed 26's v2 also swapped a row whose
+gaps were 0.0017 and 0.0007, a tie. A tie does not excuse the other limits: those 5 runs fail the selftest's mean
+KL limit (by 43 times or more) and its --diff-max 0.01 (their largest logit difference is 0.15 or more) with or
+without ties.
 """
 from __future__ import annotations
 
@@ -44,6 +56,10 @@ def main() -> int:
     ap.add_argument("strata")
     ap.add_argument("--kl-max", type=float, default=0.01)
     ap.add_argument("--top1-min", type=float, default=0.98)
+    ap.add_argument("--tie-margin", type=float, default=0.01,
+                    help="a top-1 disagreement is a tie when each side has the other's token within this many logits "
+                         "of its own (0: no ties)")
+    ap.add_argument("--diff-max", type=float, default=None, help="also fail when max |logit diff| is above this")
     ap.add_argument("--rows", type=int, default=0, help="compare only the first N rows")
     a = ap.parse_args()
 
@@ -68,18 +84,31 @@ def main() -> int:
     top_r, top_g = ref.argmax(axis=1), got.argmax(axis=1)
     agree = top_r == top_g
     diff = np.abs(ref.astype(np.float64) - got).max(axis=1)
+    # how far below its own top-1 each side puts the other's (0 where they agree; NaN never makes a tie)
+    rows = np.arange(n)
+    gap_r = ref[rows, top_r].astype(np.float64) - ref[rows, top_g]
+    gap_g = got[rows, top_g].astype(np.float64) - got[rows, top_r]
+    tie = ~agree & (gap_r <= a.tie_margin) & (gap_g <= a.tie_margin)
 
     print(f"{'pos':>5} {'KL':>10} {'top1 ref':>9} {'top1 strata':>11} {'max|d|':>9}")
     for i in range(n):
         if n <= 64 or i < 16 or i >= n - 16 or not agree[i] or kl[i] > a.kl_max:
-            mark = "" if agree[i] else "  <- top-1 differs"
+            mark = "" if agree[i] else f"  <- top-1 differs (gaps {gap_r[i]:.4f} ref, {gap_g[i]:.4f} strata)"
+            if tie[i]:
+                mark += ": a tie"
             print(f"{i:5d} {kl[i]:10.5f} {top_r[i]:9d} {top_g[i]:11d} {diff[i]:9.4f}{mark}")
     mean_kl = float(np.nanmean(kl))
-    top1 = float(agree.mean())
+    n_tie = int(tie.sum())
+    top1 = float((agree | tie).mean())
+    ties = f" ({top1 * 100:.2f}% with {n_tie} tie{'s' if n_tie > 1 else ''})" if n_tie else ""
     print(f"\nrows {n}   mean KL {mean_kl:.5f}   max KL {float(np.nanmax(kl)):.5f}   "
-          f"top-1 agreement {top1 * 100:.2f}%   max |logit diff| {float(diff.max()):.4f}")
+          f"top-1 agreement {float(agree.mean()) * 100:.2f}%{ties}   max |logit diff| {float(diff.max()):.4f}")
     ok = mean_kl <= a.kl_max and top1 >= a.top1_min and not bad.any()
-    print("PASS" if ok else f"FAIL (needs mean KL <= {a.kl_max} and top-1 >= {a.top1_min * 100:.0f}%)")
+    needs = f"mean KL <= {a.kl_max} and top-1 >= {a.top1_min * 100:.0f}%"
+    if a.diff_max is not None:
+        ok = ok and float(diff.max()) <= a.diff_max
+        needs += f" and max |logit diff| <= {a.diff_max}"
+    print("PASS" if ok else f"FAIL (needs {needs})")
     return 0 if ok else 1
 
 

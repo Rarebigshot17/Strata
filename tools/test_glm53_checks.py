@@ -1,7 +1,8 @@
 """tools/glm53_selftest.sh and tools/glm53_gpu_check.sh on cards another program fills, without a GPU or llama.cpp: the
 scripts run from a temporary folder beside the real glm53_compare.py, with stubs for llama.cpp's tools, the engines,
 nvidia-smi, glm53_tiny_variant.py and glm53_park_check.py. A stub that needs a GPU dies the way napster-ai's run did
-(2026-10-20) when the cards are full and not hidden from it.
+(2026-10-20) when the cards are full and not hidden from it. Also: the engine's Config default for a key the released
+GGUF lacks is read_config's.
 
     python -m unittest tools.test_glm53_checks
 """
@@ -22,12 +23,17 @@ try:
 except ImportError:
     HAVE_NUMPY = False
 
-# logits in the layout glm53_compare.py reads: 40 rows of 8, the same from every engine
-WRITE_LOGITS = """import struct, sys
+# logits in the layout glm53_compare.py reads: 40 rows of 8, the same from every engine. FAKE_TIE=1 puts row 5's
+# top two tokens 0.0005 apart, in the other order in llama.cpp's (argument "ref"): a tie glm53_compare.py accepts
+WRITE_LOGITS = """import os, struct, sys
 with open(sys.argv[1], "wb") as f:
     f.write(struct.pack("<ii", 8, 40))
     for r in range(40):
-        f.write(struct.pack("<8f", *[float((r * 7 + i * 3) % 11) for i in range(8)]))
+        row = [float((r * 7 + i * 3) % 11) for i in range(8)]
+        if r == 5 and os.environ.get("FAKE_TIE") == "1":
+            top = sorted(row)
+            row[row.index(top[-2])] = top[-1] + (0.0005 if sys.argv[2:] == ["ref"] else -0.0005)
+        f.write(struct.pack("<8f", *row))
 """
 
 # every stub logs its name, CUDA_VISIBLE_DEVICES and CUDA_DEVICE_ORDER, then its arguments
@@ -45,7 +51,7 @@ STUBS = {
     "lb/bin/llama-strata-ref": 'if gpu_full || [ "$FAKE_REF_FAILS" = 1 ]; then\n'
                                '    echo "CUDA error: out of memory" >&2; echo "  in ggml_cuda_set_device" >&2\n'
                                '    exit 1\n'
-                               'fi\npython3 "$FAKE/write_logits.py" "$out"\n',
+                               'fi\npython3 "$FAKE/write_logits.py" "$out" ref\n',
     "sb/strata-glm-ref": 'python3 "$FAKE/write_logits.py" "$out"\n',
     "sb/strata-glm": 'if gpu_full; then echo "strata-glm: cudaSetDevice: out of memory" >&2; exit 1; fi\n'
                      'case " $* " in\n'
@@ -89,7 +95,8 @@ class Checks(unittest.TestCase):
         (self.tmp / "calls.log").write_text("")
 
     def run_script(self, name, **env_extra):
-        env = {k: v for k, v in os.environ.items() if not k.startswith(("CUDA_", "FAKE"))}
+        # nothing from the caller's shell that the scripts read: SEED=N would fix test-llama-archs' seed
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("CUDA_", "FAKE")) and k != "SEED"}
         env.update(FAKE=str(self.tmp), PATH=f"{self.tmp / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}")
         env.update(env_extra)
         r = subprocess.run([BASH, str(self.tmp / "tools" / name), str(self.tmp / "lb"), str(self.tmp / "sb")], env=env,
@@ -110,6 +117,30 @@ class Checks(unittest.TestCase):
             self.assertTrue(self.calls(prog), prog)
             for line in self.calls(prog):
                 self.assertIn("CVD=<>", line)
+
+    def test_selftest_runs_llama_cpp_with_an_f32_cache(self):
+        # Strata keeps the indexer's keys in fp32; llama.cpp keeps them in its cache type
+        rc, out = self.run_script("glm53_selftest.sh")
+        self.assertEqual(rc, 0, out)
+        calls = self.calls("llama-strata-ref")
+        self.assertEqual(len(calls), len(MODELS))
+        for line in calls:
+            self.assertIn(" -ctk f32 -ctv f32 ", line)
+            self.assertIn(" -fa off ", line)
+
+    def test_selftest_counts_two_nearly_equal_tokens_as_a_tie(self):
+        rc, out = self.run_script("glm53_selftest.sh", FAKE_TIE="1")
+        self.assertEqual(rc, 0, out)
+        for m in MODELS:
+            self.assertIn(f"PASS {m}: rows 40   mean KL 0.00000", out)
+        self.assertEqual(out.count("top-1 agreement 97.50% (100.00% with 1 tie)"), len(MODELS), out)
+
+    def test_selftest_takes_the_seed_to_run_again(self):
+        self.run_script("glm53_selftest.sh", SEED="17")
+        self.assertIn(" -s 17 ", self.calls("test-llama-archs")[0])
+        (self.tmp / "calls.log").write_text("")
+        self.run_script("glm53_selftest.sh")
+        self.assertNotIn(" -s ", self.calls("test-llama-archs")[0])
 
     def test_selftest_writes_v1_bare_without_the_two_keys(self):
         self.run_script("glm53_selftest.sh")
@@ -145,8 +176,24 @@ class Checks(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertIn("-i 1,2 ", self.calls("nvidia-smi")[0])
         # CUDA numbers the cards as nvidia-smi does, so both mean the same cards
-        for line in self.calls("strata-glm") + self.calls("llama-strata-ref"):
+        for line in self.calls("strata-glm"):
             self.assertIn("CVD=<1,2> ORDER=<PCI_BUS_ID>", line)
+        # llama.cpp's reference runs on the CPU (test_gpu_check_runs_llama_cpp_on_the_cpu_with_an_f32_cache)
+        for line in self.calls("llama-strata-ref"):
+            self.assertIn("CVD=<>", line)
+
+    def test_gpu_check_runs_llama_cpp_on_the_cpu_with_an_f32_cache(self):
+        rc, out = self.run_script("glm53_gpu_check.sh", FAKE_SMI="0, 23900\\n", FAKE_TIE="1")
+        self.assertEqual(rc, 0, out)
+        calls = self.calls("llama-strata-ref")
+        self.assertEqual(len(calls), len(GPU_MODELS))
+        for line in calls:
+            self.assertIn("CVD=<>", line)
+            self.assertIn(" -ctk f32 -ctv f32 ", line)
+            self.assertIn(" -fa off ", line)
+        for line in self.calls("strata-glm"):
+            self.assertIn("CVD=<unset>", line)
+        self.assertEqual(out.count("(100.00% with 1 tie)"), len(GPU_MODELS), out)
 
     def test_gpu_check_with_no_visible_card_says_so(self):
         rc, out = self.run_script("glm53_gpu_check.sh", CUDA_VISIBLE_DEVICES="", FAKE_SMI="0, 23900\\n")
@@ -167,6 +214,21 @@ class Checks(unittest.TestCase):
         self.assertNotIn("Traceback", out)
         self.assertEqual(out.count("FAIL vs llama.cpp: llama-strata-ref wrote no logits"), len(GPU_MODELS), out)
         self.assertIn("CUDA error: out of memory", out)
+
+
+class ConfigDefaults(unittest.TestCase):
+    """A Config made without read_config (a test, a tool) must not disagree with what read_config does for the
+    released GGUF, which lacks attention.indexer.kpool_select_tail."""
+
+    def test_the_struct_default_of_indexer_select_tail_is_read_configs(self):
+        import re
+        hpp = (ROOT / "include/strata/glm/model.hpp").read_text(encoding="utf-8")
+        cpp = (ROOT / "src/glm/model.cpp").read_text(encoding="utf-8")
+        struct = re.search(r"\bbool indexer_select_tail = (true|false);", hpp)
+        read = re.search(r'num_or\("attention\.indexer\.kpool_select_tail", ([01])\)', cpp)
+        self.assertIsNotNone(struct, "model.hpp: bool indexer_select_tail = ...;")
+        self.assertIsNotNone(read, "model.cpp: num_or(\"attention.indexer.kpool_select_tail\", ...)")
+        self.assertEqual(struct.group(1) == "true", read.group(1) == "1")
 
 
 if __name__ == "__main__":

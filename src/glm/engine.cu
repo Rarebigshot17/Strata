@@ -46,7 +46,14 @@ GpuEngine::GpuEngine(const Model& model, const EngineOptions& opt) : impl_(new I
                                 &w.mla.q_a, &w.mla.q_b, &w.mla.kv_a, &w.mla.k_b, &w.mla.v_b, &w.mla.idx_attn_q_b,
                                 &w.ffn_gate, &w.ffn_up, &w.ffn_down, &w.gate_shexp, &w.up_shexp, &w.down_shexp})
             b += tb(*t);
-        if (!c.is_kda(il)) b += (double) opt.max_ctx * c.kv_lora_rank * 2.0;   // the f16 latent cache
+        // what grows with the context: the f16 latent cache and, where the layer runs its own indexer, the fp32
+        // pooled keys (l.pooled). The other context-sized buffers (pscore, the prompt arena's pool scores) are on
+        // every device, whichever layers it holds.
+        if (!c.is_kda(il)) {
+            b += (double) opt.max_ctx * c.kv_lora_rank * 2.0;
+            if (c.indexer_full[(size_t) il])
+                b += (double) (opt.max_ctx / c.indexer_kpool + 1) * c.indexer_head_size * 4.0;
+        }
         layer_bytes[(size_t) il] = b;
     }
     std::vector<double> share = opt.split;

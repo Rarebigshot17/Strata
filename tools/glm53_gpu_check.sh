@@ -13,6 +13,13 @@
 # chunks) against the CPU reference, then the GPU's logits against llama.cpp's. The GPU quantizes activations to
 # q8_1 like llama.cpp's CUDA backend, so on quantized weights the numbers differ from the CPU's by more than float
 # rounding; the thresholds allow for that. Last, conversation parking (tools/glm53_park_check.py).
+#
+# llama.cpp's reference runs on the CPU with the GPUs hidden, with glm53_selftest.sh's settings: an f32 cache,
+# because Strata keeps the indexer's keys in fp32 and llama.cpp in the cache type (f16 by default), and two pools
+# that score nearly the same are then selected differently. On CUDA the f32 cache is in doubt: with flash attention
+# on, llama.cpp converts it to f16 before attention, and no GPU has run it here. The CPU's f32 path is the one
+# measured (docs/GLM53_PORT.md, "Checking against llama.cpp"). So the GPU's q8_1 activations meet the CPU's own
+# on quantized weights there too; glm53_compare.py's default thresholds allow for that.
 set -uo pipefail
 
 LB="${1:?llama.cpp build dir}"
@@ -21,10 +28,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 W="$(mktemp -d)"
 trap 'rm -rf "$W"' EXIT
 
-# The free memory of every card the check runs on, before anything starts: when another program holds a card, every
-# engine below stops at its first CUDA call. The tiny models take about 1.2 GB per card (napster-ai, 2026-10-20:
-# "GPU 0: ... 1.21 GB weights and buffers") and the CUDA context a few hundred MB more, so 2 GiB. nvidia-smi numbers
-# the cards by PCI bus; when CUDA_VISIBLE_DEVICES names some, CUDA is told to number them the same way.
+# The free memory of every card the check runs on, before anything starts: when another program holds a card,
+# strata-glm stops at its first CUDA call (llama.cpp's reference runs on the CPU). The tiny models take about 1.2 GB
+# per card (napster-ai, 2026-10-20: "GPU 0: ... 1.21 GB weights and buffers") and the CUDA context a few hundred MB
+# more, so 2 GiB. nvidia-smi numbers the cards by PCI bus; when CUDA_VISIBLE_DEVICES names some, CUDA is told to
+# number them the same way.
 MIN_FREE_MIB=2048
 smi=(--query-gpu=index,memory.free --format=csv,noheader,nounits)
 if [ -n "${CUDA_VISIBLE_DEVICES+set}" ]; then
@@ -73,8 +81,8 @@ for m in glm5-next-moe v1 v1-bare q4_0 q8_0; do
     else
         echo "prefill FAILED:"; tail -8 "$W/pp_$m.txt"; fail=1
     fi
-    "$LB/bin/llama-strata-ref" -m "$W/$m.gguf" --tokens-file "$W/ids.txt" -c 256 -b 64 -ub 64 \
-        --out "$W/ref_$m.bin" > "$W/ref_$m.txt" 2>&1
+    CUDA_VISIBLE_DEVICES= "$LB/bin/llama-strata-ref" -m "$W/$m.gguf" --tokens-file "$W/ids.txt" -c 256 -b 1 -ub 1 \
+        -fa off -ctk f32 -ctv f32 --out "$W/ref_$m.bin" > "$W/ref_$m.txt" 2>&1
     if [ ! -s "$W/ref_$m.bin" ]; then
         echo "FAIL vs llama.cpp: llama-strata-ref wrote no logits:"; tail -4 "$W/ref_$m.txt"; fail=1
     elif [ ! -s "$W/gpu_$m.bin" ]; then
