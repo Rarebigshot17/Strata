@@ -43,25 +43,25 @@ STUBS = {
                                'prev="$a"; done\n',
     "lb/bin/llama-quantize": 'cp "$2" "$3"\n',
     "lb/bin/llama-strata-ref": 'if gpu_full || [ "$FAKE_REF_FAILS" = 1 ]; then\n'
-                               '    echo "CUDA error: out of memory" >&2; echo "  in ggml_cuda_set_device" >&2; exit 1\n'
+                               '    echo "CUDA error: out of memory" >&2; echo "  in ggml_cuda_set_device" >&2\n'
+                               '    exit 1\n'
                                'fi\npython3 "$FAKE/write_logits.py" "$out"\n',
     "sb/strata-glm-ref": 'python3 "$FAKE/write_logits.py" "$out"\n',
     "sb/strata-glm": 'if gpu_full; then echo "strata-glm: cudaSetDevice: out of memory" >&2; exit 1; fi\n'
                      'case " $* " in\n'
-                     '  *" --prefill "*) echo "check-prefill: worst logits relative diff 0, top-1 agreement 5/5: PASS";;\n'
-                     '  *) python3 "$FAKE/write_logits.py" "$out"; echo "GPU 0: layers 0-1, 1.21 GB weights and buffers"\n'
-                     '     echo "check-cpu: worst logits relative diff 0, worst layer diff 0, top-1 agreement 40/40: PASS";;\n'
+                     '  *" --prefill "*) echo "check-prefill: top-1 agreement 5/5: PASS";;\n'
+                     '  *) python3 "$FAKE/write_logits.py" "$out"\n'
+                     '     echo "GPU 0: layers 0-1, 1.21 GB weights and buffers"\n'
+                     '     echo "check-cpu: top-1 agreement 40/40: PASS";;\n'
                      'esac\n',
     # FAKE_SMI is what nvidia-smi prints; FAKE_SMI_FAILS makes it fail as it does without a driver
     "bin/nvidia-smi": 'if [ "$FAKE_SMI_FAILS" = 1 ]; then echo "NVIDIA-SMI has failed: no driver"; exit 9; fi\n'
                       'printf "%b" "$FAKE_SMI"\n',
-    "tools/glm53_tiny_variant.py": None,    # Python stubs below
-    "tools/glm53_park_check.py": None,
 }
 PY_STUBS = {
-    "tools/glm53_tiny_variant.py": "import shutil, sys\nshutil.copy(sys.argv[1], sys.argv[2])\n"
-                                   "open(__import__('os').environ['FAKE'] + '/calls.log', 'a').write("
-                                   "'tiny_variant ' + ' '.join(sys.argv[1:]) + '\\n')\n",
+    "tools/glm53_tiny_variant.py": "import os, shutil, sys\nshutil.copy(sys.argv[1], sys.argv[2])\n"
+                                   "with open(os.environ['FAKE'] + '/calls.log', 'a') as f:\n"
+                                   "    f.write('tiny_variant ' + ' '.join(sys.argv[1:]) + '\\n')\n",
     "tools/glm53_park_check.py": "print('parking: 6 turns, all PASS')\n",
 }
 
@@ -82,11 +82,10 @@ class Checks(unittest.TestCase):
         for rel, body in STUBS.items():
             p = self.tmp / rel
             p.parent.mkdir(parents=True, exist_ok=True)
-            if body is None:
-                p.write_text(PY_STUBS[rel], encoding="utf-8")
-            else:
-                p.write_text(STUB_HEAD + body, encoding="utf-8")
-                p.chmod(0o755)
+            p.write_text(STUB_HEAD + body, encoding="utf-8")
+            p.chmod(0o755)
+        for rel, body in PY_STUBS.items():
+            (self.tmp / rel).write_text(body, encoding="utf-8")
         (self.tmp / "calls.log").write_text("")
 
     def run_script(self, name, **env_extra):
@@ -118,6 +117,56 @@ class Checks(unittest.TestCase):
         self.assertEqual(len(bare), 1)
         self.assertIn(" -glm5-next.attention.indexer.kpool_select_tail", bare[0])
         self.assertIn(" -glm5-next.attention.indexer.types", bare[0])
+
+    # ---- glm53_gpu_check.sh
+
+    def test_gpu_check_passes_on_free_cards(self):
+        rc, out = self.run_script("glm53_gpu_check.sh", FAKE_SMI="0, 23900\\n1, 11800\\n2, 9800\\n")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out.count("vs llama.cpp: rows 40"), len(GPU_MODELS), out)
+        self.assertEqual(out.count("check-prefill:"), len(GPU_MODELS), out)
+        self.assertIn("parking: 6 turns, all PASS", out)
+        self.assertNotIn("Traceback", out)
+
+    def test_gpu_check_stops_with_one_line_per_full_card(self):
+        rc, out = self.run_script("glm53_gpu_check.sh", FAKE_GPU_FULL="1", FAKE_SMI="0, 812\\n1, 11800\\n2, 301\\n")
+        self.assertNotEqual(rc, 0)
+        lines = out.strip().splitlines()
+        self.assertEqual(len(lines), 2, out)
+        self.assertIn("GPU 0 has 812 MiB free", lines[0])
+        self.assertIn("GPU 2 has 301 MiB free", lines[1])
+        for ln in lines:
+            self.assertIn("stop the program that holds it", ln)
+        self.assertEqual(self.calls("strata-glm"), [])
+        self.assertEqual(self.calls("llama-strata-ref"), [])
+
+    def test_gpu_check_reads_only_the_cards_cuda_visible_devices_names(self):
+        rc, out = self.run_script("glm53_gpu_check.sh", CUDA_VISIBLE_DEVICES="1,2", FAKE_SMI="1, 11800\\n2, 9800\\n")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("-i 1,2 ", self.calls("nvidia-smi")[0])
+        # CUDA numbers the cards as nvidia-smi does, so both mean the same cards
+        for line in self.calls("strata-glm") + self.calls("llama-strata-ref"):
+            self.assertIn("CVD=<1,2> ORDER=<PCI_BUS_ID>", line)
+
+    def test_gpu_check_with_no_visible_card_says_so(self):
+        rc, out = self.run_script("glm53_gpu_check.sh", CUDA_VISIBLE_DEVICES="", FAKE_SMI="0, 23900\\n")
+        self.assertNotEqual(rc, 0)
+        self.assertIn("CUDA_VISIBLE_DEVICES", out)
+        self.assertEqual(len(out.strip().splitlines()), 1, out)
+        self.assertEqual(self.calls("strata-glm"), [])
+
+    def test_gpu_check_goes_on_when_nvidia_smi_cannot_read_the_cards(self):
+        rc, out = self.run_script("glm53_gpu_check.sh", FAKE_SMI_FAILS="1")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("nvidia-smi", out.splitlines()[0])
+        self.assertEqual(out.count("vs llama.cpp: rows 40"), len(GPU_MODELS), out)
+
+    def test_gpu_check_a_missing_reference_is_a_fail_line_not_a_traceback(self):
+        rc, out = self.run_script("glm53_gpu_check.sh", FAKE_REF_FAILS="1", FAKE_SMI="0, 23900\\n")
+        self.assertNotEqual(rc, 0)
+        self.assertNotIn("Traceback", out)
+        self.assertEqual(out.count("FAIL vs llama.cpp: llama-strata-ref wrote no logits"), len(GPU_MODELS), out)
+        self.assertIn("CUDA error: out of memory", out)
 
 
 if __name__ == "__main__":

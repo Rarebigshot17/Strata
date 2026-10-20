@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The GLM-5.3-Flash GPU engine against the CPU reference and against llama.cpp, on small random models.
-# Needs an NVIDIA GPU; no download; about a minute.
+# Needs an NVIDIA GPU with 2 GiB free on each card it runs on (it stops first when one has less); no download; about
+# a minute.
 #
 #   tools/glm53_gpu_check.sh LLAMA_BUILD_DIR STRATA_BUILD_DIR
 #
@@ -19,6 +20,32 @@ SB="${2:?strata build dir}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 W="$(mktemp -d)"
 trap 'rm -rf "$W"' EXIT
+
+# The free memory of every card the check runs on, before anything starts: when another program holds a card, every
+# engine below stops at its first CUDA call. The tiny models take about 1.2 GB per card (napster-ai, 2026-10-20:
+# "GPU 0: ... 1.21 GB weights and buffers") and the CUDA context a few hundred MB more, so 2 GiB. nvidia-smi numbers
+# the cards by PCI bus; when CUDA_VISIBLE_DEVICES names some, CUDA is told to number them the same way.
+MIN_FREE_MIB=2048
+smi=(--query-gpu=index,memory.free --format=csv,noheader,nounits)
+if [ -n "${CUDA_VISIBLE_DEVICES+set}" ]; then
+    [ -n "$CUDA_VISIBLE_DEVICES" ] || { echo "CUDA_VISIBLE_DEVICES is empty, so no card is visible: unset it"; exit 1; }
+    export CUDA_DEVICE_ORDER=PCI_BUS_ID
+    smi=(-i "$CUDA_VISIBLE_DEVICES" "${smi[@]}")
+fi
+if free=$(nvidia-smi "${smi[@]}" 2>&1); then
+    full=0
+    while IFS=', ' read -r idx mib; do
+        [[ "$mib" =~ ^[0-9]+$ ]] || continue
+        if (( mib < MIN_FREE_MIB )); then
+            echo "GPU $idx has $mib MiB free, the check needs $MIN_FREE_MIB: stop the program that holds it" \
+                "(nvidia-smi lists it), or leave the card out with CUDA_VISIBLE_DEVICES"
+            full=1
+        fi
+    done <<< "$free"
+    [ "$full" = 0 ] || exit 1
+else
+    echo "nvidia-smi cannot read the cards' free memory, checking anyway: $(echo "$free" | head -1)"
+fi
 
 "$LB/bin/test-llama-archs" -a glm5-next -o "$W/" > /dev/null 2>&1 || { echo "test-llama-archs failed"; exit 1; }
 python3 "$HERE/glm53_tiny_variant.py" "$W/glm5-next-moe.gguf" "$W/v1.gguf" \
@@ -47,8 +74,15 @@ for m in glm5-next-moe v1 v1-bare q4_0 q8_0; do
         echo "prefill FAILED:"; tail -8 "$W/pp_$m.txt"; fail=1
     fi
     "$LB/bin/llama-strata-ref" -m "$W/$m.gguf" --tokens-file "$W/ids.txt" -c 256 -b 64 -ub 64 \
-        --out "$W/ref_$m.bin" > /dev/null 2>&1
-    echo "vs llama.cpp: $(python3 "$HERE/glm53_compare.py" "$W/ref_$m.bin" "$W/gpu_$m.bin" | tail -2 | tr '\n' ' ')"
+        --out "$W/ref_$m.bin" > "$W/ref_$m.txt" 2>&1
+    if [ ! -s "$W/ref_$m.bin" ]; then
+        echo "FAIL vs llama.cpp: llama-strata-ref wrote no logits:"; tail -4 "$W/ref_$m.txt"; fail=1
+    elif [ ! -s "$W/gpu_$m.bin" ]; then
+        echo "FAIL vs llama.cpp: strata-glm wrote no logits (its lines above)"; fail=1
+    else
+        res=$(python3 "$HERE/glm53_compare.py" "$W/ref_$m.bin" "$W/gpu_$m.bin") || fail=1
+        echo "vs llama.cpp: $(echo "$res" | tail -2 | tr '\n' ' ')"
+    fi
 done
 # conversations parked in host memory and restored (over every GPU the layers are split across), against fresh
 # runs; one token at a time and without the expert cache, so that both are bit for bit the same computation
