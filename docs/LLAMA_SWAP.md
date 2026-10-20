@@ -110,8 +110,9 @@ answer 503 while too little VRAM is free, run a command before it loads the mode
 ## Claude Code and other Anthropic-API clients: thinking
 
 Claude Code sends `"output_config": {"effort": ...}` with every request (the upstream project saw this by logging the
-requests). GLM-5.3-Flash has no effort levels: its template only turns thinking on or off, so `low`, `medium` and
-`high` all mean "think", and `CLAUDE_CODE_EFFORT_LEVEL` does not shorten the thinking here. A request's
+requests). GLM-5.3-Flash's template has three levels: `low` is Low, `medium` and `high` are High, and `max` is Max,
+its default, so `CLAUDE_CODE_EFFORT_LEVEL` picks one of them ([Thinking](DETAILS.md#thinking)). The level is the
+prompt's first turn: a change of level reads the conversation again. A request's
 `"thinking": {"type": "enabled", "budget_tokens": N}` caps it: the thinking ends after N tokens with a short wrap-up,
 and the model answers ([the reasoning budget](DETAILS.md#thinking)). `"reasoning_budget_tokens": N` in the run config
 caps the requests that send no budget: a request's own `budget_tokens` wins over it, also a larger one.

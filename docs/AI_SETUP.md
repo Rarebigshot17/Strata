@@ -200,8 +200,9 @@ What the user should know about it:
 
 - **One request at a time.** Every app shares the one engine; requests wait in the order they came. A long answer for
   one app delays the others.
-- **Thinking:** on by default. `"reasoning_effort": "none"` turns it off for a request; `low`, `medium` and `high` all
-  mean on (GLM has no levels). `"reasoning_effort"` in the run config sets the default.
+- **Thinking:** on by default, at the model's highest level, Max. `"reasoning_effort"` sets it for a request: `none`
+  turns it off, `low` is Low, `medium` and `high` are High, `max` is Max. `"reasoning_effort"` in the run config sets
+  the default; the web page has the same choices (Off, Low, High, Max).
 - **Agents that run tools** (a shell, the web): the model's tool calls come back as tool calls only when the request
   declares tools, and not with `"tool_choice": "none"`. When the model's tokenizer has GLM's tags as special tokens, a
   call is read only from those tokens, so call-like text copied from a tool result, a web page or the user stays text

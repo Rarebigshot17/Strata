@@ -8,8 +8,9 @@ MODEL.gguf is the model's first shard (it holds the tokenizer and the template).
      special tokens only when every tag is one), and the end-of-turn ids the engine stops at;
   2. the server's start line about where tool calls are read from;
   3. the template's whole source (also written to --template-out);
-  4. the prompt the server renders for a few requests (thinking left to the model, off, low and high; a tool, a call
-     and its result; the same over the Anthropic API), as text, with its token count and the engine's checkpoint.
+  4. the prompt the server renders for a few requests (thinking left to the model, off, low, medium, high and max; a
+     tool, a call and its result; a forced call with thinking off; the same over the Anthropic API), as text, with
+     whether it leaves the thinking open, its token count and the engine's checkpoint.
 Paste the whole output back: the server is built for the template in the GGUF and this shows how it reads it.
 """
 from __future__ import annotations
@@ -22,7 +23,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 from serve import server as S  # noqa: E402
-from serve.frontend import OUTPUT_TAGS, anthropic_to_messages, openai_to_messages  # noqa: E402
+from serve.frontend import OUTPUT_TAGS, anthropic_to_messages, forced_call, openai_to_messages  # noqa: E402
 
 TURN_TOKENS = ("[gMASK]", "<sop>", "<|system|>", "<|user|>", "<|assistant|>", "<|observation|>", "<|endoftext|>",
                "<tool_response>", "</tool_response>")
@@ -45,8 +46,11 @@ REQUESTS = [
     ("openai: reasoning_effort low", "openai", {"messages": CHAT, "reasoning_effort": "low"}),
     ("openai: reasoning_effort medium", "openai", {"messages": CHAT, "reasoning_effort": "medium"}),
     ("openai: reasoning_effort high", "openai", {"messages": CHAT, "reasoning_effort": "high"}),
+    ("openai: reasoning_effort max", "openai", {"messages": CHAT, "reasoning_effort": "max"}),
     ("openai: a tool, a call with its reasoning, its result, the next question", "openai",
      {"messages": TOOL_TURNS, "tools": TOOLS}),
+    ("openai: a forced call (tool_choice required) with thinking off", "openai",
+     {"messages": TOOL_TURNS[:1], "tools": TOOLS, "tool_choice": "required", "reasoning_effort": "none"}),
     ("anthropic: thinking enabled with budget_tokens", "anthropic",
      {"max_tokens": 1024, "thinking": {"type": "enabled", "budget_tokens": 4096},
       "messages": [{"role": "user", "content": "What is 2+2?"}]}),
@@ -94,7 +98,8 @@ def main() -> int:
                 messages, tools, kw = openai_to_messages(req)
             else:
                 messages, tools, kw = anthropic_to_messages(S.anthropic_budget(req), svc.anthropic_think_unasked)
-            ids, thinking, _ = svc.prepare(messages, tools, kw, max_new=64)
+            force = forced_call(req.get("tool_choice"), tools)    # the opening of the call the reply must make
+            ids, thinking, _ = svc.prepare(messages, tools, kw, max_new=64, force=force)
             cp = svc.checkpoint.at
             print(f"   template kwargs {kw}; thinking {thinking}; {len(ids)} tokens; checkpoint at {cp}")
             print(tok.decode(ids))

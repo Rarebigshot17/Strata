@@ -17,8 +17,8 @@ Status legend: [ ] to do, [x] done (with the commit), [~] partly.
 Defaults: port **8101** everywhere (Open WebUI 3000, Portainer 8000 and the UPS dashboard 8080 are taken on
 napster-ai). Model name: the run config's `"model_name"` (setup writes `glm-5.3-flash`), else the GGUF's
 `general.name`, else `glm-5.3-flash`. Sampling defaults when a request sets none: temperature 1.0, top_p 0.95
-(GLM's recommendation). Thinking is on/off only: GLM's template has no effort levels, so low/medium/high mean
-"on" (and still reach the template as `reasoning_effort`) and none/off mean "off".
+(GLM's recommendation). Thinking follows the real template (G below): three levels, low < high < max (the default),
+and thinking off, which the server makes itself.
 
 Behaviour the port and its review (D1) settled:
 
@@ -177,6 +177,30 @@ tokens more slowly than the engine wrote them (now each pass ends where the serv
   the pull request template, SECURITY.md's reporting process, the funding link, AGENTS.md's contribution rules) are
   removed; what SECURITY.md said about the server's protections is in [DETAILS.md](DETAILS.md#security).
 
+### G. The real chat template (napster-ai, 2026-10-20)
+
+`tools/glm53_template_probe.py` read the real UD-IQ3_XXS GGUF's tokenizer and chat template. What it showed and what
+the server does with it (branch `glm53-flash-wip-fix-h1`):
+
+- [x] G1 `serve/chat_template.jinja` is the real template, byte for byte (10648 characters); it was GLM-4.7-Flash's.
+  Nearly every serve test renders with it, `test_glm_engine_protocol` too. The capability probe and the checkpoint
+  read it as before. Its calls and tool results are written as the parser and `text_tool_results` expect.
+- [x] G2 Thinking off. The template has no `enable_thinking` switch: the prompt always ends `<|assistant|><think>`, so
+  `none`, Anthropic's disabled thinking and `"anthropic_thinking": "on_request"` still thought. The server now
+  closes it (`server.close_thinking`): the prompt ends `<|assistant|><think></think>`, as the template writes a past
+  turn without thinking; a forced call's opening follows; the checkpoint stays before the generation prompt; the
+  template still gets `enable_thinking`, and a template that honours it is left as it renders.
+- [x] G3 Levels. The template writes `<|system|>Reasoning Effort: Low|High|Max` first: `low` and `high` as given,
+  anything else Max. The server maps none/off/disabled/false to off, minimal/low to low, medium/high to high,
+  xhigh/max/maximum to max, and passes nothing when no level is given; Anthropic's `budget_tokens` is low under
+  2048, high under 8192, else max. The shared settings, the run config and the Settings view take none, low,
+  medium, high and max. A change of level changes the prompt's first turn, so the conversation is read again.
+- [x] G4 The web page's Thinking is Off / Low / High / Max (default Max); it was Off / On, and On sent `high`, less
+  than the default. "Use for other apps too" still shares only Off (#278).
+- [x] G5 `clear_thinking` is false by default: every earlier turn keeps its thinking, so the next turn's prompt starts
+  with the prompt and the reply as the model wrote it. The docs said the opposite; DETAILS says what it costs in
+  context and how to send `clear_thinking` true.
+
 ## Known risks to check on napster-ai
 
 Nothing here has run on a GPU or on the real model; the server is tested on the CPU engine with small random
@@ -184,10 +208,14 @@ models.
 
 - The real GLM-5.3 template is known now (`tools/glm53_template_probe.py` on the real UD-IQ3_XXS GGUF, napster-ai,
   2026-10-20). `serve/chat_template.jinja` is that template, byte for byte, and the tests use it.
-- Token types of `<think>`, `<tool_call>`, `<arg_key>` ... in the real GGUF (type 3 or 4). If any of the tags is not
-  a special token there, `output_tags` is empty and the parser reads the tags from the text, so a call the model
-  copies from a tool result could be read as a call again. The server's start line says which (`tag_mode_line`: a
-  `WARNING` line that names the missing tags).
+- Token types are known too: in the real GGUF GLM's tags (`<think>`, `<tool_call>`, `<arg_key>`, ...) are type 4
+  and the turn tokens type 3 (the same probe), so the server reads calls and `</think>` from the special tokens
+  only. The end-of-turn ids are 154820, 154827 and 154829 (`<|endoftext|>`, `<|user|>`, `<|observation|>`), and the
+  server's tokenizer agreed with llama.cpp's on 21 of 21 test strings.
+- How the model thinks at Low, High and Max, and how it answers with the thinking closed by the server: not run yet.
+- Whether the next turn's prompt really starts with the model's own reply tokens: the template writes the answer
+  stripped of spaces and newlines at its ends, and a reply tokenized again can differ from the tokens the model
+  wrote. Where it differs, the engine goes on from the last checkpoint instead.
 - Whether GLM writes tool calls inside its thinking.
 - The start on napster-ai's SATA SSD: how long the mapping and the layer upload take before the first warm-up line
   (the start watchdog allows 900 s without progress), and how long the warm-up of 117-162 GB takes.

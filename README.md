@@ -153,12 +153,14 @@ fits.
   over Tailscale on napster-ai (the agents and the Discord bot can use that address too). Clients send the key as
   `Authorization: Bearer <key>` or `x-api-key`; the web page asks for it. Without a key, anyone who can reach the
   port can use the model: [what the server exposes](docs/DETAILS.md#security).
-- **Thinking:** GLM-5.3-Flash thinks before it answers, or it does not. It has no levels. In the web app, open
-  the sampling settings and choose Thinking **Off** or **On**. In the API, `reasoning_effort: "none"` turns it off,
-  and low, medium and high all mean on. `"chat_template_kwargs": {"enable_thinking": false}` and
-  `"thinking": {"type": "disabled"}` (Anthropic's, and Z.ai's on the OpenAI route) turn it off too. A request that
-  says nothing gets thinking on, unless the run config sets `reasoning_effort` (or `"anthropic_thinking":
-  "on_request"` for Anthropic requests).
+- **Thinking:** GLM-5.3-Flash thinks before it answers, at one of three levels: Low, High or Max (its default). In
+  the web app, open the sampling settings and choose Thinking **Off**, **Low**, **High** or **Max**. In the API,
+  `reasoning_effort` `"low"` is Low, `"medium"` and `"high"` are High, `"max"` is Max, and `"none"` turns thinking
+  off. `"chat_template_kwargs": {"enable_thinking": false}` and `"thinking": {"type": "disabled"}` (Anthropic's, and
+  Z.ai's on the OpenAI route) turn it off too: the server then closes the thinking itself, since the model's template
+  has no switch for it. A request that says nothing gets Max, unless the run config sets `reasoning_effort` (or
+  `"anthropic_thinking": "on_request"` for Anthropic requests). Earlier turns keep their thinking in the prompt,
+  which uses context in long sessions: [DETAILS.md](docs/DETAILS.md#thinking).
 - **Tool calls** are read from the model's own special tokens only. A call that the model copies as plain text, from
   a tool result, a web page or the user's message, stays text: it is never returned as a call, and never runs as an
   MCP tool. This needs GLM's tags to be special tokens in the model's tokenizer; that is expected, but not checked

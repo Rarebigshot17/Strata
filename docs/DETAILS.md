@@ -144,27 +144,55 @@ never sent. A bad value is a 400 before anything runs.
 
 #### Thinking
 
-GLM-5.3-Flash thinks before it answers by default. Its chat template has no effort levels: thinking is on or off.
-So `low`, `medium` and `high` (also `xhigh`, `max`, `maximum`) mean "on", and `none`, `off`, `minimal`, `disabled`
-and `false` mean "off". Any other value is a 400.
+GLM-5.3-Flash thinks before it answers by default. Its chat template has three levels, low < high < max, and writes
+the level as the prompt's first turn: `<|system|>Reasoning Effort: Low`, `High` or `Max`. Max is its default. The
+template has no switch that turns thinking off: Strata turns it off itself (below).
 
-| API | Thinking off | Thinking on |
+Every word a request sends lands on a level, or turns thinking off. Any other word is a 400 that lists them.
+
+| The request says | The model gets |
+| --- | --- |
+| nothing | Max, the template's default |
+| `none`, `off`, `disabled`, `false` | thinking off |
+| `minimal`, `low` | Low |
+| `medium`, `high` | High |
+| `xhigh`, `max`, `maximum` | Max |
+| Anthropic's `budget_tokens` N | Low under 2048, High under 8192, else Max |
+
+| API | Thinking off | A level |
 | --- | --- | --- |
-| OpenAI chat | `"reasoning_effort": "none"`, `"thinking": {"type": "disabled"}` (Z.ai's form), or `"chat_template_kwargs": {"enable_thinking": false}` | `"reasoning_effort": "high"` (or `low`, `medium`), `"reasoning": {"effort": ...}`, `"thinking": {"type": "enabled"}` |
+| OpenAI chat | `"reasoning_effort": "none"`, `"thinking": {"type": "disabled"}` (Z.ai's form), or `"chat_template_kwargs": {"enable_thinking": false}` | `"reasoning_effort": "high"` (any word above), `"reasoning": {"effort": ...}`; `"thinking": {"type": "enabled"}` is the default, Max |
 | Anthropic | `"thinking": {"type": "disabled"}`, or `"output_config": {"effort": "none"}` | `"output_config": {"effort": ...}`, or `"thinking": {"type": "enabled", "budget_tokens": N}` |
 | Responses | `"reasoning": {"effort": "none"}` | `"reasoning": {"effort": ...}` |
 
+- **Thinking off.** The template always ends the prompt with `<|assistant|><think>`, which opens the thinking. When
+  a request turns thinking off, the server closes it: the prompt ends `<|assistant|><think></think>`, the way the
+  template writes an earlier turn without thinking, and the model answers at once. The level line says Max, the
+  template's default. A forced call (`tool_choice`) starts right after the `</think>`. A template of your own
+  (`"chat_template"`) that has an `enable_thinking` switch, as GLM-4.7-Flash's has, is used as it renders.
+- **Another level reads the conversation again.** The level is the prompt's first turn, so a request at another
+  level than the one before shares no cached prefix with it: the engine reads the whole conversation again. Thinking
+  off and Max share it, since both write Max.
 - A request that says nothing gets the shared settings' level, then the run config's `"reasoning_effort"`, then the
-  template's default (on). An Anthropic request that says nothing thinks too, unless the run config has
-  `"anthropic_thinking": "on_request"` (Anthropic's own rule: thinking only when asked).
-- Anthropic's `"thinking": {"type": "enabled", "budget_tokens": N}` turns thinking on and caps it at N tokens: it
-  is the request's own reasoning budget (below). A `reasoning_budget_tokens` in the same request wins over it; a
-  `budget_tokens` that is not a whole number is a 400.
+  template's default (Max). An Anthropic request that says nothing thinks too, unless the run config has
+  `"anthropic_thinking": "on_request"` (Anthropic's own rule: thinking only when asked). The shared settings and the
+  run config take `none`, `low`, `medium`, `high` and `max`.
+- Anthropic's `"thinking": {"type": "enabled", "budget_tokens": N}` turns thinking on at the level above and caps it
+  at N tokens: it is the request's own reasoning budget (below). A `reasoning_budget_tokens` in the same request wins
+  over it; a `budget_tokens` that is not a whole number is a 400.
 - The thinking comes back as `reasoning_content` (OpenAI, in the stream's deltas and the message), as `thinking`
   blocks (Anthropic, with an empty `signature`) or as a `reasoning` output item (Responses). Send it back with the
-  conversation as the API does. GLM-5.3-Flash's template keeps the thinking of every earlier turn, unless the
-  request sends `"chat_template_kwargs": {"clear_thinking": true}` (the template in the real GGUF; Strata's
-  fallback, `serve/chat_template.jinja`, is a copy of it).
+  conversation as the API does.
+- **Earlier turns keep their thinking.** GLM-5.3-Flash's template keeps the thinking of every earlier turn in the
+  prompt: its `clear_thinking` is false unless a request says otherwise. So when a client sends the reply back as it
+  got it, the next turn's prompt starts with this turn's prompt and its reply as the model wrote it, and the engine
+  goes on from the end of the reply: it reads only the new messages. The cost is context. Every turn's thinking stays in it, so a long agent session fills the
+  context sooner: 50 turns that think 2,000 tokens each carry 100,000 tokens of thinking (calculated). To drop it,
+  send `"chat_template_kwargs": {"clear_thinking": true}` with each request. The thinking of the turns before the
+  last user message is then left out (they are written `<think></think>`), and the turns after it keep theirs. The
+  prompt stays shorter, but each new user message changes the earlier turns, and the engine reads the conversation
+  again from the first turn that lost its thinking. A client that does not send the thinking back gets its turns
+  written `<think></think>` too.
 
 **The reasoning budget.** `"reasoning_budget_tokens": N` in a request (chat, Anthropic or Responses), Anthropic's
 `thinking.budget_tokens`, the shared settings' or the run config's caps the thinking at N tokens, in that order: a
@@ -302,10 +330,11 @@ its arguments piece by piece: a string parameter character by character, any oth
 #### chat_template_kwargs
 
 `"chat_template_kwargs": {...}` (chat and Anthropic routes; the vLLM and llama.cpp convention) passes keys to the
-chat template. `enable_thinking` and `reasoning_effort` are read as the thinking switch above; every other key
-reaches the template as it is, for example `"clear_thinking": false` (keep the thinking of earlier turns), except the
-names the server sets itself (`messages`, `tools`, `add_generation_prompt`, `raise_exception`, `strftime_now`). What
-a key does depends on the template in the model's GGUF.
+chat template. `enable_thinking` and `reasoning_effort` are read as the thinking settings above; every other key
+reaches the template as it is, for example `"clear_thinking": true` (drop the thinking of earlier turns, which
+GLM-5.3-Flash's template keeps by default), except the names the server sets itself (`messages`, `tools`,
+`add_generation_prompt`, `raise_exception`, `strftime_now`). What a key does depends on the template in the
+model's GGUF.
 
 ### Usage numbers
 
@@ -364,7 +393,7 @@ items and the retrieve, delete and cancel routes are refused with an error that 
 | `instructions` | The system message; leading `developer` messages join it, later ones become user messages in place |
 | `tools` | `function` tools; `namespace` tools (the model sees `namespace.name`, calls come back with `namespace` and `name`); `custom` tools (one free-form `input` string). Hosted tools (`web_search`, `file_search`, ...) are left out, with one line in the server window |
 | `tool_choice` | `"none"` hides the tools; `"required"` and a named `function` or `custom` tool open the call as on the chat route |
-| `reasoning.effort` | Thinking on or off, as above |
+| `reasoning.effort` | The thinking level, or off, as [above](#thinking) |
 | `max_output_tokens` | The output cap; running out ends the response `incomplete` (`max_output_tokens`) |
 | `text.format` | `json_object` and `json_schema`, as [above](#structured-output-response_format) |
 | `include: ["reasoning.encrypted_content"]` | The reasoning item also carries `encrypted_content`: the thinking in base64, not encrypted (the client already has the text) |
@@ -393,7 +422,7 @@ model = "glm-5.3-flash"                 # any name; Strata answers with its mode
 model_provider = "strata"
 model_context_window = 131072           # the context you chose in setup: Codex compacts before it gets there
 show_raw_agent_reasoning = true         # show the model's thinking (it writes no summaries)
-# model_reasoning_effort = "minimal"    # thinking off; low, medium or high all mean on (GLM has no levels)
+# model_reasoning_effort = "low"        # Low; medium and high are High, xhigh is Max; not set: Max
 
 [model_providers.strata]
 name = "Strata (local)"
@@ -475,17 +504,17 @@ including the engine's, is in [INSTALL.md](INSTALL.md#the-run-config).
 
 ### The chat page's settings
 
-The Sampling drawer (the gear button in the chat) holds: **Thinking** off or on (default on), **Temperature**
-(0-1.5, default 1.0; 0 is greedy), **Top-p** (default 0.95) and **Top-k** (default 0, off), **Max tokens** (empty:
-until done), **Seed** (empty: random), **Show thinking**, **Use tools from MCP servers** (shown when MCP servers are
-configured) and **Use for other apps too** (the shared settings, below). They are kept in this browser. With each
-request the chat sends the temperature (and top-p and top-k when the temperature is above 0), the seed and max
-tokens when they are set, and `"reasoning_effort"`: `"none"` when thinking is off, `"high"` when it is on (GLM has
-no levels), so the page's choice wins over a run config or shared setting. What it does not send falls back to the
-defaults below. **Use for other apps too** shares the same fields, but thinking only when it is off: a shared "on"
-would make other apps' small calls think too (an Anthropic client's, which `anthropic_thinking` `"on_request"` keeps
-from thinking), so with thinking on the other apps keep their own choice. The About tab holds the API key (also kept
-in this browser) and the theme.
+The Sampling drawer (the gear button in the chat) holds: **Thinking** Off, Low, High or Max (default Max),
+**Temperature** (0-1.5, default 1.0; 0 is greedy), **Top-p** (default 0.95) and **Top-k** (default 0, off), **Max
+tokens** (empty: until done), **Seed** (empty: random), **Show thinking**, **Use tools from MCP servers** (shown
+when MCP servers are configured) and **Use for other apps too** (the shared settings, below). They are kept in this
+browser. With each request the chat sends the temperature (and top-p and top-k when the temperature is above 0), the
+seed and max tokens when they are set, and `"reasoning_effort"`: `"none"`, `"low"`, `"high"` or `"max"`, so the
+page's choice wins over a run config or shared setting. What it does not send falls back to the defaults below.
+**Use for other apps too** shares the same fields, but thinking only when it is off: a shared level would make other
+apps' small calls think too (an Anthropic client's, which `anthropic_thinking` `"on_request"` keeps from thinking),
+so with a level chosen the other apps keep their own. The About tab holds the API key (also kept in this browser)
+and the theme.
 
 ### Shared settings for other clients
 
@@ -499,9 +528,9 @@ curl http://127.0.0.1:8101/settings                       # {"shared": true|fals
 
 `POST /settings` with `{"defaults": {...}}` sets them and `{"defaults": null}` clears them; it is taken only from
 Strata's own page (JSON, no other site's `Origin`). The keys and their checks: `reasoning_effort` (`none`, `low`,
-`medium`, `high`), `temperature` (0-2), `top_p` (above 0, at most 1), `top_k` (a whole number >= 0), `seed` and
-`max_tokens` (positive whole numbers) and `reasoning_budget_tokens` (a whole number >= 0). Any other key, NaN or
-Infinity is a 400 that names the key. A request's own value always wins.
+`medium`, `high`, `max`: [Thinking](#thinking)), `temperature` (0-2), `top_p` (above 0, at most 1), `top_k` (a
+whole number >= 0), `seed` and `max_tokens` (positive whole numbers) and `reasoning_budget_tokens` (a whole number
+>= 0). Any other key, NaN or Infinity is a 400 that names the key. A request's own value always wins.
 
 ### The Settings view
 
@@ -513,6 +542,7 @@ earlier file is kept as `strata-glm-<size>.json.bak`.
 | Key | What it does |
 | --- | --- |
 | `sampling.temperature`, `sampling.top_p`, `sampling.top_k`, `sampling.min_p` | Sampling defaults for requests that send none ([below](#sampling-defaults)) |
+| `reasoning_effort` | Thinking for requests that name no level: `none` (off), `low` (Low), `medium` or `high` (High), `max` (Max; empty: Max, the model's default) |
 | `reasoning_budget_tokens` | Cap every request's thinking at this many tokens (0 or empty: no cap) |
 | `fit_max_tokens` | Shorten an output cap that does not fit the context instead of a 400 |
 | `anthropic_thinking` | `model` (Anthropic requests that do not ask think anyway) or `on_request` |
@@ -555,7 +585,7 @@ Beside the engine's keys (`exe`, `args`, `cwd`, `log`, `gpu`, `split`, `env`, `l
 | `model_name`, `aliases` | the GGUF's name, none | The model's name and other names it answers to |
 | `chat_template` | the GGUF's | A Jinja template file to use instead (also `--chat-template`) |
 | `sampling` | none | Sampling defaults ([above](#sampling-defaults)) |
-| `reasoning_effort` | none | Thinking for requests that do not say: `none` is off, `low`, `medium`, `high` are on |
+| `reasoning_effort` | not set (Max) | Thinking for requests that do not say: `none` is off, `low` is Low, `medium` and `high` are High, `max` is Max ([Thinking](#thinking)) |
 | `reasoning_budget_tokens` | 0 | A thinking cap for every request ([Thinking](#thinking)) |
 | `anthropic_thinking` | `model` | `on_request`: Anthropic requests think only when they ask |
 | `fit_max_tokens` | false | Shorten an output cap that does not fit instead of a 400 |
