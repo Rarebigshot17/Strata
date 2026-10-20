@@ -123,7 +123,21 @@ Two things found while writing the reference, both checked against llama.cpp's c
 ## What to run on napster-ai
 
 Each step prints a few lines to paste back. Steps 1-4 need no model download. None of these steps has been run
-yet.
+yet. Run them from the Strata folder.
+
+0. **The checkout, the PC check and the tools the steps use.** `./setup.sh --check` checks the GPUs, the driver, the
+   RAM, the CPU and the disk, and makes the `.venv` (it asks for sudo when Python's venv is missing); it stops before
+   it installs anything else, so the Python packages the checks need (numpy, pyyaml, tqdm, regex, and cmake 3.24+)
+   come from `requirements.txt`. Steps 1 and 2 compile CUDA code: `nvcc` (a CUDA toolkit, 12.0 or newer) must be on
+   `PATH`; when there is none, [INSTALL.md](INSTALL.md) ("The toolkit") installs one.
+
+   ```bash
+   git clone -b glm53-flash https://github.com/Rarebigshot17/Strata ~/Strata && cd ~/Strata
+   ./setup.sh --check
+   .venv/bin/python -m pip install -r requirements.txt
+   source .venv/bin/activate
+   nvcc --version || export PATH=/usr/local/cuda/bin:$PATH
+   ```
 
 1. **Build llama.cpp** (CUDA, pinned commit) with the reference tool and the small-model generator:
 
