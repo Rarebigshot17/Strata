@@ -233,7 +233,7 @@ int main(int argc, char** argv) {
         strata::glm::Trace tg, tc;
         const strata::glm::CheckLimits lim = strata::glm::check_limits(quantized_weights(model));
         strata::glm::LogitCheck chk;
-        double worst_layer = 0;
+        strata::glm::LayerCheck layers;
         double gpu_s = 0;
         for (size_t i = 0; i < ids.size(); ++i) {
             const auto a = std::chrono::steady_clock::now();
@@ -245,9 +245,8 @@ int main(int argc, char** argv) {
                 const double dl = chk.add(lc, lg);
                 const auto am = [](const std::vector<float>& v) { return std::max_element(v.begin(), v.end()) - v.begin(); };
                 for (size_t l = 0; l < tc.layer_out.size(); ++l) {
-                    const double d = strata::glm::rel_diff(tc.layer_out[l], tg.layer_out[l]);
-                    worst_layer = std::max(worst_layer, d);
-                    if (d > 1e-2) {
+                    const double d = layers.add(tc.layer_out[l], tg.layer_out[l]);
+                    if (layers.parted(d)) {
                         std::printf("position %zu: layer %zu residual differs by %.3g (relative)%s\n", i, l, d,
                                     model.config().is_kda((int64_t) l) ? " [KDA]" : " [MLA]");
                         break;
@@ -267,7 +266,7 @@ int main(int argc, char** argv) {
         eng.save_profile();
         if (check_cpu) {
             const bool pass = chk.pass(lim);
-            std::printf("check-cpu: %s; worst layer diff %.3g: %s\n", chk.summary(lim).c_str(), worst_layer,
+            std::printf("check-cpu: %s; worst layer diff %.3g: %s\n", chk.summary(lim).c_str(), layers.worst,
                         pass ? "PASS" : "FAIL");
             return pass ? 0 : 1;
         }

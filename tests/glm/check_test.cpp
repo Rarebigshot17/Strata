@@ -1,6 +1,7 @@
 // tests/glm/check_test.cpp - the pass rule of strata-glm's GPU checks (check.hpp) on hand-made logit rows, without a
 // GPU: the spread measured on napster-ai's Q4_0 models passes, a 1% difference fails on float weights, a KL far above
-// the rounding fails while the relative diff is within its limit, and a NaN or an infinity fails.
+// the rounding fails while the relative diff is within its limit, and a NaN or an infinity fails. Also the layers'
+// residual streams (LayerCheck): one with a NaN or an infinity parts from the CPU's.
 #include "strata/glm/check.hpp"
 
 #include <algorithm>
@@ -155,6 +156,32 @@ int main() {
 
     std::printf("no rows\n");
     expect(!LogitCheck().pass(quant), "nothing compared does not pass");
+
+    // --check-cpu prints the first layer of each position whose residual streams part: where a kernel went wrong,
+    // and an overflow or a NaN is the kind of wrong a GPU kernel makes
+    std::printf("the layers' residual streams\n");
+    {
+        const auto cpu = cpu_rows(1, 512, 7)[0];
+        auto near = cpu, far = cpu;
+        near[3] += 0.005f * row_max(cpu);
+        far[3] += 0.02f * row_max(cpu);
+        LayerCheck lc;
+        expect(!lc.parted(lc.add(cpu, near)), "a layer within 1% has not parted");
+        expect(lc.parted(lc.add(cpu, far)), "a layer 2% off has parted");
+        for (int k = 0; k < 3; ++k) {
+            auto bad_row = cpu;
+            bad_row[100] = k == 0 ? INFINITY : k == 1 ? -INFINITY : NAN;
+            const char* what[] = {"an infinity", "a minus infinity", "a NaN"};
+            LayerCheck c;
+            c.add(cpu, near);
+            char msg[96];
+            std::snprintf(msg, sizeof msg, "a layer with %s on the GPU has parted", what[k]);
+            expect(c.parted(c.add(cpu, bad_row)), msg);
+            c.add(cpu, near);   // a later layer, or position, that is close again
+            std::snprintf(msg, sizeof msg, "the worst layer diff still shows %s", what[k]);
+            expect(!(c.worst <= c.limit), msg);
+        }
+    }
 
     std::printf(bad ? "FAILED\n" : "all ok\n");
     return bad != 0;

@@ -84,6 +84,24 @@ inline double kl_div(const std::vector<float>& a, const std::vector<float>& b) {
     return std::max(kl, 0.0);
 }
 
+/// The residual streams after every layer, compared position by position (--check-cpu): the first layer where the
+/// GPU parts from the CPU is where a kernel is wrong. It says where to look and is not part of the rule. A NaN or an
+/// infinity in a layer's streams parts it too (rel_diff gives NaN, which no comparison with a limit lets through),
+/// and keeps the worst diff at NaN: an overflow is the kind of wrong a GPU kernel makes.
+struct LayerCheck {
+    double limit = 1e-2;    ///< a layer whose relative diff is above this has parted
+    double worst = 0;       ///< over the layers compared; NaN once one held a NaN or an infinity
+
+    /// Adds one layer's streams and returns their relative diff (NaN for a NaN or an infinity in either).
+    double add(const std::vector<float>& cpu, const std::vector<float>& gpu) {
+        const double d = rel_diff(cpu, gpu);
+        worst = std::isnan(worst) || std::isnan(d) ? NAN : std::max(worst, d);
+        return d;
+    }
+    /// Whether a layer whose relative diff is `d` has parted from the CPU's.
+    bool parted(double d) const { return !(d <= limit); }
+};
+
 /// The CPU's and the GPU's logits, compared row by row.
 struct LogitCheck {
     int rows = 0;
