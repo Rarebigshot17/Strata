@@ -66,6 +66,21 @@ class Apply(unittest.TestCase):
         with self.assertRaises(ValueError):                              # one bad value: nothing is applied
             runconfig.apply(CFG, {"fit_max_tokens": True, "sampling.top_k": -1})
 
+    def test_the_thinking_level(self):
+        # the config's "reasoning_effort": none (thinking off), low, medium or high (High), max (the model's default)
+        for v in ("none", "low", "medium", "high", "max"):
+            new, changed = runconfig.apply(CFG, {"reasoning_effort": v})
+            self.assertEqual((new["reasoning_effort"], changed), (v, ["reasoning_effort"]))
+        for v in ("xhigh", "on", "", 3, True):
+            with self.subTest(v=v), self.assertRaises(ValueError):
+                runconfig.apply(CFG, {"reasoning_effort": v})
+        new, _ = runconfig.apply({**CFG, "reasoning_effort": "low"}, {"reasoning_effort": None})
+        self.assertNotIn("reasoning_effort", new)
+        got = {k["key"]: k for k in runconfig.view(CFG, "strata-glm.json")["keys"]}["reasoning_effort"]
+        self.assertEqual(got["choices"], ["none", "low", "medium", "high", "max"])
+        for words in ("none = off", "low = Low", "medium or high = High", "max = Max"):
+            self.assertIn(words, got["help"])
+
     def test_only_finite_numbers(self):
         # Python's json reads NaN, Infinity and 1e400: NaN passed every range test (idle_unload_s NaN unloaded the
         # model at every idle moment), Infinity reached int() (OverflowError), and a huge park_mib or

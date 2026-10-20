@@ -2288,6 +2288,115 @@ class ConfigReasoningEffort(unittest.TestCase):
         self.assertEqual(cfg, {"args": ["--ctx", "4096"]})
 
 
+class EffortLevels(unittest.TestCase):
+    """GLM-5.3-Flash's template has three thinking levels, low < high < max: it writes "Reasoning Effort: Low", "High"
+    or "Max" as the prompt's first turn (reasoning_effort "low" or "high"; any other value, or none, is Max, its
+    default).  Every effort a request, the shared Chat settings or the run config gives lands on one of them, or
+    turns thinking off (the server closes the thinking; the line says Max, the template's default)."""
+
+    MSGS = [{"role": "user", "content": "hi"}]
+    OFF, LOW, HIGH, MAX = ("Max", False), ("Low", True), ("High", True), ("Max", True)
+    LEVELS = ((None, MAX), ("none", OFF), ("off", OFF), ("disabled", OFF), ("false", OFF), ("minimal", LOW),
+              ("low", LOW), ("medium", HIGH), ("high", HIGH), ("xhigh", MAX), ("max", MAX), ("maximum", MAX))
+
+    def setUp(self):
+        self.tok = GlmTokenizer()
+        self.engine = MockEngine(self.tok, "ok", max_context=CTX)
+        self.svc = Service(self.engine, self.tok, glm_template())
+
+    def level_of(self, ids):
+        """-> (the level the prompt's first turn names, whether the prompt leaves the thinking open)."""
+        text = self.tok.decode(ids)
+        head, _, rest = text.partition("<|system|>Reasoning Effort: ")
+        self.assertEqual(head, "[gMASK]<sop>")
+        return rest.split("<|", 1)[0], text.endswith("<|assistant|><think>")
+
+    def level(self, messages, tools, kw):
+        ids, thinking, _ = self.svc.prepare(messages, tools, kw)
+        self.assertEqual(self.level_of(ids)[1], thinking)
+        return self.level_of(ids)
+
+    def test_openai_and_responses(self):
+        from serve.frontend import openai_to_messages
+        from serve.responses import template_kwargs
+        for effort, want in self.LEVELS:
+            with self.subTest(effort=effort):
+                self.assertEqual(self.level(*openai_to_messages(
+                    {"messages": self.MSGS, **({"reasoning_effort": effort} if effort else {})})), want)
+                self.assertEqual(self.level(*openai_to_messages(
+                    {"messages": self.MSGS, **({"reasoning": {"effort": effort}} if effort else {})})), want)
+                kw = template_kwargs({"reasoning": {"effort": effort}} if effort else {}, {})
+                self.assertEqual(self.level(self.MSGS, None, kw), want)
+
+    def test_anthropic(self):
+        from serve.frontend import anthropic_to_messages
+        from serve.server import anthropic_budget
+
+        def level(**req):
+            return self.level(*anthropic_to_messages(anthropic_budget({"messages": self.MSGS, **req})))
+        for effort, want in self.LEVELS:
+            with self.subTest(effort=effort):
+                self.assertEqual(level(**({"output_config": {"effort": effort}} if effort else {})), want)
+        # budget_tokens: under 2048 low, under 8192 high, else max
+        for budget, want in ((1024, self.LOW), (2048, self.HIGH), (4096, self.HIGH), (8192, self.MAX),
+                             (32000, self.MAX)):
+            with self.subTest(budget_tokens=budget):
+                self.assertEqual(level(thinking={"type": "enabled", "budget_tokens": budget}), want)
+        self.assertEqual(level(thinking={"type": "disabled"}), self.OFF)
+
+    def test_the_shared_settings_and_the_run_config(self):
+        # over HTTP, on the three APIs: a request that names no level gets the Chat settings' level, else the run
+        # config's; a request's own level wins
+        from serve.server import clean_shared_defaults
+        httpd = serve(self.svc, port=0)
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+        def level(path, body):
+            req = urllib.request.Request(base + path, data=json.dumps({"model": "m", **body}).encode(),
+                                         headers={"Content-Type": "application/json"})
+            with contextlib.redirect_stdout(io.StringIO()), urllib.request.urlopen(req, timeout=30) as r:
+                self.assertEqual(r.status, 200)
+            return self.level_of(self.engine.last_prompt)
+        try:
+            for effort, want in (("none", self.OFF), ("low", self.LOW), ("medium", self.HIGH),
+                                 ("high", self.HIGH), ("max", self.MAX)):
+                for where in ("shared", "config"):
+                    with self.subTest(effort=effort, where=where):
+                        clean = clean_shared_defaults({"reasoning_effort": effort})
+                        self.svc.shared = clean if where == "shared" else {}
+                        self.svc.config_effort = None if where == "shared" else clean["reasoning_effort"]
+                        self.assertEqual(level("/v1/chat/completions", {"messages": self.MSGS}), want)
+                        self.assertEqual(level("/v1/messages", {"messages": self.MSGS, "max_tokens": 8}), want)
+                        self.assertEqual(level("/v1/responses", {"input": "hi"}), want)
+                        self.assertEqual(level("/v1/chat/completions", {"messages": self.MSGS,
+                                                                        "reasoning_effort": "low"}), self.LOW)
+        finally:
+            self.svc.shared, self.svc.config_effort = {}, None
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_the_levels_the_settings_take(self):
+        from serve.server import clean_shared_defaults
+        for effort in ("none", "low", "medium", "high", "max"):
+            self.assertEqual(clean_shared_defaults({"reasoning_effort": effort}), {"reasoning_effort": effort})
+        for effort in ("xhigh", "minimal", "on", 3):
+            with self.subTest(effort=effort), self.assertRaises(ValueError) as c:
+                clean_shared_defaults({"reasoning_effort": effort})
+            self.assertIn("none (thinking off), low (Low), medium or high (High), or max (Max, the model's default)",
+                          str(c.exception))
+
+    def test_the_start_line_says_what_the_configs_level_becomes(self):
+        from serve.server import config_effort_line
+        for effort, says in (("none", "thinking off"), ("low", "Reasoning Effort Low"),
+                             ("medium", "Reasoning Effort High"), ("high", "Reasoning Effort High"),
+                             ("max", "Reasoning Effort Max")):
+            with self.subTest(effort=effort):
+                line = config_effort_line(effort)
+                self.assertIn(says, line)
+                self.assertIn(f"reasoning_effort {effort!r} in the config", line)
+                self.assertNotIn("no levels", line)
+
+
 class SharedSettings(unittest.TestCase):
     """The web app's "Use for other apps too": POST /settings makes its Chat settings every client's defaults."""
 

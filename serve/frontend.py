@@ -152,35 +152,44 @@ def _text_of(content) -> str:
 
 IMAGE_PARTS = ("image_url", "input_image", "image")
 
-# Thinking levels.  GLM's template switches thinking on or off (enable_thinking=false for none); it has no levels.
-# low, medium and high still reach it as reasoning_effort, with thinking on, for a template that reads them.  Clients
-# spell these many ways; everything maps onto those four.
-EFFORT = {"none": None, "off": None, "minimal": None, "disabled": None, "false": None,
-          "low": "low", "medium": "medium", "high": "high", "xhigh": "high", "max": "high", "maximum": "high"}
+# Thinking levels.  GLM-5.3-Flash's template has three, low < high < max: it writes "Reasoning Effort: Low", "High" or
+# "Max" as the prompt's first turn (reasoning_effort "low" or "high"; any other value, or none, is Max, its default).
+# It always opens the thinking: thinking off is enable_thinking false, which the server honours itself
+# (server.close_thinking).  Clients spell levels many ways; every word maps onto off (None), low, high or max.
+EFFORT = {"none": None, "off": None, "disabled": None, "false": None,
+          "minimal": "low", "low": "low", "medium": "high", "high": "high",
+          "xhigh": "max", "max": "max", "maximum": "max"}
+# What each level is, as the 400 for an unknown word says it
+LEVEL_NAMES = {None: "thinking off", "low": "Low", "high": "High", "max": "Max, the model's default"}
+
+
+def _either(words: list[str]) -> str:
+    return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " or " + words[-1]
 
 
 def effort_kwargs(value) -> dict:
-    """A reasoning effort as given by a client -> the template's kwargs.  Unknown values are a 400, not a crash."""
+    """A reasoning effort as given by a client -> the template's kwargs: {} (unset: the template's default, Max),
+    {"reasoning_effort": "low" | "high" | "max"} or {"enable_thinking": False}.  Unknown values are a 400, not a
+    crash."""
     if value is None or value == "":
         return {}
     if value is False:
         return {"enable_thinking": False}
     key = str(value).strip().lower()
     if key not in EFFORT:
-        raise ValueError(f"unknown reasoning effort {value!r}: "
-                         f"{', '.join(k for k, v in EFFORT.items() if v is None)} (thinking off) or "
-                         f"{', '.join(k for k, v in EFFORT.items() if v is not None)} (on)")
+        raise ValueError(f"unknown reasoning effort {value!r}: " + "; ".join(
+            f"{_either([k for k, v in EFFORT.items() if v == level])} ({name})" for level, name in LEVEL_NAMES.items()))
     level = EFFORT[key]
     return {"enable_thinking": False} if level is None else {"reasoning_effort": level}
 
 
 def budget_effort(tokens) -> dict:
-    """Anthropic's thinking budget (budget_tokens) -> a level: under 2K low, under 8K medium, else high."""
+    """Anthropic's thinking budget (budget_tokens) -> a level: under 2048 tokens low, under 8192 high, else max."""
     try:
         n = int(tokens)
     except (TypeError, ValueError):
         return {}
-    return {"reasoning_effort": "low" if n < 2048 else "medium" if n < 8192 else "high"}
+    return {"reasoning_effort": "low" if n < 2048 else "high" if n < 8192 else "max"}
 
 
 # The names the server gives the template itself: a client's chat_template_kwargs cannot replace them
@@ -637,7 +646,7 @@ def anthropic_to_messages(req: dict, think_unasked: bool = True) -> tuple[list[d
              for t in _tool_list(req.get("tools"), None)] or None
     kwargs = {}
     # Anthropic: "thinking": {"type": "disabled"} or {"type": "enabled", "budget_tokens": N};
-    # "output_config": {"effort": "low" | "medium" | "high"}
+    # "output_config": {"effort": "low" | "medium" | "high" | "max"}, read as effort_kwargs reads any effort
     thinking = req.get("thinking")
     effort = (req.get("output_config") or {}).get("effort") if isinstance(req.get("output_config"), dict) else None
     if isinstance(thinking, dict) and thinking.get("type") == "disabled":

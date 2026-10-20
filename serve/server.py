@@ -53,7 +53,7 @@ sys.path.insert(0, str(ROOT))   # run as a script as well as a module
 from gguf_reader import GGUFFile  # noqa: E402
 from strata_tokenizer import Tokenizer  # noqa: E402
 from serve.frontend import (CALL_END, ORDINARY_LT, OUTPUT_TAGS, THINK_END, THINK_START, ChatTemplate,  # noqa: E402
-                            Event, OutputParser, anthropic_to_messages, forced_call, literal_tags,
+                            Event, OutputParser, anthropic_to_messages, effort_kwargs, forced_call, literal_tags,
                             mark_think_literals, openai_to_messages, tool_choice_of, unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 from serve import runconfig  # noqa: E402
@@ -1397,7 +1397,8 @@ def anthropic_budget(req: dict) -> dict:
     "enabled", "budget_tokens": N}` is the most the thinking may take, and it is wrapped up there as for
     reasoning_budget_tokens (#123).  A reasoning_budget_tokens the request gives itself still wins; a shared or
     configured budget fills in only for a request with neither.  A budget that is not a whole number is a ValueError (a
-    400); 0 or less is none.  (It used to pick an effort level only, and GLM's thinking is on or off.)"""
+    400); 0 or less is none.  The budget also picks the level (frontend.budget_effort: under 2048 tokens Low, under
+    8192 High, else Max)."""
     thinking = (req or {}).get("thinking")
     if not isinstance(thinking, dict) or thinking.get("type") != "enabled" or thinking.get("budget_tokens") is None:
         return req
@@ -4586,6 +4587,21 @@ def origins_of(value, key: str, wildcard: bool) -> list[str]:
     return out
 
 
+# The thinking levels the shared Chat settings and the run config's "reasoning_effort" take, and what each becomes
+SETTING_EFFORTS = ("none", "low", "medium", "high", "max")
+EFFORT_CHOICES = "none (thinking off), low (Low), medium or high (High), or max (Max, the model's default)"
+
+
+def config_effort_line(effort: str) -> str:
+    """The start line for the run config's "reasoning_effort": what the thinking of a request that names none is."""
+    kw = effort_kwargs(effort)
+    level = "off" if kw.get("enable_thinking") is False else \
+        f"on, Reasoning Effort {kw['reasoning_effort'].capitalize()}"
+    return (f"[strata] thinking {level} for requests that do not say (reasoning_effort {effort!r} in the config; "
+            f"GLM-5.3-Flash's levels: {EFFORT_CHOICES}; a request, or the Chat settings shared with other apps, can "
+            "set its own)")
+
+
 def clean_shared_defaults(d) -> dict:
     """The Chat settings other apps get (POST /settings): only known keys, each checked; ValueError names a bad one."""
     if d is None:
@@ -4598,9 +4614,9 @@ def clean_shared_defaults(d) -> dict:
             continue
         # a number, and a finite one: NaN and Infinity (which Python's json reads) are not settings
         number = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
-        if key == "reasoning_effort":                          # GLM thinks or does not: none is off, the rest on
-            if value not in ("none", "low", "medium", "high"):
-                raise ValueError("reasoning_effort: none, low, medium or high")
+        if key == "reasoning_effort":                          # GLM's levels (frontend.EFFORT), or none: off
+            if value not in SETTING_EFFORTS:
+                raise ValueError("reasoning_effort: " + EFFORT_CHOICES)
         elif key == "temperature":
             if not number or not 0 <= value <= 2:
                 raise ValueError("temperature: 0..2")
@@ -4627,9 +4643,9 @@ def clean_shared_defaults(d) -> dict:
 
 def lift_reasoning_effort_arg(cfg: dict) -> None:
     """#1641: "--reasoning-effort high" in a config's "args" is meant for the thinking level, which is not an engine
-    option (the engine stopped at the unknown flag).  It is the config's "reasoning_effort" (none, low, medium or high:
-    the level for requests that name none), so the flag is taken out of the engine's arguments and becomes that key
-    unless the config already has one; said at startup."""
+    option (the engine stopped at the unknown flag).  It is the config's "reasoning_effort" (none, low, medium, high
+    or max: the level for requests that name none), so the flag is taken out of the engine's arguments and becomes
+    that key unless the config already has one; said at startup."""
     args = cfg.get("args")
     if not isinstance(args, list):
         return
@@ -4947,9 +4963,7 @@ def main() -> int:
         except ValueError as e:
             raise SystemExit(f"[strata] config {e}")
         if svc.config_effort:
-            print(f"[strata] thinking {'off' if svc.config_effort == 'none' else 'on'} for requests that do not say "
-                  f"(reasoning_effort {svc.config_effort!r} in the config; GLM thinks or does not, it has no levels; a "
-                  "request, or the Chat settings shared with other apps, can set its own)", flush=True)
+            print(config_effort_line(svc.config_effort), flush=True)
     svc.codex_thread_titles = cfg.get("codex_thread_titles") is True    # #923: opt-in, off by default
     svc.codex_compaction_cache = cfg.get("codex_compaction_cache") is True   # #924: opt-in, off by default
     try:

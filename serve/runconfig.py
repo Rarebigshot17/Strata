@@ -24,6 +24,9 @@ EDITABLE = [
     ("sampling.top_p", ("sampling", "0<x<=1"), "Default top_p for requests that send none (empty: 0.95)"),
     ("sampling.top_k", ("sampling", "int>=0"), "Default top_k for requests that send none (0 = off)"),
     ("sampling.min_p", ("sampling", "0<=x<=1"), "Default min_p for requests that send none"),
+    ("reasoning_effort", ("enum", ["none", "low", "medium", "high", "max"]),
+     "Thinking for requests that name no level: none = off, low = Low, medium or high = High, max = Max "
+     "(empty: Max, the model's default)"),
     ("reasoning_budget_tokens", "int>=0",
      "Cap the thinking of a request that sets no budget of its own (0 or empty: no cap)"),
     ("fit_max_tokens", "bool", "Shorten a max_tokens that does not fit the context instead of answering 400"),

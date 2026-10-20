@@ -129,13 +129,15 @@ class Parsing(unittest.TestCase):
         self.assertIn("later_tool", names)
 
     def test_effort_and_text_format(self):
-        self.assertEqual(template_kwargs({"reasoning": {"effort": "minimal"}}, {}), {"enable_thinking": False})
-        # GLM thinks or does not: every level that thinks is passed on as the template's reasoning_effort
-        self.assertEqual(template_kwargs({"reasoning": {"effort": "high"}}, {}), {"reasoning_effort": "high"})
-        self.assertEqual(template_kwargs({"reasoning": {"effort": "xhigh"}}, {}), {"reasoning_effort": "high"})
-        self.assertEqual(template_kwargs({"reasoning": {"effort": "none"}}, {}), {"enable_thinking": False})
-        self.assertEqual(template_kwargs({"reasoning": {"summary": "auto"}}, {}), {})      # Codex: the default
+        # GLM-5.3-Flash's levels are low < high < max: every effort lands on one of them, or turns thinking off
+        for effort, kw in (("minimal", {"reasoning_effort": "low"}), ("low", {"reasoning_effort": "low"}),
+                           ("medium", {"reasoning_effort": "high"}), ("high", {"reasoning_effort": "high"}),
+                           ("xhigh", {"reasoning_effort": "max"}), ("none", {"enable_thinking": False})):
+            with self.subTest(effort=effort):
+                self.assertEqual(template_kwargs({"reasoning": {"effort": effort}}, {}), kw)
+        self.assertEqual(template_kwargs({"reasoning": {"summary": "auto"}}, {}), {})      # Codex: the default (Max)
         self.assertEqual(template_kwargs({}, {"reasoning_effort": "low"}), {"reasoning_effort": "low"})
+        self.assertEqual(template_kwargs({}, {"reasoning_effort": "max"}), {"reasoning_effort": "max"})
         with self.assertRaises(ResponsesError):
             template_kwargs({"reasoning": {"effort": "huge"}}, {})
         self.assertEqual(text_format({"text": {"format": {"type": "json_schema", "name": "n", "schema": {}}}}),

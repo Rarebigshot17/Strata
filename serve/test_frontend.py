@@ -309,24 +309,29 @@ class ContentParts(unittest.TestCase):
 
 class ThinkingKwargs(unittest.TestCase):
     def test_effort(self):
-        for value in ("none", "off", "minimal", "disabled", "false", False, " None "):
+        # GLM-5.3-Flash's levels are low < high < max (its default); everything a client sends lands on one of them,
+        # or turns thinking off
+        for value in ("none", "off", "disabled", "false", False, " None "):
             with self.subTest(value=value):
                 self.assertEqual(effort_kwargs(value), {"enable_thinking": False})
-        for value, level in (("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", "high"),
-                             ("max", "high"), ("Maximum", "high")):
+        for value, level in (("minimal", "low"), ("low", "low"), ("medium", "high"), ("high", "high"),
+                             ("xhigh", "max"), ("max", "max"), ("Maximum", "max")):
             with self.subTest(value=value):
                 self.assertEqual(effort_kwargs(value), {"reasoning_effort": level})
         self.assertEqual(effort_kwargs(None), {})
         self.assertEqual(effort_kwargs(""), {})
         with self.assertRaises(ValueError) as c:
             effort_kwargs("extreme")
-        for word in ("none", "off", "minimal", "disabled", "false", "low", "medium", "high", "xhigh", "max", "maximum"):
-            self.assertIn(word, str(c.exception))      # the 400 lists every word that is taken, not four of them
+        # the 400 lists every word that is taken, and what each becomes
+        self.assertIn("none, off, disabled or false (thinking off); minimal or low (Low); medium or high (High); "
+                      "xhigh, max or maximum (Max, the model's default)", str(c.exception))
 
     def test_budget(self):
-        self.assertEqual(budget_effort(1024), {"reasoning_effort": "low"})
-        self.assertEqual(budget_effort("4096"), {"reasoning_effort": "medium"})
-        self.assertEqual(budget_effort(32000), {"reasoning_effort": "high"})
+        # Anthropic's budget_tokens: under 2048 low, under 8192 high, else max
+        for tokens, level in ((1024, "low"), (2047, "low"), (2048, "high"), ("4096", "high"), (8191, "high"),
+                              (8192, "max"), (32000, "max")):
+            with self.subTest(tokens=tokens):
+                self.assertEqual(budget_effort(tokens), {"reasoning_effort": level})
         self.assertEqual(budget_effort("lots"), {})
 
     def test_openai_fields(self):
