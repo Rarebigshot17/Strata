@@ -40,7 +40,7 @@ How it works: [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md). The API and every se
 
 None of these needs a GPU or a model download, except where it says so.
 
-- **Python tests** (the server and its modules; about 750, a few minutes):
+- **Python tests** (the server and its modules; about 800, a few minutes):
 
   ```bash
   python3 -m unittest discover -s serve -t . -p "test_*.py"

@@ -258,9 +258,10 @@ What is checked without a GPU:
 
 - **Conversation parking and checkpoints:** every resumed reply is the same, token for token, as a fresh engine's
   (`tools/glm53_park_check.py`, on the CPU engine).
-- **The server end to end** on the CPU engine: tokenizer, chat, streaming, a resumed second turn, completions,
-  metrics, a request that does not fit (`tools/glm53_server_check.sh`).
-- **The tests that need no GPU:** about 750 Python tests of the server, the setup and the tools' tests, and the
+- **The server end to end** on the CPU engine, with the real chat template: tokenizer, chat, streaming, a resumed
+  second turn, completions, thinking off, an effort level, metrics, a request that does not fit
+  (`tools/glm53_server_check.sh`).
+- **The tests that need no GPU:** about 800 Python tests of the server, the setup and the tools' tests, and the
   engine's C++ unit tests (`ctest`). How to run them: [AGENTS.md](AGENTS.md).
 
 What is **not** checked yet:

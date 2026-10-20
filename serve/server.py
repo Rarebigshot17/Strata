@@ -196,7 +196,7 @@ def engine_frozen(base: tuple[float, int], now: tuple[float, int]) -> bool:
 ENGINE_READY_S = _timeout_env("STRATA_ENGINE_READY_S", 900.0)
 # After QUIT (STOP first ends a running request at its next token or prompt chunk) the engine saves its expert profile
 # and gives back its memory: the VRAM on every card, its pinned buffers and parked conversations (--park-mib), and the
-# mapping of the 117-162 GB of experts - how long that takes on the real model is not measured.  The server waits this
+# mapping of the ~110-146 GB of experts - how long that takes on the real model is not measured.  The server waits this
 # long before it kills the engine (a kill loses that run's profile).  20 s was the wait before; 120 s leaves room on a
 # busy PC and still bounds an engine that does not end.  STRATA_ENGINE_QUIT_S overrides it (0 = wait for ever).
 ENGINE_QUIT_S = _timeout_env("STRATA_ENGINE_QUIT_S", 120.0)
@@ -666,7 +666,7 @@ class StrataEngine:
                     break
                 if log and ready_deadline is not None:
                     # every step the engine reports moves the bound on (looked for every WARM_LOOK_S): placing the
-                    # layers and filling the expert cache from the disk, and the warm-up that reads 117-162 GB before
+                    # layers and filling the expert cache from the disk, and the warm-up that reads ~110-146 GB before
                     # READY, longer than the bound from a slow disk or a NAS
                     log_pos, line = start_progress(log, log_pos, seen)
                     if line is not None:
