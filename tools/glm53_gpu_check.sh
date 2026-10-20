@@ -29,9 +29,10 @@ W="$(mktemp -d)"
 trap 'rm -rf "$W"' EXIT
 
 # The free memory of every card the check runs on, before anything starts: when another program holds a card,
-# strata-glm stops at its first CUDA call (llama.cpp's reference runs on the CPU). The tiny models take about 1.2 GB per card (napster-ai, 2026-10-20:
-# "GPU 0: ... 1.21 GB weights and buffers") and the CUDA context a few hundred MB more, so 2 GiB. nvidia-smi numbers
-# the cards by PCI bus; when CUDA_VISIBLE_DEVICES names some, CUDA is told to number them the same way.
+# strata-glm stops at its first CUDA call (llama.cpp's reference runs on the CPU). The tiny models take about 1.2 GB
+# per card (napster-ai, 2026-10-20: "GPU 0: ... 1.21 GB weights and buffers") and the CUDA context a few hundred MB
+# more, so 2 GiB. nvidia-smi numbers the cards by PCI bus; when CUDA_VISIBLE_DEVICES names some, CUDA is told to
+# number them the same way.
 MIN_FREE_MIB=2048
 smi=(--query-gpu=index,memory.free --format=csv,noheader,nounits)
 if [ -n "${CUDA_VISIBLE_DEVICES+set}" ]; then
