@@ -8,8 +8,9 @@ This tool switches them on, so the engine and llama.cpp can be compared on every
     python tools/glm53_tiny_variant.py IN.gguf OUT.gguf \\
         glm5-next.attention.indexer.top_k=8 glm5-next.swiglu_clamp_exp=0.05 glm5-next.expert_weights_scale=2.5
 
-A value keeps the type the key already has; an array key set to one number sets every element. Needs gguf-py
-(`pip install gguf`, or PYTHONPATH=<llama.cpp>/gguf-py).
+A value keeps the type the key already has; an array key set to one number sets every element. A minus before a key
+and no value (`-glm5-next.attention.indexer.types`) leaves the key out of the copy, for the files that do not carry
+it: the reader then takes its default. Needs gguf-py (`pip install gguf`, or PYTHONPATH=<llama.cpp>/gguf-py).
 """
 from __future__ import annotations
 
@@ -41,8 +42,11 @@ def main() -> int:
         print(__doc__)
         return 2
     src, dst, edits = sys.argv[1], sys.argv[2], sys.argv[3:]
-    changes = {}
+    changes, removes = {}, set()
     for e in edits:
+        if e.startswith("-") and "=" not in e:
+            removes.add(e[1:])
+            continue
         k, _, v = e.partition("=")
         changes[k] = v
 
@@ -56,6 +60,10 @@ def main() -> int:
         t = field.types[0]
         sub = field.types[-1] if t == gguf.GGUFValueType.ARRAY else None
         value = field.contents()
+        if field.name in removes:
+            seen.add(field.name)
+            print(f"{field.name}: left out")
+            continue
         if field.name in changes:
             value = parse_value(t, sub, value, changes[field.name])
             seen.add(field.name)
@@ -64,7 +72,7 @@ def main() -> int:
             print(f"{field.name}: empty array, left out (gguf-py cannot write one)")
             continue
         writer.add_key_value(field.name, value, t, sub_type=sub)
-    missing = set(changes) - seen
+    missing = (set(changes) | removes) - seen
     if missing:
         print(f"keys not in the file: {', '.join(sorted(missing))}", file=sys.stderr)
         return 1

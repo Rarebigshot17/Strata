@@ -146,7 +146,8 @@ void Model::read_config() {
     cfg_.indexer_head_size = (int64_t) num("attention.indexer.key_length");
     cfg_.indexer_top_k = (int64_t) num("attention.indexer.top_k");
     cfg_.indexer_kpool = (int64_t) num("attention.indexer.kpool");
-    cfg_.indexer_select_tail = num_or("attention.indexer.kpool_select_tail", 0) != 0;
+    // absent (as in the released GGUF) means select the tail, llama.cpp's default
+    cfg_.indexer_select_tail = num_or("attention.indexer.kpool_select_tail", 1) != 0;
     if (cfg_.indexer_kpool <= 1 || cfg_.indexer_top_k % cfg_.indexer_kpool != 0)
         throw std::runtime_error("indexer kpool must be > 1 and divide top_k");
 

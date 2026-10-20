@@ -152,7 +152,7 @@ yet. Run them from the Strata folder.
    cmake --build build -j"$(nproc)" --target strata-glm strata-glm-ref
    ```
 
-3. **CPU reference vs llama.cpp** on small random models (paste the four PASS/FAIL lines):
+3. **CPU reference vs llama.cpp** on small random models (paste the five PASS/FAIL lines):
 
    ```bash
    PYTHONPATH=~/llama.cpp/gguf-py tools/glm53_selftest.sh ~/llama.cpp/build build
