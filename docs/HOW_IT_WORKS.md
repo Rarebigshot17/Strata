@@ -44,11 +44,11 @@ The same in technical terms:
 ## Long conversations
 
 - **The KDA layers** keep a fixed-size state (64 heads of 128 x 128 per layer), however long the text is.
-- **The MLA layers** keep a 512-wide latent per token: 11 KB per token over the 11 layers, in VRAM (1.5 GB at
-  131,072 tokens, 11.8 GB at 1M; calculated). Their indexer pools the keys over 16 tokens and, for each new token,
-  picks the 128 pools (2,048 tokens) that matter most. So past about 2,000 tokens of context each new token attends
-  to a fixed amount of the text, not all of it. Below that the indexer picks every pool and attention is plain
-  causal.
+- **The MLA layers** keep a 512-wide latent per token (11 KB per token over the 11 layers) and their indexer's keys,
+  pooled over 4 tokens (1.4 KB per token), in VRAM: 12.4 KB per token, 1.7 GB at 131,072 tokens and 13.3 GB at 1M
+  (calculated). For each new token the indexer picks the 512 pools (2,048 tokens) that matter most, and the pool
+  still being filled. So past about 2,000 tokens of context each new token attends to a fixed amount of the text,
+  not all of it. Below that the indexer picks every pool and attention is plain causal.
 
 The context (`--ctx`, up to 1,048,576 tokens) is the longest conversation the engine accepts. The engine sets its
 MLA cache aside for the whole context when it starts, out of the VRAM that the expert cache would otherwise use.

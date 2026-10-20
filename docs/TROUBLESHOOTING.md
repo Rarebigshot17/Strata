@@ -134,8 +134,8 @@ The server prints the engine log's last lines under it, and they say why. The co
 - **Exit code 2** and a `usage: strata-glm ...` text: the run config's `"args"` has an option strata-glm does not
   know. Take it out (the usage text lists the options it takes).
 - **`strata-glm: CUDA cudaMalloc...: out of memory`**: the GPUs have too little free VRAM for the layers and the
-  attention cache. The engine reserves the attention cache for the whole context at start: 11 KB per token
-  (calculated, the figure setup uses), so 1.5 GB at 131,072 tokens and 11.8 GB at 1,048,576. Choose a shorter
+  attention cache. The engine reserves the attention cache for the whole context at start: 12.4 KB per token
+  (calculated, the figure setup uses), so 1.7 GB at 131,072 tokens and 13.3 GB at 1,048,576. Choose a shorter
   context (`./setup.sh --setup --context 262144`, or change the number after `--ctx` in the run config's
   `"args"`), close other programs that hold VRAM (`nvidia-smi` lists them), or remove a `"split"` you set by hand.
   Whatever VRAM is left after the layers goes to the expert cache, less `--vram-reserve` (1 GB per GPU by
@@ -227,7 +227,7 @@ Only a note: the engine is busy (CPU or disk), so it is left alone until `"engin
 **"prompt (N tokens) leaves no room to answer in the context (C)"**.
 Requests are never cut down to fit. Send a smaller `max_tokens` (the message says how much fits), start a new
 conversation, or give the model a longer context: `./setup.sh --setup --context 524288` (up to 1,048,576; each
-token takes 11 KB of VRAM, calculated). `"fit_max_tokens": true` in the run config shortens a `max_tokens` that
+token takes 12.4 KB of VRAM, calculated). `"fit_max_tokens": true` in the run config shortens a `max_tokens` that
 does not fit instead of refusing the request. A reply that reaches the end of the context while it is written stops
 there with finish reason `length`.
 

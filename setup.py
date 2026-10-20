@@ -81,7 +81,13 @@ PARK_MIB = 8192          # the engine's RAM for parked conversations and checkpo
 PARK_MIB_TIGHT = 4096    # with less than RAM_LEFT_GIB beside the experts (the 4-bit model on 192 GB)
 CONTEXTS = [32768, 131072, 262144, 524288, 1048576]
 MAX_CONTEXT = 1048576    # GLM-5.3-Flash's trained context
-MLA_BYTES_PER_TOKEN = 11 * 512 * 2     # the attention cache in VRAM: a 512-wide f16 latent per token in 11 MLA layers
+# The attention cache in VRAM, per token of context (calculated from the engine's buffers, src/glm/engine.cu): the
+# MLA cache, a 512-wide f16 latent in each of the 11 MLA layers, and each layer's indexer, one pooled 128-wide fp32
+# key per INDEXER_KPOOL tokens (attention.indexer.kpool, 4 in the real file).  11 KB + 1.4 KB.
+MLA_BYTES_PER_TOKEN = 11 * 512 * 2
+INDEXER_KPOOL = 4
+INDEXER_BYTES_PER_TOKEN = 11 * 128 * 4 // INDEXER_KPOOL
+VRAM_BYTES_PER_TOKEN = MLA_BYTES_PER_TOKEN + INDEXER_BYTES_PER_TOKEN
 
 
 # ------------------------------------------------------------------------------------------------ output
@@ -367,12 +373,17 @@ def fit_text(model: str, ram: float) -> str:
 
 
 def mla_gb(ctx: int) -> float:
-    """The attention cache's VRAM (GB) for a context of `ctx` tokens: 1.5 GB at 131072, 11.8 GB at 1M."""
-    return ctx * MLA_BYTES_PER_TOKEN / 1e9
+    """The attention cache's VRAM (GB) for a context of `ctx` tokens: 1.7 GB at 131072, 13.3 GB at 1M."""
+    return ctx * VRAM_BYTES_PER_TOKEN / 1e9
+
+
+def kb_per_token() -> str:
+    """The attention cache per token as the texts give it: "12.4 KB" (KB of 1024 bytes, as "11 KB" for the latent)."""
+    return f"{VRAM_BYTES_PER_TOKEN / 1024:.1f} KB"
 
 
 def recommended_context(vram_gb: float) -> int:
-    """128K where the GPUs hold its 1.5 GB attention cache with room to spare for the expert cache, else 32K."""
+    """128K where the GPUs hold its 1.7 GB attention cache with room to spare for the expert cache, else 32K."""
     return 131072 if vram_gb >= 16 else 32768
 
 
@@ -1629,8 +1640,8 @@ def main() -> int:
                     help="UD-IQ3_XXS = 3-bit (~120 GB download, ~109 GiB of experts in RAM), IQ4_XS = 4-bit (~170 GB, "
                          "~151 GiB; UD-Q4_K_XL when the repository has no IQ4_XS). Default: the one this PC's RAM fits")
     ap.add_argument("--context", type=int, metavar="N",
-                    help=f"the longest conversation in tokens (up to {MAX_CONTEXT}); each token takes 11 KB of VRAM "
-                         "(1.5 GB at 131072)")
+                    help=f"the longest conversation in tokens (up to {MAX_CONTEXT}); each token takes "
+                         f"{kb_per_token()} of VRAM ({mla_gb(131072):.1f} GB at 131072, calculated)")
     ap.add_argument("--park-mib", type=int, metavar="N",
                     help=f"RAM in MiB for parked conversations and checkpoints (default {PARK_MIB}, {PARK_MIB_TIGHT} "
                          "where little RAM is left beside the experts); saved for this model, also when starting")
@@ -1765,7 +1776,7 @@ def main() -> int:
     else:
         say()
         say("  Context = the longest conversation the model can hold (your chat, files, tool output). Each token of it")
-        say("  takes 11 KB of VRAM in the attention cache, which the expert cache gives up:")
+        say(f"  takes {kb_per_token()} of VRAM in the attention cache (calculated), which the expert cache gives up:")
         for i, c in enumerate(CONTEXTS, 1):
             say(f"  {i}) {context_label(c):>4s} tokens  {mla_gb(c):4.1f} GB of VRAM"
                 + ("   (recommended for your GPUs)" if c == rec_ctx else "")

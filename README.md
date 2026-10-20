@@ -27,10 +27,10 @@ How much VRAM the part they must hold takes is not measured yet. Setup installs 
 Python (through apt, dnf or pacman), the C++ compiler (through apt) and the CUDA toolkit (by itself on Ubuntu 22.04
 and 24.04 only).
 
-**The reference machine** is the owner's PC, napster-ai: a Xeon E5-2699 v4 (AVX2, no AVX-512), 192 GB of DDR4, an
-RTX 3090 Ti 24 GB + RTX 3080 Ti 12 GB + RTX 3080 10 GB (all compute capability 8.6), a SATA SSD, Linux. Strata is
-planned for it: port 8101 (3000, 8000 and 8080 are taken there), contexts up to 512K-1M tokens, and four agents, a
-chat and a Discord bot taking turns on one engine.
+**The reference machine** is the owner's PC, napster-ai: a Xeon E5-2699 v4 (AVX2, no AVX-512), 192 GB of DDR4
+(planned; 91 GiB for now), an RTX 3090 Ti 24 GB + RTX 3080 Ti 12 GB + RTX 3080 10 GB (all compute capability 8.6), a
+SATA SSD, Linux. Strata is planned for it: port 8101 (3000, 8000 and 8080 are taken there), contexts up to 512K-1M
+tokens, and four agents, a chat and a Discord bot taking turns on one engine.
 
 The full list: [docs/INSTALL.md](docs/INSTALL.md#what-you-need).
 
@@ -127,7 +127,8 @@ What is left beside the experts holds Linux, the server, your other programs and
 
 The RAM Linux reports in this table is about 2% under the RAM installed (188 GiB for 192 GB, as setup's tests
 take it); it differs a little from PC to PC. `./setup.sh --check` prints the figures for your PC without installing
-anything. On napster-ai (192 GB) setup recommends the 3-bit size.
+anything. On napster-ai with 192 GB setup recommends the 3-bit size; with the 91 GiB it has for now, neither size
+fits.
 
 ## Using it
 
@@ -169,16 +170,17 @@ anything. On napster-ai (192 GB) setup recommends the 3-bit size.
   request belongs to another conversation, the engine parks the current conversation's state in RAM. A later turn
   of a parked conversation reads only the new tokens, not the whole conversation again. Parked conversations get
   8192 MiB of RAM by default (`--park-mib`), and the one used least recently goes first. A parked 100K-token
-  conversation takes about 1.3 GB (calculated). How fast a parked turn resumes is not measured yet.
+  conversation takes about 1.4 GB (calculated). How fast a parked turn resumes is not measured yet.
 - **Context:** the longest conversation the engine accepts. Setup offers 32K, 128K (recommended when the cards
-  have 16 GB or more together), 256K, 512K and 1M tokens (the model's full context). Each token takes 11 KB of VRAM
-  in the attention cache, and that VRAM is taken from the expert cache:
+  have 16 GB or more together), 256K, 512K and 1M tokens (the model's full context). Each token takes 12.4 KB of
+  VRAM in the attention cache (the MLA latent and the indexer's pooled keys), and that VRAM is taken from the expert
+  cache:
 
   | Context | 32K | 128K | 256K | 512K | 1M |
   | --- | ---: | ---: | ---: | ---: | ---: |
-  | VRAM for the attention cache (calculated) | 0.4 GB | 1.5 GB | 3.0 GB | 5.9 GB | 11.8 GB |
+  | VRAM for the attention cache (calculated) | 0.4 GB | 1.7 GB | 3.3 GB | 6.6 GB | 13.3 GB |
 
-  On napster-ai's 46 GB of VRAM, 1M tokens leaves about 34 GB for the rest (calculated). Fewer cached experts means
+  On napster-ai's 46 GB of VRAM, 1M tokens leaves about 33 GB for the rest (calculated). Fewer cached experts means
   more of them run on the CPU; how much slower that is has not been measured. Setup warns when the attention cache
   would take more than half of the cards' VRAM. A request whose prompt plus `max_tokens` does not fit the context
   gets a 400; it is never cut (`"fit_max_tokens": true` in the run config lowers `max_tokens` instead). To change the
