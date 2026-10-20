@@ -19,11 +19,13 @@ RTX 3080 Ti 12 GB + RTX 3080 10 GB, sm_86, driver 580.95.05, CUDA 13.2, gcc 14.2
 
 - the builds: llama.cpp (step 1) and this branch with CUDA (step 2);
 - the CPU reference against llama.cpp on small random models (step 3): all models PASS, KL 0;
-- the GPU check on the same models (step 4): the GPU engine's decode matched the CPU reference 40/40 and llama.cpp
-  with KL 0, on one card and with the layers split over the three, and conversation parking passed. Its prefill
-  check failed on a bug in the check: the CPU reference had room for the prompt only, so the first token the check
-  decodes after it stopped it ("CpuRef: the sequence is longer than max_ctx"). That is fixed since (5890fde) and has
-  not run again yet;
+- the GPU check on the same models (step 4), three runs at `fa74d8a`: every model's decode and prompt path passed
+  against the CPU reference and against llama.cpp, and conversation parking passed. Against the CPU reference the
+  float models differ by under 1e-4 (relative), q4_0 by 0.016 to 0.027 (limit 0.05, mean KL at most 1.4e-6: the
+  CUDA rounding llama.cpp's own GPU shows too, "Checking against llama.cpp") and q8_0 by at most 0.011. The small
+  models' two layers went to the RTX 3090 Ti and the RTX 3080; the RTX 3080 Ti got none. Earlier runs that day
+  found two bugs in the check, both fixed: the prefill check's CPU reference had room for the prompt only (5890fde),
+  and its 2% limit was below the CUDA rounding on q4_0;
 - the inspector and the template probe on the real 3-bit file (step 5).
 
 Before that, without a GPU: conversation parking and the whole server on the CPU engine, and the Python and C++
@@ -119,9 +121,9 @@ Every piece is checked against llama.cpp, which has run GLM-5.3-Flash since its 
 |---|---|---|---|
 | M0 | Remove SYCL; GGUF inspector; llama.cpp reference harness | done | inspector output, reference logits |
 | M1 | CPU reference: config and tensors from the GGUF, mHC, KDA, MLA with the k-pool indexer, MoE with sigmoid routing and SwiGLU clamp | done | `tools/glm53_selftest.sh`: all variants PASS |
-| M2 | CUDA: dense projections, mHC, KDA decode, MLA decode with the indexer, routing; layer split over the GPUs | written; decode on small random models matched the CPU reference 40/40 and llama.cpp (KL 0), on one card and split over three (napster-ai, 2026-10-20); not yet run on the real model | `tools/glm53_gpu_check.sh`; logits vs llama.cpp |
+| M2 | CUDA: dense projections, mHC, KDA decode, MLA decode with the indexer, routing; layer split over the GPUs | written; on small random models (napster-ai, 2026-10-20) decode matched the CPU reference and llama.cpp within the CUDA rounding, on one card and with the layers split over two; not yet run on the real model | `tools/glm53_gpu_check.sh`; logits vs llama.cpp |
 | M3 | Experts: all in RAM (the mapped GGUF), VRAM cache of the most used, CPU for the rest; the warm-up that reads them into the page cache before READY | written; run only on small random models in the GPU check (napster-ai, 2026-10-20); not yet on the real model, so no tokens/s | logits unchanged; tokens/s |
-| M4 | Prompt processing: batched projections, chunked KDA, batched MLA (causal below 2,051 tokens of context, each query's own selection past that), experts streamed through VRAM | written; its check on small random models (napster-ai, 2026-10-20) failed on a bug in the check, fixed since, not yet rerun | prompt tokens/s; logits unchanged |
+| M4 | Prompt processing: batched projections, chunked KDA, batched MLA (causal below 2,051 tokens of context, each query's own selection past that), experts streamed through VRAM | written; on small random models (napster-ai, 2026-10-20, chunks of 16 tokens) it matched the CPU reference within the CUDA rounding; not yet run on the real model | prompt tokens/s; logits unchanged |
 | M5 | Server: Strata's full server (`serve/server.py`: OpenAI, Anthropic and Responses APIs, the web app, MCP, structured output, metrics) on the GLM engine, with GLM's chat template, tool calls (`<arg_key>`/`<arg_value>`) and thinking on or off | ported and reviewed ([GLM53_SERVER_PORT.md](GLM53_SERVER_PORT.md)); tested on the CPU engine (`tools/glm53_server_check.sh`, the Python tests) | Open WebUI and an agent work end to end (step 8) |
 | M6 | Several clients: conversation parking and checkpoints | written, checked on the CPU engine (`tools/glm53_park_check.py`); batching and MTP drafting dropped | speed for 1, 2 and 4 clients |
 | M7 | Remove the Qwen engine and HIP; docs | done: the Qwen engine, HIP and the Qwen docs are removed; the docs describe GLM-5.3-Flash | |
@@ -226,9 +228,9 @@ most about 800 tokens). Step 6 runs llama.cpp with its default f16 cache, which 
 
 ## What to run on napster-ai
 
-Each step prints a few lines to paste back. Steps 1-4 need no model download. Steps 0-4 and step 5's inspector first
-ran on napster-ai on 2026-10-20 (step 4's prefill check failed on a bug in the check, fixed since: run step 4
-again); steps 6-8 have not run yet. Run them from the Strata folder.
+Each step prints a few lines to paste back. Steps 1-4 need no model download. Steps 0-4 and step 5's inspector ran on
+napster-ai on 2026-10-20, and steps 3 and 4 pass at `fa74d8a`; steps 6-8 have not run yet. Run them from the
+Strata folder.
 
 0. **The checkout, the PC check and the tools the steps use.** `./setup.sh --check` checks the GPUs, the driver, the
    RAM, the CPU and the disk, and makes the `.venv` (it asks for sudo when Python's venv is missing); it stops before
@@ -275,8 +277,8 @@ again); steps 6-8 have not run yet. Run them from the Strata folder.
    PYTHONPATH=~/llama.cpp/gguf-py tools/glm53_selftest.sh ~/llama.cpp/build build
    ```
 
-4. **GPU engine vs the CPU reference and llama.cpp** on the same small models, then conversation parking with the
-   layers split over all three cards (paste the whole output). It needs the GPUs free: stop any other program that
+4. **GPU engine vs the CPU reference and llama.cpp** on the same small models, then conversation parking, with the
+   layers split over the visible cards (paste the whole output). It needs the GPUs free: stop any other program that
    holds them first (`nvidia-smi` lists them). On napster-ai that is the Qwen service, started again afterwards.
    llama.cpp's reference runs on the CPU here too, with step 3's f32 cache: on CUDA, flash attention converts an f32
    cache to f16, and that path has not been checked:
@@ -293,8 +295,9 @@ again); steps 6-8 have not run yet. Run them from the Strata folder.
    when it fails and rounds the mean KL to 0.00000. The limits are 0.05 on q4_0 and q8_0 and 0.005 on the three F32
    models, and 1e-5 for the mean KL. Expect up to about 0.03 on q4_0 (0.04 against llama.cpp), less on q8_0, and
    0.001 or less on the F32 models. Top-1 agreement below 40/40 on q4_0 is rounding and passes ("Checking against
-   llama.cpp"). The last line is the parking check's. Rebuild `strata-glm` (step 2) and run this step again: the
-   rule is new.
+   llama.cpp"). The last line is the parking check's. It passed three runs on napster-ai at `fa74d8a`. The small
+   models have two layers, so they use two cards (there: the RTX 3090 Ti and the RTX 3080); to run them on the
+   RTX 3080 Ti as well, run the script once more with `CUDA_VISIBLE_DEVICES=1` in front.
 
 5. **The real model.** Pick the 3-bit or the 4-bit GGUF (see "Memory on napster-ai"; Unsloth re-uploaded them on
    2026-10-05 with `glm5-next` metadata). List what the repository has, then download one quant's shards and

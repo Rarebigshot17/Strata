@@ -91,10 +91,9 @@ What has run without a GPU:
 What has run on napster-ai's three cards (2026-10-20), on the same small random models:
 
 - **The GPU engine** (`strata-glm`) against the CPU reference layer by layer (`--check-cpu`) and against llama.cpp
-  (`tools/glm53_gpu_check.sh`): its decode matched both (40 of 40 against the CPU reference, KL 0 against
-  llama.cpp), on one card and with the layers split over the three. The check of its prompt path failed on a bug in
-  the check, which is fixed; it has not run again yet.
-- **Conversation parking** on the GPU engine, with the layers split over the three cards: passed.
+  (`tools/glm53_gpu_check.sh`): its decode and its prompt path matched both, within the rounding of the GPU's 8-bit
+  activations that llama.cpp's own GPU shows too, on one card and with the layers split over two of the three.
+- **Conversation parking** on the GPU engine, with the layers split over two cards: passed.
 
 What waits for more RAM on napster-ai:
 

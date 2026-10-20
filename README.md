@@ -246,10 +246,9 @@ RTX 3080 10 GB, compute capability 8.6, driver 580.95.05, CUDA 13.2, gcc 14.2):
 - **The builds:** llama.cpp and the engine (`strata-glm`, `strata-glm-ref`), compiled with CUDA.
 - **The CPU reference** (`strata-glm-ref`) against llama.cpp on small random GLM-5.3-Flash models: every model
   passes, KL 0 (`tools/glm53_selftest.sh`).
-- **The GPU engine** (`strata-glm`) on the same small models (`tools/glm53_gpu_check.sh`): its decode matched the
-  CPU reference (40 of 40) and llama.cpp (KL 0), on one card and with the layers split over the three. Conversation
-  parking passed there too. The check of the prompt path failed on a bug in the check itself; the bug is fixed, and
-  that check has not run again yet.
+- **The GPU engine** (`strata-glm`) on the same small models (`tools/glm53_gpu_check.sh`): its decode and its
+  prompt path matched the CPU reference and llama.cpp, within the rounding that llama.cpp's own GPU shows, on one
+  card and with the layers split over two of the three. Conversation parking passed there too.
 - **The real 3-bit file, read but not run:** `tools/glm53_inspect.py` read its shapes and its expert types and
   sizes, and `tools/glm53_template_probe.py` its special tokens and chat template. The server's tokenizer agrees
   with llama.cpp's on 21 of 21 strings. The server ships the real file's chat template, and the tests use it.
