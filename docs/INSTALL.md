@@ -4,14 +4,17 @@ Everything about installing, starting, updating and configuring Strata: GLM-5.3-
 system RAM. The short version is in the [README](../README.md#install). An AI coding assistant can do all of this for
 you with [AI_SETUP.md](AI_SETUP.md).
 
-> **Nothing has run on a GPU or on the real model yet.** There are no measured speeds, load times or memory figures.
-> The sizes on this page are calculated from the model's shapes, and setup's own figures come from `setup.py`. What
-> has been checked: the CPU reference against llama.cpp on small random GLM models (`tools/glm53_selftest.sh`),
-> conversation parking (`tools/glm53_park_check.py`), the server end to end on the CPU engine
+> **The real model has not run yet.** There are no measured speeds, load times or memory figures. The sizes on this
+> page come from the repository's listing and the real 3-bit file, or are derived or calculated, and each says which;
+> setup's own figures come from `setup.py`. What has run on napster-ai's three RTX 30 cards (2026-10-20), on small
+> random GLM models: the builds, the CPU reference against llama.cpp (`tools/glm53_selftest.sh`), the GPU engine
+> against both (`tools/glm53_gpu_check.sh`: its decode matched; the prompt path's check failed on a bug in the check,
+> fixed since, not yet rerun) and conversation parking (`tools/glm53_park_check.py`); and the inspector and the
+> template probe on the real file. Checked without a GPU: the server end to end on the CPU engine
 > (`tools/glm53_server_check.sh`), the Python tests, the engine's C++ unit tests (`ctest`) and setup's own tests
-> (`tools/test_setup_*.py`, which mock the GPUs, the downloads and the build). Setup itself, the systemd unit and the
-> Docker image below have not been run on a real machine yet. The steps still to run on a real machine are in
-> [GLM53_PORT.md](GLM53_PORT.md).
+> (`tools/test_setup_*.py`, which mock the GPUs, the downloads and the build). A full install with setup, the
+> systemd unit and the Docker image below have not been run on a real machine yet. The steps still to run on a real
+> machine are in [GLM53_PORT.md](GLM53_PORT.md).
 
 > **On this page:** [What you need](#what-you-need) · [Install with ./setup.sh](#install-with-setupsh) ·
 > [Setup's options](#setups-options) · [Where files go](#where-files-go) · [The build](#the-build) ·
@@ -493,7 +496,7 @@ Which order and split are fastest is not measured yet.
 
 The owner's PC: Linux, Xeon E5-2699 v4 (AVX2), 192 GB of DDR4 (planned; 91 GiB for now), an RTX 3090 Ti (24 GB), an
 RTX 3080 Ti (12 GB) and an RTX 3080 (10 GB), all compute capability 8.6, and a SATA SSD. What setup does there, from
-its code and its tests (it has not been run there yet):
+its code and its tests (a full install has not run there yet):
 
 - **Size:** with 192 GB the 4-bit `UD-IQ4_XS` is recommended (about 49 GiB of RAM left beside its experts, if
   `/proc/meminfo` says 188 GiB as the tests assume, and if the derived 149 GB of experts holds). The 3-bit leaves

@@ -7,9 +7,10 @@ is [INSTALL.md](INSTALL.md).
 
 Work through the steps in order. Tell the user what you are doing in plain words.
 
-> **Nothing has run on a GPU or on the real model yet.** The project has no measured speeds, load times or memory
-> figures. The sizes below are calculated. Do not promise the user a speed or a load time. If you time something on
-> their PC, say what you timed and that it was one run on their PC.
+> **The real model has not run yet.** The project has no measured speeds, load times or memory figures: the engine
+> has run on GPUs only on small random test models. The sizes below come from the repository's listing and the real
+> 3-bit file, or are derived or calculated, as each says. Do not promise the user a speed or a load time. If you
+> time something on their PC, say what you timed and that it was one run on their PC.
 
 ## 0. Rules
 

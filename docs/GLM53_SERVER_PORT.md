@@ -179,8 +179,7 @@ tokens more slowly than the engine wrote them (now each pass ends where the serv
 
 ## Known risks to check on napster-ai
 
-Nothing here has run on a GPU or on the real model; the server is tested on the CPU engine with small random
-models.
+The real model has not run yet; the server is tested on the CPU engine with small random models.
 
 - The real GLM-5.3 template (the tests use GLM-4.7-Flash's): its generation prompt, effort or thinking kwargs,
   `strftime_now`, the tool dict shape. `tools/glm53_inspect.py` prints it; the server reads it from the GGUF.

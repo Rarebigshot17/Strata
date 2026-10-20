@@ -6,8 +6,9 @@ for, have 46 GB together. Strata makes the model fit by **sharing the work acros
 kitchen: the things you use all the time stay on the counter, and the rest waits in the pantry. Back to the
 [README](../README.md).
 
-Nothing has run on a GPU or on the real model yet. The sizes on this page are calculated from the model's shapes,
-and there are no measured speeds; [How it is checked](#how-it-is-checked) says what has run.
+The real model has not run yet, and there are no measured speeds; on napster-ai's cards the engine has run small
+random test models. The sizes on this page come from the real files or are calculated or derived, and say which;
+[How it is checked](#how-it-is-checked) says what has run.
 
 ## Who does what
 
@@ -74,22 +75,29 @@ a fresh engine's, token for token.
 
 ## How it is checked
 
-What has run, all without a GPU:
+What has run without a GPU:
 
 - **The CPU reference** (`strata-glm-ref`) runs the whole model on the CPU, one token at a time, with ggml's own
   dot products. On small random GLM-5.3-Flash models it matches llama.cpp to float rounding
-  (`tools/glm53_selftest.sh`, which needs no GPU and no download).
+  (`tools/glm53_selftest.sh`, which needs no GPU and no download; on napster-ai too: every model passes, KL 0).
 - **Conversation parking** on the CPU engine: `tools/glm53_park_check.py` compares every resumed reply with a fresh
   engine's.
 - **The server end to end** on the CPU engine with a small random model (`tools/glm53_server_check.sh`), about 750
   Python tests of the server (`python3 -m unittest discover -s serve -t . -p "test_*.py"`), setup's and the tools'
   tests (`tools/test_*.py`) and the engine's C++ tests (`ctest`).
 
-What is written and waits for napster-ai:
+What has run on napster-ai's three cards (2026-10-20), on the same small random models:
 
-- **The GPU engine** (`strata-glm`) is to be checked against the CPU reference layer by layer (`--check-cpu`,
-  `tools/glm53_gpu_check.sh`), and on the real model its logits are to be compared with llama.cpp's
-  (`tools/glm53_compare.py`).
+- **The GPU engine** (`strata-glm`) against the CPU reference layer by layer (`--check-cpu`) and against llama.cpp
+  (`tools/glm53_gpu_check.sh`): its decode matched both (40 of 40 against the CPU reference, KL 0 against
+  llama.cpp), on one card and with the layers split over the three. The check of its prompt path failed on a bug in
+  the check, which is fixed; it has not run again yet.
+- **Conversation parking** on the GPU engine, with the layers split over the three cards: passed.
+
+What waits for more RAM on napster-ai:
+
+- **The real model:** its logits compared with llama.cpp's (`tools/glm53_compare.py`), then its speed, load time
+  and memory.
 - The steps, and what each one has shown so far: [GLM53_PORT.md](GLM53_PORT.md).
 
 ## Credits

@@ -9,9 +9,9 @@ coding agents and bots talk to it as they would to a cloud model, and nothing le
 [Niko1221/Strata](https://github.com/Niko1221/Strata), which runs Qwen3.8-Flash-Next on gaming PCs. This fork keeps
 its design, its server and its web app, replaces the engine, and runs GLM-5.3-Flash only.
 
-> **Status: the engine has not run on a GPU or on the real model yet.** There are no measured speeds, load times or
-> memory figures. The numbers on this page are calculated from the model's shapes, and they say so. What is checked
-> and what is not: [Status](#status).
+> **Status: the engine has run on the owner's GPUs, but only on small random test models, not yet on the real
+> model.** There are no measured speeds, load times or memory figures. The sizes on this page come from the real
+> files or are calculated or derived, and they say which. What is checked and what is not: [Status](#status).
 
 ## What you need
 
@@ -237,10 +237,23 @@ The longer explanation: [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md).
 
 ## Status
 
-What is checked, without a GPU and without the real model:
+What has run on napster-ai, the owner's PC, on 2026-10-20 (an RTX 3090 Ti 24 GB, an RTX 3080 Ti 12 GB and an
+RTX 3080 10 GB, compute capability 8.6, driver 580.95.05, CUDA 13.2, gcc 14.2):
 
-- **The CPU reference** (`strata-glm-ref`) matches llama.cpp to float rounding on small random GLM-5.3-Flash models
-  (`tools/glm53_selftest.sh`).
+- **The builds:** llama.cpp and the engine (`strata-glm`, `strata-glm-ref`), compiled with CUDA.
+- **The CPU reference** (`strata-glm-ref`) against llama.cpp on small random GLM-5.3-Flash models: every model
+  passes, KL 0 (`tools/glm53_selftest.sh`).
+- **The GPU engine** (`strata-glm`) on the same small models (`tools/glm53_gpu_check.sh`): its decode matched the
+  CPU reference (40 of 40) and llama.cpp (KL 0), on one card and with the layers split over the three. Conversation
+  parking passed there too. The check of the prompt path failed on a bug in the check itself; the bug is fixed, and
+  that check has not run again yet.
+- **The real 3-bit file, read but not run:** `tools/glm53_inspect.py` read its shapes and its expert types and
+  sizes, and `tools/glm53_template_probe.py` its special tokens and chat template. The server's tokenizer agrees
+  with llama.cpp's on 21 of 21 strings. The tests use GLM-4.7-Flash's chat template; the real file's own one differs
+  from it in how it handles thinking and effort.
+
+What is checked without a GPU:
+
 - **Conversation parking and checkpoints:** every resumed reply is the same, token for token, as a fresh engine's
   (`tools/glm53_park_check.py`, on the CPU engine).
 - **The server end to end** on the CPU engine: tokenizer, chat, streaming, a resumed second turn, completions,
@@ -250,11 +263,10 @@ What is checked, without a GPU and without the real model:
 
 What is **not** checked yet:
 
-- **The GPU engine** (`strata-glm`) is written but has never run on a GPU. Its logits have not been compared with
-  llama.cpp's on the real model.
-- **The real model** has not run in Strata. The tests use GLM-4.7-Flash's chat template. GLM-5.3-Flash's own
-  template and special tokens are read from its GGUF, and have not been checked against the server yet.
-- **No speed, load time or memory use is measured.** Every such figure in these docs is calculated.
+- **The real model** has not run in Strata: it needs more RAM on napster-ai (91 GiB for now, 192 GB planned). So
+  the GPU engine's logits have not been compared with llama.cpp's on it.
+- **No speed, load time or memory use is measured.** Every such figure in these docs is calculated or derived, and
+  says so.
 - **A full install** that ends with the real model answering has not run yet.
 
 The steps that check these on napster-ai, one by one: [docs/GLM53_PORT.md](docs/GLM53_PORT.md) ("What to run on

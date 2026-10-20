@@ -4,7 +4,7 @@ Problems with Strata on GLM-5.3-Flash (Linux, NVIDIA GPUs) and what to do about 
 lines are the messages that setup, the server and the engine print, so you can search this page for the words you
 see. Back to the [README](../README.md#something-went-wrong).
 
-Nothing has run on a GPU or on the real model yet, so this page has no measured times, speeds or memory figures.
+The real model has not run yet, so this page has no measured times, speeds or memory figures.
 Where a fix depends on how long something takes, it says which line of the log to look at instead.
 
 ## Reading the log
