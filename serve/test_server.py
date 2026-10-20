@@ -3853,6 +3853,43 @@ class ThinkingOff(unittest.TestCase):
                 self.assertEqual(self.checkpoints, [len(self.engine.prompts[0]) - 3])
                 self.assertEqual(got, ("", CallingEngine.ANSWER, []))
 
+    def test_thinking_off_keeps_the_level_the_settings_name(self):
+        # The level is the prompt's first line.  A request that turns thinking off is written at the level the shared
+        # Chat settings or the run config name (in that order), so a conversation at that level that turns thinking
+        # off for a turn keeps its first line, and the engine does not read it all again.  Anthropic under
+        # "anthropic_thinking": "on_request": a request that asks for no thinking and no effort (the settings' level
+        # would turn it on: with_shared) but brings an output_config of its own.
+        on_request = ("anthropic", {"output_config": {"format": {"type": "json_schema",
+                                                                 "schema": {"type": "object"}}}})
+        for effort, line in (("low", "Low"), ("medium", "High"), ("high", "High"), ("max", "Max")):
+            for where in ("config", "shared"):
+                self.svc.config_effort = effort if where == "config" else None
+                self.svc.shared = {"reasoning_effort": effort} if where == "shared" else {}
+                head = f"[gMASK]<sop><|system|>Reasoning Effort: {line}<|user|>"
+                for api, extra in self.OFF + (on_request,):
+                    with self.subTest(effort=effort, where=where, api=api, extra=extra):
+                        self.svc.anthropic_think_unasked = (api, extra) != on_request
+                        prompts, got = self.answer(api, extra)
+                        self.assertTrue(prompts[0].startswith(head), prompts[0][:60])
+                        self.assertTrue(prompts[0].endswith("<|user|>2+2?<|assistant|><think></think>"))
+                        self.assertEqual(got, ("", CallingEngine.ANSWER, []))
+                        if api == "anthropic":           # count_tokens counts the prompt the request reads
+                            count = self.post("/v1/messages/count_tokens", {
+                                "model": "m", "messages": [{"role": "user", "content": "2+2?"}], **extra})
+                            self.assertEqual(count["input_tokens"], len(self.engine.prompts[0]))
+                with self.subTest(effort=effort, where=where, thinking="on"):
+                    self.assertTrue(self.answer("openai", {})[0][0].startswith(head))
+        # shared settings with thinking off over a run config's level: every request without a level of its own is
+        # off, at the config's level; with no level named anywhere, the template's default, Max
+        self.svc.shared, self.svc.config_effort = {"reasoning_effort": "none"}, "low"
+        prompts, got = self.answer("openai", {})
+        self.assertTrue(prompts[0].startswith("[gMASK]<sop><|system|>Reasoning Effort: Low<|user|>"))
+        self.assertEqual(got, ("", CallingEngine.ANSWER, []))
+        self.svc.shared, self.svc.config_effort = {"reasoning_effort": "none"}, None
+        prompts, _ = self.answer("responses", {})
+        self.assertTrue(prompts[0].startswith("[gMASK]<sop><|system|>Reasoning Effort: Max<|user|>"))
+        self.assertTrue(prompts[0].endswith("<think></think>"))
+
     def test_anthropic_on_request(self):
         # #278: "anthropic_thinking": "on_request" - an Anthropic request that does not ask for thinking has none
         self.svc.anthropic_think_unasked = False
