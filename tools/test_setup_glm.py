@@ -1213,6 +1213,50 @@ class ModelFilesFound(unittest.TestCase):
         self.assertEqual(cfg["args"][cfg["args"].index("--expert-profile") + 1], str(data / "glm-iq4_xs.profile"))
         self.assertEqual(cfg["log"], str(Path(rec["root"]) / "strata-glm-iq4_xs.log"))
 
+    def test_fallback_files_on_this_pc_are_judged_by_their_own_size(self):
+        """The 4-bit files already on this PC can be its fallback's: an install made as IQ4_XS took UD-Q4_K_XL, as the
+        repository never had plain IQ4_XS.  Setup judges the RAM by those files, as it does before it downloads them:
+        on 192 GB the 4-bit's own files fit, but 200 GB of UD-Q4_K_XL leave about 14 GiB beside their experts, so
+        parked conversations get 4096 MiB; on 184 GiB they do not fit and setup asks.  The same for --gguf-dir."""
+        def prepare(base):
+            for folder in (base / "Strata-GLM-data" / "models" / "glm-ud-q4_k_xl", base / "mine" / "UD-Q4_K_XL"):
+                folder.mkdir(parents=True)
+                for i in (1, 2):
+                    s = folder / f"GLM-5.3-Flash-UD-Q4_K_XL-0000{i}-of-00002.gguf"
+                    with open(s, "wb") as f:
+                        f.truncate(100 * GB)                                  # sparse: no disk taken
+                    setup.mark(s)
+        argv = ["--setup", "--model", "UD-IQ4_XS", "--context", "131072", "--no-start"]
+        for extra in ([], ["--gguf-dir", "{base}/mine"]):
+            code, out, cfgs, _, rec = install(argv + extra, prepare=prepare)
+            self.assertEqual(code, 0, out)
+            self.assertEqual((rec["downloads"], rec["urls"]), ([], []))
+            self.assertIn("the 4-bit model's files on this PC are UD-Q4_K_XL (200 GB, about 174 GiB of experts in RAM: "
+                          "~14 GiB of RAM left beside them)", out)
+            args = cfgs["strata-glm-ud-iq4_xs.json"]["args"]
+            self.assertEqual(args[args.index("--park-mib") + 1], "4096")
+            # the way to the smaller UD-IQ4_XS files, for a folder setup found (not one given with --gguf-dir)
+            self.assertEqual("to download its UD-IQ4_XS files instead, move" in out, not extra)
+            code, out, cfgs, _, _ = install(argv + extra, prepare=prepare, ram=184.0)     # asked, and no answer
+            self.assertEqual(code, 1)
+            self.assertIn("UD-Q4_K_XL's experts do not fit beside Linux and the server in this PC's 184 GiB", out)
+            self.assertEqual(cfgs, {})
+            code, out, cfgs, _, _ = install(argv + extra + ["--yes"], prepare=prepare, ram=184.0)
+            self.assertEqual(code, 0, out)                                    # --model is the consent
+        # the 4-bit's own files found: nothing said about a fallback, the parking as the size's verdict gives it
+        def own(base):
+            folder = base / "Strata-GLM-data" / "models" / "glm-ud-iq4_xs"
+            folder.mkdir(parents=True)
+            for i in (1, 2):
+                s = folder / f"GLM-5.3-Flash-UD-IQ4_XS-0000{i}-of-00002.gguf"
+                s.write_bytes(b"")
+                setup.mark(s)
+        code, out, cfgs, _, rec = install(argv, prepare=own)
+        self.assertEqual((code, rec["downloads"]), (0, []), out)
+        self.assertNotIn("model's files on this PC are", out)
+        args = cfgs["strata-glm-ud-iq4_xs.json"]["args"]
+        self.assertEqual(args[args.index("--park-mib") + 1], "8192")
+
     def test_a_new_copy_is_set_up_like_an_iq4_xs_install(self):
         """A new copy next to a 4-bit install made as IQ4_XS: found, set up the same way under the same names, with
         the keys added by hand carried over; nothing is downloaded."""

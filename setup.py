@@ -393,6 +393,29 @@ def fit_text(model: str, ram: float) -> str:
             "no": f"they do not fit this PC's {ram:.0f} GiB of RAM"}[model_fit(model, ram)]
 
 
+def fallback_park(model: str, quant: str, total: float, ram: float, park: int, a, lead: str) -> int:
+    """A size's fallback files (the 4-bit: UD-Q4_K_XL), `total` GB listed for the download or found on this PC: their
+    experts, taken as the same share of the files as the size's own (the 4-bit's is derived, see MODELS), and what
+    they leave of the RAM (GiB), said after `lead`.  Judged as model_fit judges a size: asked below RAM_LEFT_MIN_GIB
+    (--model --yes is the consent), less parking below RAM_LEFT_GIB.  The parking RAM to use."""
+    d = MODELS[model]
+    experts = total * d["experts_gb"] / d["download_gb"] * 1e9 / GIB
+    warn(f"{lead}{quant} ({total:.0f} GB, about {experts:.0f} GiB of experts in RAM: "
+         + (f"~{ram - experts:.0f} GiB of RAM left beside them)" if ram >= experts else
+            f"more than this PC's {ram:.0f} GiB)"))
+    if model_fit(model, ram) != "no" and ram - experts < RAM_LEFT_MIN_GIB:
+        confirm_risk(f"{quant}'s experts do not fit beside Linux and the server in this PC's {ram:.0f} GiB of "
+                     "RAM: the OS would page them from the disk, so it would be very slow, or not start at all",
+                     bool(a.model), a.yes,
+                     f"{quant} needs about {experts + RAM_LEFT_MIN_GIB:.0f} GiB of RAM; this PC has {ram:.0f} GiB",
+                     f"choose {next(iter(MODELS))}, or --model {model} --yes to install it anyway",
+                     "  Install it anyway?")
+    elif ram - experts < RAM_LEFT_GIB and a.park_mib is None and park != PARK_MIB_TIGHT:
+        park = PARK_MIB_TIGHT
+        warn(f"parked conversations get {PARK_MIB_TIGHT} MiB instead of {PARK_MIB} (--park-mib {PARK_MIB_TIGHT})")
+    return park
+
+
 def mla_gb(ctx: int) -> float:
     """The attention cache's VRAM (GB) for a context of `ctx` tokens: 1.7 GB at 131072, 13.3 GB at 1M."""
     return ctx * VRAM_BYTES_PER_TOKEN / 1e9
@@ -1841,12 +1864,21 @@ def main() -> int:
     models_root = Path(a.models_dir)
     plan = []                                          # (listed file, where it goes) for step 5
     found_model = None if a.gguf_dir else find_model(model, [models_root, *[r / "models" for r in roots]])
-    if a.gguf_dir:
-        quant, shards = gguf_dir_model(Path(a.gguf_dir).expanduser(), model)
-        ok(f"model files: {shards[0].parent} ({quant}, {len(shards)} file{'s' if len(shards) > 1 else ''})")
-    elif found_model:
-        quant, shards = found_model
-        ok(f"model files: {shards[0].parent} (already downloaded)")
+    if a.gguf_dir or found_model:
+        if a.gguf_dir:
+            quant, shards = gguf_dir_model(Path(a.gguf_dir).expanduser(), model)
+            ok(f"model files: {shards[0].parent} ({quant}, {len(shards)} file{'s' if len(shards) > 1 else ''})")
+        else:
+            quant, shards = found_model
+            ok(f"model files: {shards[0].parent} (already downloaded)")
+        if quant not in size_names(model):
+            # the fallback's files (an install made as IQ4_XS took UD-Q4_K_XL): judged by their own size, as below
+            # before a download
+            total = sum(s.stat().st_size for s in shards if s.is_file()) / 1e9
+            park = fallback_park(model, quant, total, ram, park, a, f"the {d['bits']} model's files on this PC are ")
+            if not a.gguf_dir:
+                say(f"  (setup takes the files it finds: to download its {model} files instead, move "
+                    f"{shards[0].parent} away and run it again)")
     else:
         say(f"  Listing the model's files on {hf_endpoint()} ({REPO}) ...")
         pick = pick_shards(repo_files(), model)
@@ -1863,23 +1895,8 @@ def main() -> int:
         on_disk = sum(p.stat().st_size for s in shards for p in (s, s.with_name(s.name + ".part")) if p.is_file()) / 1e9
         ok(f"{quant}: {len(files)} file{'s' if len(files) > 1 else ''}, {total:.0f} GB")
         if quant != model:
-            # its experts, taken as the same share of its files as the size's own (the 4-bit's is derived, see
-            # MODELS): what it leaves of the RAM (GiB)
-            experts = total * d["experts_gb"] / d["download_gb"] * 1e9 / GIB
-            warn(f"the repository has no {model} files: the {d['bits']} model is its {quant} ({total:.0f} GB, about "
-                 f"{experts:.0f} GiB of experts in RAM: "
-                 + (f"~{ram - experts:.0f} GiB of RAM left beside them)" if ram >= experts else
-                    f"more than this PC's {ram:.0f} GiB)"))
-            if fit != "no" and ram - experts < RAM_LEFT_MIN_GIB:
-                confirm_risk(f"{quant}'s experts do not fit beside Linux and the server in this PC's {ram:.0f} GiB of "
-                             "RAM: the OS would page them from the disk, so it would be very slow, or not start at all",
-                             bool(a.model), a.yes,
-                             f"{quant} needs about {experts + RAM_LEFT_MIN_GIB:.0f} GiB of RAM; this PC has "
-                             f"{ram:.0f} GiB",
-                             f"choose {names[0]}, or --model {model} --yes to install it anyway", "  Install it anyway?")
-            elif ram - experts < RAM_LEFT_GIB and a.park_mib is None and park != PARK_MIB_TIGHT:
-                park = PARK_MIB_TIGHT
-                warn(f"parked conversations get {PARK_MIB_TIGHT} MiB instead of {PARK_MIB} (--park-mib {PARK_MIB_TIGHT})")
+            park = fallback_park(model, quant, total, ram, park, a,
+                                 f"the repository has no {model} files: the {d['bits']} model is its ")
         need = max(total - on_disk, 0) + 1
         if free_gb(folder) < need:
             fail(f"not enough free disk space in {folder}: need ~{need:.0f} GB" +

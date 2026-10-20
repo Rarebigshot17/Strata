@@ -252,7 +252,11 @@ In the Strata folder (the one with `setup.py`):
 `<size>` is the size in lower case: `ud-iq3_xxs` or `ud-iq4_xs`. Setup called the 4-bit size `IQ4_XS` until the
 repository's listing showed its files are `UD-IQ4_XS`, and it still takes that name (`--model IQ4_XS`, the Docker
 image's `MODEL=IQ4_XS`): a 4-bit install made or set up under it keeps `iq4_xs` in these names, and setup run again
-writes over them, not new files beside them. Its model files are found where it put them.
+writes over them, not new files beside them. Its model files are found where it put them. Downloaded, those are the
+199.7 GB `UD-Q4_K_XL` files, the fallback: the repository has no plain `IQ4_XS` ones (its listing, 2026-10-20). Setup
+says what they leave of the RAM, as before a download (about 14 GiB on 192 GB: tight, so parked conversations get 4096
+MiB, calculated from the derived 4-bit figure). To take the smaller `UD-IQ4_XS` files instead, move
+`models/glm-ud-q4_k_xl` out of the data folder and run `./setup.sh --setup` again.
 
 In the data folder, `Strata-GLM-data` next to the Strata folder (or where `--data-dir` put it):
 
