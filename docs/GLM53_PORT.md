@@ -183,8 +183,10 @@ yet. Run them from the Strata folder.
    python tools/glm53_inspect.py ~/models/glm53/<first .gguf shard>
    ```
 
-   The GPU kernels take every type these files use for experts (IQ3_XXS, IQ3_S, IQ4_XS, Q3_K-Q6_K, Q8_0); the
-   inspector lists any tensor whose type has none. With the 4-bit file about 37 GiB of RAM is left beside the
+   The inspector flags an expert type the GPU kernels cannot read only where a layer the engine runs uses it; the
+   MTP layer (the last block, `blk.45` in the 3-bit file) is listed apart, since Strata does not load it. The 3-bit
+   file's experts are IQ2_S, IQ3_S, IQ4_XS and Q3_K (its inspector output on napster-ai), and the kernels take each;
+   its Q2_K tensors are only in the MTP layer. With the 4-bit file about 37 GiB of RAM is left beside the
    experts (calculated, of the 188 GiB Linux reports), so parked conversations get less of it (`--park-mib 4096`;
    setup does this itself).
 
