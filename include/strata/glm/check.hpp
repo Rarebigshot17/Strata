@@ -11,11 +11,12 @@
 // - The worst relative diff: each row's max |cpu - gpu| over its max |cpu|, the worst row. With quantized weights
 //   it was 0.0323 at worst on Q4_0 (median 0.0228), llama.cpp's own 0.0344; on Q8_0 0.0077 (llama.cpp's 0.0143).
 //   The limit, 0.05, is 1.45 times llama.cpp's worst and 1.5 times Strata's. It would let a 1% error through on
-//   float weights (F32, F16), whose decode differed by 0.0001 at worst, so they get their own limit. The prompt path
-//   multiplies in f16 on the GPU; f16 products on the CPU (strata-glm-ref on 20 seeds' v1 turned into F16, an x86
-//   CPU, 2026-10-20) moved the logits by up to 0.0010. Float weights get 0.005: 5 times that, 4 times below the
-//   0.02 this rule replaces, and half of a 1% difference. BF16 counts as quantized: bf16 products moved the logits
-//   by up to 0.0064 in the same test (where the indexer selected the same pools).
+//   float weights (F32, F16), so they get their own limit: F32's decode differed by 0.0001 at worst. On the GPU the
+//   prompt path multiplies F16 weights in f16 (F32 ones in f32, with cuBLAS's SGEMM) and keeps its attention's
+//   probabilities in f16; f16 products on the CPU (strata-glm-ref on 20 seeds' v1 turned into F16, an x86 CPU,
+//   2026-10-20) moved the logits by up to 0.0010. Float weights get 0.005: 5 times that, 4 times below the 0.02
+//   this rule replaces, and half of a 1% difference. BF16 counts as quantized: bf16 products moved the logits by up
+//   to 0.0064 in the same test (where the indexer selected the same pools).
 // - The mean KL(cpu || gpu) over the rows, from each row's softmax in double. The rounding gave at most 1.32e-6
 //   (Q4_0, both engines). The limit, 1e-5, is 7.6 times that. KL grows with the square of the logit differences,
 //   so that is 2.75 times them, more room than the relative limit gives (1.5 times): the rounding meets the relative

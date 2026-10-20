@@ -203,9 +203,10 @@ limits (0.02 and 98% top-1) failed it: Q4_0 at 0.0233 and 0.0305 when decoding a
 check runs on napster-ai the same day. The rule now asks:
 
 - a relative difference within 0.05 when some weights are quantized (1.45 times llama.cpp's worst), and within
-  0.005 when all are F32 or F16, so that a 1% error there fails. The prompt path multiplies in f16: f16 products moved
-  the logits by up to 0.001 on the CPU (strata-glm-ref on F16 copies of 20 seeds' v1, an x86 machine with AVX-512,
-  2026-10-20). The F32 models' prompt path has no GPU measurement yet;
+  0.005 when all are F32 or F16, so that a 1% error there fails. The prompt path multiplies F16 weights in f16 (F32
+  ones in f32) and keeps the attention's probabilities in f16. f16 products moved the logits by up to 0.001 on the
+  CPU (strata-glm-ref on F16 copies of 20 seeds' v1, an x86 machine with AVX-512, 2026-10-20). The F32 models'
+  prompt path has no GPU measurement yet;
 - a mean KL within 1e-5, 7.6 times the rounding's worst. Bugs land far above it: the indexer's select_tail bug gave
   7.6e-4, a pool selected differently 4e-5 to 1.5e-4;
 - no NaN or infinity.
@@ -213,10 +214,11 @@ check runs on napster-ai the same day. The rule now asks:
 Top-1 agreement is printed but not counted. When two engines' logits differ by at most d, they can only pick tokens
 that are less than 2d apart, so the count adds nothing to the limit on d. It counts near ties, and the small models
 have many. Against llama.cpp the two CPU engines' own difference adds to the GPU's: llama.cpp with an f32 cache and
-strata-glm-ref differed by up to 0.011 on Q4_0, 0.014 on Q8_0 and 0.0008 on v1 (20 seeds, the same x86 machine).
-Added up that is at most 0.043, 0.022 and 0.0009, within the same limits. `glm53_compare.py`'s defaults would fail
-it: these models' largest logits are about 0.3, so at 0.032 two tokens 0.02 apart can swap, which is no tie. The
-limits come from the small random models; nothing is measured on the real model yet.
+strata-glm-ref differed by up to 0.015 on Q4_0 (seed 21), 0.014 on Q8_0 and 0.0008 on v1 (seeds 1-100, the same x86
+machine). Added up that is at most 0.047, 0.022 and 0.0009 (calculated: two worst rows of different runs), within
+the same limits; Q4_0's comes close to its 0.05. `glm53_compare.py`'s defaults would fail it: these models' largest
+logits are about 0.3, so at 0.032 two tokens 0.02 apart can swap, which is no tie. The limits come from the small
+random models; nothing is measured on the real model yet.
 
 Step 7 should see no selection difference: up to 2,051 tokens of context the indexer selects every pool, so the
 precision of its keys cannot change what is selected, and step 6's prompt is far shorter (801 bytes of text, so at

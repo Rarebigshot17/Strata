@@ -28,9 +28,10 @@
 # glm53_compare.py's defaults (top-1 >= 98%, ties within 0.01) do not allow for it: the small models' largest
 # logits are about 0.3, so at a 3.2% difference two tokens up to 0.02 apart can swap. That is no tie, and one such
 # row of 40 fails the 98%. The comparison takes check.hpp's rule instead. The rule holds with the two CPU engines'
-# own difference added: llama.cpp's (f32 cache) and strata-glm-ref's logits differed by up to 1.1% of a row's
-# largest on Q4_0, 1.4% on Q8_0 and 0.08% on F32 (20 seeds, an x86 CPU, 2026-10-20), so at worst 0.043, 0.022 and
-# 0.0009 with the GPU's.
+# own difference added: llama.cpp's (f32 cache) and strata-glm-ref's logits differed by up to 1.5% of a row's
+# largest on Q4_0 (seed 21), 1.4% on Q8_0 and 0.08% on F32 (seeds 1-100, an x86 CPU, 2026-10-20), so at worst
+# 0.047, 0.022 and 0.0009 with the GPU's (calculated: two worst rows of different runs added up). Q4_0's is close to
+# its 0.05.
 set -uo pipefail
 
 LB="${1:?llama.cpp build dir}"
