@@ -66,8 +66,8 @@ smaller). The RAM left is calculated from these.
 | 4-bit | UD-IQ4_XS, 5 files; UD-Q4_K_XL (6 files, 199.7 GB) when the repository has no UD-IQ4_XS | 156.8 GB (listing) | about 146 GB = 136 GiB (derived) | about 52 GiB |
 
 The plan had calculated about 117 GB for the 3-bit experts (IQ3_XXS, 3.06 bits, for every one) and about 162 GB for
-the 4-bit ones (IQ4_XS, 4.25 bits); the 3-bit file mixes IQ2_S, IQ3_S, IQ4_XS and Q3_K ("The real file" below), and
-which types the 4-bit file holds is not read yet. The repository has no plain IQ4_XS file.
+the 4-bit ones (IQ4_XS, 4.25 bits); the 3-bit file's experts mix IQ2_S, IQ3_S and IQ4_XS ("The real file" below),
+and which types the 4-bit file holds is not read yet. The repository has no plain IQ4_XS file.
 
 `setup.py` uses the same figures (its `MODELS` table, in GB) and prints what is left beside the experts in GiB,
 taken from the RAM Linux reports (`/proc/meminfo`), which is a few GiB under the installed 192 GB: setup's tests
@@ -173,10 +173,11 @@ from what the plan took in these:
   the checks could not see which default the engine took.
 - `block_count` is 46 with `nextn_predict_layers` 1: `blk.45` is the MTP layer. The engine runs the 45 layers before
   it and does not load it, so its Q2_K experts, the only Q2_K tensors in the file, need no kernel.
-- The routed experts of the 45 layers are not IQ3_XXS throughout, as the plan took them: they are IQ2_S (gate and
-  up) and IQ3_S (down), with IQ4_XS and Q3_K too. The GPU kernels take each. The inspector counted 109.9 GB of
-  them, 7.7 GB of everything else and 2.8 GB for the MTP layer: the 120.4 GB the repository lists for the file. The
-  plan had calculated about 117 GB of experts ("Memory on napster-ai").
+- The routed experts of the 45 layers are not IQ3_XXS throughout, as the plan took them: they are IQ2_S (gate and up,
+  63.5 GB) and IQ3_S (down, 42.6 GB), with 3.9 GB of IQ4_XS. The GPU kernels take each. The MTP layer's experts are Q2_K
+  and Q3_K. The inspector counted 109.9 GB of the 45 layers' experts, 7.7 GB of everything else and 2.8 GB for the MTP
+  layer: the 120.4 GB the repository lists for the file. The plan had calculated about 117 GB of experts ("Memory on
+  napster-ai").
 
 ## What to run on napster-ai
 
@@ -250,12 +251,13 @@ again); steps 6-8 have not run yet. Run them from the Strata folder.
    python tools/glm53_inspect.py ~/models/glm53/<first .gguf shard>
    ```
 
-   The inspector flags an expert type the GPU kernels cannot read only where a layer the engine runs uses it; the
-   MTP layer (the last block, `blk.45` in the 3-bit file) is listed apart, since Strata does not load it. The 3-bit
-   file's experts are IQ2_S, IQ3_S, IQ4_XS and Q3_K (its inspector output on napster-ai), and the kernels take each;
-   its Q2_K tensors are only in the MTP layer. On 192 GB (188 GiB reported) the 4-bit file leaves about 52 GiB of
-   RAM beside its experts and the 3-bit file about 86 GiB (calculated from the figures in "Memory on napster-ai"; the
-   4-bit's are derived). Steps 6-8 need the RAM in place and the Qwen service stopped ("Memory on napster-ai").
+   The inspector flags an expert type the GPU kernels cannot read only where a layer the engine runs uses it; the MTP
+   layer (the last block, `blk.45` in the 3-bit file) is listed apart, since Strata does not load it. In the layers the
+   engine runs, the 3-bit file's experts are IQ2_S, IQ3_S and IQ4_XS (its inspector output on napster-ai), and the
+   kernels take each; its Q2_K and Q3_K experts are only in the MTP layer. On 192 GB (188 GiB reported) the 4-bit file
+   leaves about 52 GiB of RAM beside its experts and the 3-bit file about 86 GiB (calculated from the figures in "Memory
+   on napster-ai"; the 4-bit's are derived). Steps 6-8 need the RAM in place and the Qwen service stopped ("Memory on
+   napster-ai").
 
 6. **Reference logits from llama.cpp** on the real model. `--n-cpu-moe` keeps that many layers' experts on the
    CPU; lower it until VRAM runs out, then raise it by a few:
