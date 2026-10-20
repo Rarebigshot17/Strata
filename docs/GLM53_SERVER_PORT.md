@@ -180,7 +180,7 @@ tokens more slowly than the engine wrote them (now each pass ends where the serv
 ### G. The real chat template (napster-ai, 2026-10-20)
 
 `tools/glm53_template_probe.py` read the real UD-IQ3_XXS GGUF's tokenizer and chat template. What it showed and what
-the server does with it (branch `glm53-flash-wip-fix-h1`):
+the server does with it:
 
 - [x] G1 `serve/chat_template.jinja` is the real template, byte for byte (10648 characters); it was GLM-4.7-Flash's.
   Nearly every serve test renders with it, `test_glm_engine_protocol` too. The capability probe and the checkpoint

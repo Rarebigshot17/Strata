@@ -61,9 +61,11 @@ instead:
 
 - **Parking.** When a request starts a different conversation, the current one's whole state is copied to RAM. A
   later request that continues it copies it back and reads only the new tokens.
-- **Checkpoints.** The server marks where each reply begins. The next turn renders the earlier reply without its
-  thinking, so it differs from the engine's state from that point on. The engine restarts from the checkpoint and
-  reads the reply and the new message, not the whole conversation. A regenerated reply restarts there too.
+- **Checkpoints.** The server marks where each reply begins. When the client sends the reply back with its thinking,
+  the model's template writes it back with that thinking, and the engine goes on from the end of the reply. When the
+  next turn writes it otherwise (a client that does not send the thinking back), it differs from the engine's state
+  from that point on. The engine then restarts from the checkpoint and reads the reply and the new message, not the
+  whole conversation. A regenerated reply restarts there too.
 - **Memory.** `--park-mib` caps the RAM that parked conversations and checkpoints use: 8192 MiB by default, 4096
   when setup finds less than 40 GiB of RAM left beside the experts (the 4-bit model on 192 GB). The conversation used
   least recently goes first. Parking lives in the engine's RAM, so a restart of the engine starts with none.
