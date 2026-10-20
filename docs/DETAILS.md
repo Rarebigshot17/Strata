@@ -177,7 +177,7 @@ Every word a request sends lands on a level, or turns thinking off. Any other wo
   level than the one before shares no cached prefix with it: the engine reads the whole conversation again. A turn
   with thinking off writes the settings' level (above), so it shares the prefix with turns at that level. A level
   that a request sends itself counts for that request only. The next request does not carry it: the chat page's
-  Off after High writes the settings' level, or Max, and the conversation is read again.
+  Off after High writes the settings' level, or Max. Unless that is High too, the conversation is read again.
 - A request that says nothing gets the shared settings' level, then the run config's `"reasoning_effort"`, then the
   template's default (Max). An Anthropic request that says nothing thinks too, unless the run config has
   `"anthropic_thinking": "on_request"` (Anthropic's own rule: thinking only when asked). The shared settings and the
