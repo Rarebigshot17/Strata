@@ -1,13 +1,14 @@
 # syntax=docker/dockerfile:1
 #
 # Strata: GLM-5.3-Flash on NVIDIA GPUs (compute capability 7.5 or newer: RTX 20 /
-# 30 / 40 / 50) and system RAM. Every expert stays in RAM (~117 GB for the 3-bit
-# UD-IQ3_XXS, ~162 GB for the 4-bit IQ4_XS); the GPUs hold the rest of the model
+# 30 / 40 / 50) and system RAM. Every expert stays in RAM: ~110 GB for the 3-bit
+# UD-IQ3_XXS (counted in its file), ~146 GB for the 4-bit UD-IQ4_XS (derived from
+# its download; setup.py's MODELS says how). The GPUs hold the rest of the model
 # and cache the most used experts. Several cards share one model.
 #
 # The engine (strata-glm, and the CPU reference strata-glm-ref) is compiled during
 # docker build, so the first container start only downloads the model (~120 GB or
-# ~170 GB) and starts the server. docker build has no GPU, so the CUDA
+# ~157 GB) and starts the server. docker build has no GPU, so the CUDA
 # architectures are fixed here instead of read from nvidia-smi: the engine is a fat
 # binary with a cubin per listed arch, and the runtime picks the one matching your
 # card. Narrow CUDA_ARCHITECTURES to your cards for a faster build (86 for RTX 30);
@@ -30,12 +31,13 @@
 #   anyone who reaches the port can use the model; the entrypoint warns at each start).
 #
 # Setup choices are env vars, read by docker-entrypoint.sh: MODEL (UD-IQ3_XXS or
-# IQ4_XS), CONTEXT (tokens; empty: setup's pick for the GPUs' VRAM), PARK_MIB,
+# UD-IQ4_XS; IQ4_XS, the 4-bit's earlier name, too: a volume set up under it keeps
+# that name), CONTEXT (tokens; empty: setup's pick for the GPUs' VRAM), PARK_MIB,
 # GPU (one card) or GPUS ("0,2" or "all"), HOST, PORT (8101), API_KEY, GGUF_DIR
 # (GGUF files you already have), CONFIG (a config file to start with).
 #
 # Only the model files and the install config live in the /data volume (it needs
-# room for 120-170 GB); the engine is part of the image. API_KEY is passed on at
+# room for 120-157 GB); the engine is part of the image. API_KEY is passed on at
 # every start, so a key added later counts. Pass -e REINSTALL=1 to change the other
 # model settings later.
 
@@ -92,10 +94,10 @@ VOLUME ["/data"]
 EXPOSE 8101
 
 # /health is answered before the API key gate, so it works with or without one.
-# The port only opens after the model loads (minutes: 120-170 GB are read into RAM,
-# longer on a first run, which downloads them), so the start period is generous: a
-# too short one marks a still-loading container unhealthy and a restart policy would
-# kill it mid-download.
+# The port only opens after the model loads (minutes: ~110-146 GB of experts are
+# read into RAM, longer on a first run, which downloads the files first), so the
+# start period is generous: a too short one marks a still-loading container
+# unhealthy and a restart policy would kill it mid-download.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=1800s --retries=3 \
   CMD curl -fs "http://127.0.0.1:${PORT:-8101}/health" || exit 1
 

@@ -623,14 +623,17 @@ docker run -d --name strata --gpus all \
   `-p 127.0.0.1:8101:8101` publishes it to this machine only; to publish it to the network (`-p 8101:8101`, which
   Docker's rules let past ufw), set `-e API_KEY=<secret>` too. Without a key the entrypoint warns at every start.
   `API_KEY` is passed on at every start and saved in the config, so a key added later counts without `REINSTALL`.
-- **The setup choices** are environment variables: `MODEL` (`UD-IQ3_XXS`, the default, or `IQ4_XS` for the 4-bit
-  `UD-IQ4_XS` files), `CONTEXT` (tokens; empty: setup's pick for the VRAM), `PARK_MIB`, `GPUS` (`"0,2"` or `"all"`)
-  or `GPU` (one card), `HOST` (default `0.0.0.0`), `PORT` (default 8101), `API_KEY`, `GGUF_DIR` (a mounted folder of
-  shards you already have: `-v /models/glm53:/gguf:ro -e GGUF_DIR=/gguf`), `CONFIG` (start with this config file
-  instead).
+- **The setup choices** are environment variables: `MODEL` (`UD-IQ3_XXS`, the default, or `UD-IQ4_XS` for the
+  4-bit; `IQ4_XS`, the 4-bit's earlier name, is taken too), `CONTEXT` (tokens; empty: setup's pick for the VRAM),
+  `PARK_MIB`, `GPUS` (`"0,2"` or `"all"`) or `GPU` (one card), `HOST` (default `0.0.0.0`), `PORT` (default 8101),
+  `API_KEY`, `GGUF_DIR` (a mounted folder of shards you already have: `-v /models/glm53:/gguf:ro -e GGUF_DIR=/gguf`),
+  `CONFIG` (start with this config file instead).
 - **The first start** runs setup with these choices, `--no-browser`, `--no-start` and `--yes`, and keeps the config on
   the volume. Later starts go straight to the server. `-e REINSTALL=1` runs setup again, to change the settings of a
   size already set up. Switching `MODEL` to a size already on the volume needs no setup pass.
+- **A volume set up as `IQ4_XS`** keeps its config's name, as setup does: `strata-glm-iq4_xs.json`. `MODEL=UD-IQ4_XS`
+  and `MODEL=IQ4_XS` both start it, with no setup pass and nothing downloaded, and `REINSTALL=1` writes over it
+  instead of making a second config beside it.
 - **Changing the config:** edit `/data/config/strata-glm-<size>.json` on the volume and restart the container, or use
   the web app's Settings view: it writes that file through the link, and keeps its `.bak` and the shared Chat
   settings (`strata-glm-<size>.shared-settings.json`) beside it on the volume.
