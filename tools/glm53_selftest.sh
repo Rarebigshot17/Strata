@@ -17,6 +17,8 @@
 #   Q4_0     v1 quantized: quantized activations through ggml-cpu's dot products
 # llama.cpp runs with batch 1 and flash attention off, the engine's own order of operations.
 set -euo pipefail
+# the GPUs hidden: a CUDA build of llama.cpp would take them, and stop when another program has filled them
+export CUDA_VISIBLE_DEVICES=
 
 LB="${1:?llama.cpp build dir}"
 SB="${2:?strata build dir}"
