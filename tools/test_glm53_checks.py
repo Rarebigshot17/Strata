@@ -82,6 +82,10 @@ STUBS = {
                      '  *" --prefill "*) echo "check-prefill: top-1 agreement 5/5: PASS";;\n'
                      '  *) python3 "$FAKE/write_logits.py" "$out"\n'
                      '     echo "GPU 0: layers 0-1, 1.21 GB weights and buffers"\n'
+                     # FAKE_LAYERS: that many positions where a layer's residual parts from the CPU's
+                     '     i=0; while [ "$i" -lt "${FAKE_LAYERS:-0}" ]; do\n'
+                     '         echo "position $i: layer 0 residual differs by 0.0172 (relative) [MLA]"; i=$((i+1))\n'
+                     '     done\n'
                      '     echo "check-cpu: top-1 agreement 40/40: PASS";;\n'
                      'esac\n',
     # FAKE_SMI is what nvidia-smi prints; FAKE_SMI_FAILS makes it fail as it does without a driver
@@ -182,6 +186,15 @@ class Checks(unittest.TestCase):
         self.assertEqual(out.count("check-prefill:"), len(GPU_MODELS), out)
         self.assertIn("parking: 6 turns, all PASS", out)
         self.assertNotIn("Traceback", out)
+
+    def test_gpu_check_shows_each_models_result_after_many_layer_lines(self):
+        # strata-glm prints a line for every position where a layer parts from the CPU; the check-cpu line after
+        # them is the one that says PASS or FAIL, and must not be cut off with them
+        rc, out = self.run_script("glm53_gpu_check.sh", FAKE_SMI="0, 23900\\n", FAKE_LAYERS="20")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out.count("check-cpu: top-1 agreement 40/40: PASS"), len(GPU_MODELS), out)
+        self.assertEqual(out.count("residual differs"), 4 * len(GPU_MODELS), out)
+        self.assertEqual(out.count("(16 more positions where a layer differs)"), len(GPU_MODELS), out)
 
     def test_gpu_check_stops_with_one_line_per_full_card(self):
         rc, out = self.run_script("glm53_gpu_check.sh", FAKE_GPU_FULL="1", FAKE_SMI="0, 812\\n1, 11800\\n2, 301\\n")

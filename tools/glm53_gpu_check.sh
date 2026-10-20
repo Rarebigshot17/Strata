@@ -85,7 +85,13 @@ for m in glm5-next-moe v1 v1-bare q4_0 q8_0; do
     if ! "$SB/strata-glm" -m "$W/$m.gguf" --tokens-file "$W/ids.txt" --out "$W/gpu_$m.bin" --check-cpu > "$W/log_$m.txt" 2>&1; then
         fail=1
     fi
-    grep -E "GPU |layer .* differs|check-cpu|strata-glm:|CUDA" "$W/log_$m.txt" | head -12
+    # the first few positions where a layer parts from the CPU say where to look; the check-cpu line, which says PASS
+    # or FAIL, comes after them and is always shown
+    grep -E "GPU |strata-glm:|CUDA" "$W/log_$m.txt" | head -8
+    grep -E "layer .* differs" "$W/log_$m.txt" | head -4
+    parted=$(grep -cE "layer .* differs" "$W/log_$m.txt")
+    (( parted > 4 )) && echo "($((parted - 4)) more positions where a layer differs)"
+    grep -E "^check-cpu" "$W/log_$m.txt"
     # the prompt in chunks of 16 (crossing pool boundaries) against the CPU reference, then 4 decoded tokens
     if "$SB/strata-glm" -m "$W/$m.gguf" --tokens-file "$W/ids.txt" --prefill --prefill-chunk 16 --check-cpu \
             > "$W/pp_$m.txt" 2>&1; then
