@@ -8,9 +8,8 @@ web app (`serve/`), and an installer (`setup.py`, started by `./setup.sh`). It i
 the Windows launchers, vision, batching, replicas, MTP drafting, the speed projection and slot save/restore are gone.
 
 **The real model has not run yet (it waits for more RAM on napster-ai), so there is no speed, load time or memory
-measurement.** What has run, on
-napster-ai on 2026-10-20 (RTX 3090 Ti 24 GB + RTX 3080 Ti 12 GB + RTX 3080 10 GB, sm_86, driver 580.95.05, CUDA 13.2,
-gcc 14.2): the builds; the CPU reference against llama.cpp on small random models (all PASS, KL 0); the GPU check on
+measurement.** What has run, on napster-ai on 2026-10-20 (RTX 3090 Ti 24 GB + RTX 3080 Ti 12 GB + RTX 3080 10 GB,
+sm_86, driver 580.95.05, CUDA 13.2, gcc 14.2): the builds; the CPU reference against llama.cpp on small random models (all PASS, KL 0); the GPU check on
 the same models (decode matched the CPU reference 40/40 and llama.cpp with KL 0, on one card and split over the
 three; conversation parking passed; the prefill check failed on a bug in the check, fixed since, not yet rerun); and
 the inspector and the template probe on the real file. Do not write a speed, load time or memory figure as measured.

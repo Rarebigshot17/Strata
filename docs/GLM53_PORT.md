@@ -21,8 +21,9 @@ RTX 3080 Ti 12 GB + RTX 3080 10 GB, sm_86, driver 580.95.05, CUDA 13.2, gcc 14.2
 - the CPU reference against llama.cpp on small random models (step 3): all models PASS, KL 0;
 - the GPU check on the same models (step 4): the GPU engine's decode matched the CPU reference 40/40 and llama.cpp
   with KL 0, on one card and with the layers split over the three, and conversation parking passed. Its prefill
-  check failed on a bug in the check (`strata-glm --prefill --out` wrote a header for more rows than the file held),
-  fixed since (cff801f) and not run again yet;
+  check failed on a bug in the check: the CPU reference had room for the prompt only, so the first token the check
+  decodes after it stopped it ("CpuRef: the sequence is longer than max_ctx"). That is fixed since (5890fde) and has
+  not run again yet;
 - the inspector and the template probe on the real 3-bit file (step 5).
 
 Before that, without a GPU: conversation parking and the whole server on the CPU engine, and the Python and C++

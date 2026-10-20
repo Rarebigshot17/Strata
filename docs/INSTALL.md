@@ -6,11 +6,11 @@ you with [AI_SETUP.md](AI_SETUP.md).
 
 > **The real model has not run yet.** There are no measured speeds, load times or memory figures. The sizes on this
 > page come from the repository's listing and the real 3-bit file, or are derived or calculated, and each says which;
-> setup's own figures come from `setup.py`. What has run on napster-ai's three RTX 30 cards (2026-10-20), on small
-> random GLM models: the builds, the CPU reference against llama.cpp (`tools/glm53_selftest.sh`), the GPU engine
+> setup's own figures come from `setup.py`. What has run on napster-ai (2026-10-20): the builds; on small random GLM
+> models, the CPU reference against llama.cpp (`tools/glm53_selftest.sh`), the GPU engine on its three RTX 30 cards
 > against both (`tools/glm53_gpu_check.sh`: its decode matched; the prompt path's check failed on a bug in the check,
-> fixed since, not yet rerun) and conversation parking (`tools/glm53_park_check.py`); and the inspector and the
-> template probe on the real file. Checked without a GPU: the server end to end on the CPU engine
+> fixed since, not yet rerun) and conversation parking on the GPU engine (`tools/glm53_park_check.py`); and the
+> inspector and the template probe on the real file. Checked without a GPU: the server end to end on the CPU engine
 > (`tools/glm53_server_check.sh`), the Python tests, the engine's C++ unit tests (`ctest`) and setup's own tests
 > (`tools/test_setup_*.py`, which mock the GPUs, the downloads and the build). A full install with setup, the
 > systemd unit and the Docker image below have not been run on a real machine yet. The steps still to run on a real
