@@ -563,10 +563,16 @@ function markdown(text) {
 }
 
 // ------------------------------------------------------------------ Chat
-// GLM's recommended sampling (temperature 1.0, top_p 0.95, no top-k); thinking is on or off ("none"), no levels
-const DEFAULTS = {thinking: "on", temperature: 1.0, top_p: 0.95, top_k: 0, max: "", seed: "", show: true, mcp: true};
+// GLM's recommended sampling (temperature 1.0, top_p 0.95, no top-k).  Thinking: off ("none") or one of
+// GLM-5.3-Flash's levels, low < high < max (its default; its template writes "Reasoning Effort: Low|High|Max")
+const DEFAULTS = {thinking: "max", temperature: 1.0, top_p: 0.95, top_k: 0, max: "", seed: "", show: true, mcp: true};
+// An earlier page's saved thinking as a level: its "on" was the model's default (Max), and before that it had
+// none / low / medium / high (medium is High, as the server reads it)
+function thinkingLevel(saved) {
+  return {none: "none", low: "low", medium: "high", high: "high", max: "max"}[saved] || "max";
+}
 let settings = {...DEFAULTS, ...store.get("sampling", {})};
-if (settings.thinking !== "none") settings.thinking = "on";      // an earlier page's low / medium / high
+settings.thinking = thinkingLevel(settings.thinking);
 let messages = store.get("chat", []);
 let attachments = [];                 // {kind: "file", name, text}
 let busy = null;                      // {controller, msg}
@@ -976,17 +982,17 @@ async function loadShared() {
   } catch (e) { /* an older server: the switch just stays off */ }
   $("s-share").setAttribute("aria-checked", String(sharedOn));
 }
-// The settings' request fields: what the chat sends, and what "Use for other apps too" shares.  Thinking is sent
-// either way ("On" as "high": GLM has no levels), so a run config or shared setting that turns it off does not win
+// The settings' request fields: what the chat sends, and what "Use for other apps too" shares.  Thinking is always
+// sent (none, low, high or max), so a run config or shared setting with another level does not win
 function samplingFields(s) {
-  const d = {temperature: +s.temperature, reasoning_effort: s.thinking === "none" ? "none" : "high"};
+  const d = {temperature: +s.temperature, reasoning_effort: s.thinking};
   if (+s.temperature > 0) Object.assign(d, {top_p: +s.top_p, top_k: +s.top_k});
   if (s.seed) d.seed = +s.seed;
   if (s.max) d.max_tokens = +s.max;
   return d;
 }
 function sharedDefaults(s) {
-  // the chat's fields, but thinking only when it is off: a shared "on" would make other apps' small calls think too
+  // the chat's fields, but thinking only when it is off: a shared level would make other apps' small calls think too
   // (an Anthropic client's, which anthropic_thinking "on_request" keeps from thinking, #278)
   const d = samplingFields(s);
   if (d.reasoning_effort !== "none") delete d.reasoning_effort;
@@ -1002,13 +1008,16 @@ async function saveShared(on, s) {
   }
   sharedOn = !!(await r.json()).shared;
 }
+// The line under the Thinking control: what each choice does
+const THINKING_NOTES = {none: "answers right away", low: "thinks first, with low effort",
+                        high: "thinks first, with high effort", max: "thinks first, with the most effort (default)"};
 function outputs() {
   const t = +$("s-temp").value;
   $("o-temp").textContent = t === 0 ? "0 · greedy" : t.toFixed(2);
   $("o-topp").textContent = (+$("s-topp").value).toFixed(2);
   $("o-topk").textContent = +$("s-topk").value === 0 ? "0 · off" : $("s-topk").value;
   const sel = [...$("s-thinking").children].find((b) => b.getAttribute("aria-checked") === "true");
-  $("o-thinking").textContent = sel ? {none: "answers right away", on: "thinks first (default)"}[sel.dataset.v] : "";
+  $("o-thinking").textContent = sel ? THINKING_NOTES[sel.dataset.v] : "";
   for (const id of ["s-topp", "s-topk"]) $(id).disabled = t === 0;
 }
 for (const b of $("s-thinking").children) b.onclick = () => { for (const x of $("s-thinking").children) x.setAttribute("aria-checked", String(x === b)); outputs(); };
@@ -1019,7 +1028,7 @@ $("s-share").onclick = () => $("s-share").setAttribute("aria-checked", String($(
 $("s-reset").onclick = () => loadDrawer(DEFAULTS);
 $("s-apply").onclick = async () => {
   const sel = [...$("s-thinking").children].find((b) => b.getAttribute("aria-checked") === "true");
-  settings = {thinking: sel ? sel.dataset.v : "on", temperature: +$("s-temp").value, top_p: +$("s-topp").value,
+  settings = {thinking: sel ? sel.dataset.v : "max", temperature: +$("s-temp").value, top_p: +$("s-topp").value,
               top_k: +$("s-topk").value, max: $("s-max").value.trim(), seed: $("s-seed").value.trim(),
               show: $("s-show").getAttribute("aria-checked") === "true",
               mcp: $("s-mcp").getAttribute("aria-checked") === "true"};

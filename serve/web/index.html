@@ -198,8 +198,12 @@
   <div class="st-drawer__body">
     <div class="st-field">
       <label class="st-label" for="s-thinking">Thinking <output id="o-thinking"></output></label>
-      <div class="seg" id="s-thinking" role="radiogroup" aria-label="Thinking">
-        <button type="button" role="radio" data-v="none">Off</button><button type="button" role="radio" data-v="on">On</button>
+      <div class="seg" id="s-thinking" role="radiogroup" aria-label="Thinking"
+           style="grid-template-columns: repeat(4, 1fr)">
+        <button type="button" role="radio" data-v="none">Off</button>
+        <button type="button" role="radio" data-v="low">Low</button>
+        <button type="button" role="radio" data-v="high">High</button>
+        <button type="button" role="radio" data-v="max">Max</button>
       </div>
     </div>
     <div class="st-field">
