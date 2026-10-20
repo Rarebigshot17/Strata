@@ -67,9 +67,10 @@ The MLA cache stores a 512-wide latent per token in each of the 11 MLA layers. T
 llama.cpp does by default: 11 KB per token (an 8-bit cache would halve that). Each layer's indexer adds one pooled
 128-wide key per 4 tokens (`attention.indexer.kpool` is 4 in the real file), kept in fp32: 128 bytes per token per
 layer, 1.4 KB per token over the 11 layers. Together 12.4 KB per token, 1.7 GB of VRAM at 131,072 tokens and 13.3 GB
-at 1M; `setup.py` uses this figure. The prompt path's scratch on each card holds the pool scores of a 256-token chunk
-(2 x 256 x 4 bytes per pool), so it grows with the context too: about 0.32 GB per card up to about 200K tokens,
-0.49 GB at 512K and 0.75 GB at 1M. The KDA layers hold a fixed-size state (64 heads x 128 x 128 per layer, about
+at 1M; `setup.py` uses this figure. On each card the prompt path's work area (its arena) also holds the pool scores
+of a 256-token chunk (the default `--prefill-chunk`; 2 x 256 x 4 bytes per pool), so it grows with the context too:
+the arena is about 0.32 GB per card up to about 200K tokens, 0.49 GB at 512K and 0.75 GB at 1M, beside the prompt
+path's other buffers. The KDA layers hold a fixed-size state (64 heads x 128 x 128 per layer, about
 0.15 GB over the 34 layers in fp32). All calculated from the engine's buffers (`src/glm/engine.cu`,
 `src/glm/engine_prefill.cu`).
 
@@ -149,6 +150,9 @@ from what the plan took in these:
   the checks could not see which default the engine took.
 - `block_count` is 46 with `nextn_predict_layers` 1: `blk.45` is the MTP layer. The engine runs the 45 layers before
   it and does not load it, so its Q2_K experts, the only Q2_K tensors in the file, need no kernel.
+- The routed experts of the 45 layers are not IQ3_XXS throughout, as the 3-bit row of "Memory on napster-ai" takes
+  them: they are IQ2_S (gate and up) and IQ3_S (down), with IQ4_XS and Q3_K too. The GPU kernels take each. Their
+  size in RAM is the inspector's section 5 figure, which is not on this page yet.
 
 ## What to run on napster-ai
 
