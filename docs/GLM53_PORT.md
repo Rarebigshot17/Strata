@@ -27,7 +27,7 @@ each value against the real GGUF before code depends on it.
 | Layers | 45: KDA linear attention in 34, MLA sparse attention in 11 (every 4th: 3, 7, ..., 43) | 48: GDN linear attention in 36, GQA sparse attention in 12 |
 | Hidden size | 4096 | 2560 |
 | Linear attention | KDA: 64 heads x 128, decay per channel, separate q/k/v short convs, low-rank gates | GDN: 16 key / 48 value heads, decay per head, one fused conv |
-| Sparse attention | MLA without RoPE (latent 512, head dim 256, 64 heads); indexer of 32 heads that pools keys over 16 tokens, top 2048 | GQA with RoPE (24 q / 2 kv heads); indexer of 4 heads that pools over 4 tokens, top 2048 |
+| Sparse attention | MLA without RoPE (latent 512, head dim 256, 64 heads); indexer of 32 heads that pools keys over 4 tokens (the real file's `kpool`), top 2048 | GQA with RoPE (24 q / 2 kv heads); indexer of 4 heads that pools over 4 tokens, top 2048 |
 | Residual | mHC: 4 streams, Sinkhorn mixing (20 iterations) | 4-stream gated residual |
 | Experts | 288 per layer, top 8, sigmoid routing with bias, x2.5 scale, 1 shared expert, layers 0-2 dense, SwiGLU clamp 10 | 512, top 10, softmax routing, gated shared expert, every layer MoE |
 | Vocab | 154,880 | 248,320 |
@@ -52,10 +52,14 @@ and keeps the 4-bit one when you choose it. For UD-Q4_K_XL setup takes the exper
 for IQ4_XS.
 
 The MLA cache stores a 512-wide latent per token in each of the 11 MLA layers. The engine keeps it in f16, as
-llama.cpp does by default: 11 KB per token, 1.5 GB of VRAM at 131,072 tokens and 11.8 GB at 1M (an 8-bit cache
-would halve that). The indexer adds one pooled 128-wide key per 16 tokens per layer, under 0.5 KB per token even in
-fp32. The KDA layers hold a fixed-size state (64 heads x 128 x 128 per layer, about 0.15 GB over the 34 layers in
-fp32).
+llama.cpp does by default: 11 KB per token (an 8-bit cache would halve that). Each layer's indexer adds one pooled
+128-wide key per 4 tokens (`attention.indexer.kpool` is 4 in the real file), kept in fp32: 128 bytes per token per
+layer, 1.4 KB per token over the 11 layers. Together 12.4 KB per token, 1.7 GB of VRAM at 131,072 tokens and 13.3 GB
+at 1M; `setup.py` uses this figure. The prompt path's scratch on each card holds the pool scores of a 256-token chunk
+(2 x 256 x 4 bytes per pool), so it grows with the context too: about 0.32 GB per card up to about 200K tokens,
+0.49 GB at 512K and 0.75 GB at 1M. The KDA layers hold a fixed-size state (64 heads x 128 x 128 per layer, about
+0.15 GB over the 34 layers in fp32). All calculated from the engine's buffers (`src/glm/engine.cu`,
+`src/glm/engine_prefill.cu`).
 
 ## How the engine is built
 
@@ -81,7 +85,7 @@ Every piece is checked against llama.cpp, which has run GLM-5.3-Flash since its 
 | M1 | CPU reference: config and tensors from the GGUF, mHC, KDA, MLA with the k-pool indexer, MoE with sigmoid routing and SwiGLU clamp | done | `tools/glm53_selftest.sh`: all variants PASS |
 | M2 | CUDA: dense projections, mHC, KDA decode, MLA decode with the indexer, routing; layer split over the GPUs | written, not yet run on a GPU | `tools/glm53_gpu_check.sh`; logits vs llama.cpp |
 | M3 | Experts: all in RAM (the mapped GGUF), VRAM cache of the most used, CPU for the rest; the warm-up that reads them into the page cache before READY | written, not yet run on a GPU | logits unchanged; tokens/s |
-| M4 | Prompt processing: batched projections, chunked KDA, batched MLA (causal below 2,063 tokens of context, each query's own selection past that), experts streamed through VRAM | written, not yet run on a GPU | prompt tokens/s; logits unchanged |
+| M4 | Prompt processing: batched projections, chunked KDA, batched MLA (causal below 2,051 tokens of context, each query's own selection past that), experts streamed through VRAM | written, not yet run on a GPU | prompt tokens/s; logits unchanged |
 | M5 | Server: Strata's full server (`serve/server.py`: OpenAI, Anthropic and Responses APIs, the web app, MCP, structured output, metrics) on the GLM engine, with GLM's chat template, tool calls (`<arg_key>`/`<arg_value>`) and thinking on or off | ported and reviewed ([GLM53_SERVER_PORT.md](GLM53_SERVER_PORT.md)); tested on the CPU engine (`tools/glm53_server_check.sh`, the Python tests) | Open WebUI and an agent work end to end (step 8) |
 | M6 | Several clients: conversation parking and checkpoints | written, checked on the CPU engine (`tools/glm53_park_check.py`); batching and MTP drafting dropped | speed for 1, 2 and 4 clients |
 | M7 | Remove the Qwen engine and HIP; docs | done: the Qwen engine, HIP and the Qwen docs are removed; the docs describe GLM-5.3-Flash | |
@@ -100,8 +104,8 @@ a state whose tokens are the start of the new prompt. To keep each client's conv
   its reasoning, so it parts from the engine's state there; it restarts from the checkpoint and reads the reply
   and the new message, not the whole conversation. A regenerated reply restarts there too.
 - **Memory.** `--park-mib` (default 8192) caps what parked conversations and checkpoints use; the least recently
-  used conversation goes first. A parked conversation is the KDA layers' state (about 0.15 GB) plus 11 KB per
-  token, so a 100K-token conversation is about 1.3 GB; a checkpoint is about 0.15 GB (calculated). Each copy
+  used conversation goes first. A parked conversation is the KDA layers' state (about 0.15 GB) plus 12.4 KB per
+  token, so a 100K-token conversation is about 1.4 GB; a checkpoint is about 0.15 GB (calculated). Each copy
   crosses PCIe 3.0; how long it takes is not measured yet.
 
 Nothing about the answers changes: `tools/glm53_park_check.py` checks every resumed reply against a fresh
@@ -235,12 +239,13 @@ yet. Run them from the Strata folder.
    In Open WebUI add an OpenAI connection with that key and the address its container reaches the host at:
    `http://172.17.0.1:8101/v1` on Docker's default bridge, or `http://100.126.222.90:8101/v1` over Tailscale
    (which the agents and the Discord bot can use too). `--context` sets the longest conversation, up to 1,048,576
-   tokens for the agents' 512K-1M conversations; each token of it takes 11 KB of VRAM in the MLA cache (1.5 GB at
-   131,072, 11.8 GB at 1M, calculated), which the expert cache gives up. `./setup.sh --setup --context N` changes it
-   later. The engine options are the run config's `"args"`: setup writes `-m`, `--ctx`, `--park-mib` and
-   `--expert-profile` (the use counts, in the data folder `../Strata-GLM-data`), and keeps any other option you add
-   there (`--vram-reserve`, `--max-swaps`, ...) when it runs again. To start with step 7's counts, copy
-   `~/glm53-ref/profile.bin` over `../Strata-GLM-data/glm-ud-iq3_xxs.profile` before the first start.
+   tokens for the agents' 512K-1M conversations; each token of it takes 12.4 KB of VRAM in the MLA cache and the
+   indexer (1.7 GB at 131,072, 13.3 GB at 1M, calculated), which the expert cache gives up.
+   `./setup.sh --setup --context N` changes it later. The engine options are the run config's `"args"`: setup writes
+   `-m`, `--ctx`, `--park-mib` and `--expert-profile` (the use counts, in the data folder `../Strata-GLM-data`), and
+   keeps any other option you add there (`--vram-reserve`, `--max-swaps`, ...) when it runs again. To start with
+   step 7's counts, copy `~/glm53-ref/profile.bin` over `../Strata-GLM-data/glm-ud-iq3_xxs.profile` before the
+   first start.
 
 ## Removed on this branch
 

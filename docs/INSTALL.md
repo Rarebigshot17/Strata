@@ -148,8 +148,8 @@ when it is idle (the profile is written), at its next output line during a reque
   --model {UD-IQ3_XXS,IQ4_XS}
                         UD-IQ3_XXS = 3-bit (~120 GB download, ~109 GiB of experts in RAM), IQ4_XS = 4-bit (~170 GB,
                         ~151 GiB; UD-Q4_K_XL when the repository has no IQ4_XS). Default: the one this PC's RAM fits
-  --context N           the longest conversation in tokens (up to 1048576); each token takes 11 KB of VRAM (1.5 GB at
-                        131072)
+  --context N           the longest conversation in tokens (up to 1048576); each token takes 12.4 KB of VRAM (1.7 GB
+                        at 131072, calculated)
   --park-mib N          RAM in MiB for parked conversations and checkpoints (default 8192, 4096 where little RAM is
                         left beside the experts); saved for this model, also when starting
   --port PORT           the server's port (default 8101); when starting an installed model it is for that start only,
@@ -422,27 +422,27 @@ changed in the file only. A change is used from the next start.
 ## Choosing the context
 
 The context (`--ctx`) is the longest conversation the engine takes: the chat, files and tool output together. Each
-token of it takes 11 KB of VRAM in the attention (MLA) cache: a 512-wide f16 latent in each of the 11 MLA layers. The
-engine reserves it at start, and the expert cache gets the VRAM that is left. Calculated:
+token of it takes 12.4 KB of VRAM in the attention (MLA) cache: a 512-wide f16 latent in each of the 11 MLA layers
+(11 KB) and their indexer's pooled keys, one 128-wide fp32 key per 4 tokens in each layer (1.4 KB). The engine
+reserves it at start, and the expert cache gets the VRAM that is left. Calculated:
 
 | Context | Tokens | Attention cache in VRAM |
 | --- | --- | --- |
 | 32K | 32,768 | 0.4 GB |
-| 128K | 131,072 | 1.5 GB |
-| 256K | 262,144 | 3.0 GB |
-| 512K | 524,288 | 5.9 GB |
-| 1M | 1,048,576 | 11.8 GB (the model's whole context) |
+| 128K | 131,072 | 1.7 GB |
+| 256K | 262,144 | 3.3 GB |
+| 512K | 524,288 | 6.6 GB |
+| 1M | 1,048,576 | 13.3 GB (the model's whole context) |
 
-The indexer's pooled keys add under 0.5 KB per token, and the KDA layers keep a fixed-size state however long the text
-is ([HOW_IT_WORKS.md](HOW_IT_WORKS.md)). Each MLA layer's cache sits on the card that holds the layer. Setup warns
-when the attention cache would take more than half of the chosen cards' VRAM; it keeps your choice. How much a smaller
-expert cache slows the answers is not measured yet.
+The KDA layers keep a fixed-size state however long the text is ([HOW_IT_WORKS.md](HOW_IT_WORKS.md)). Each MLA
+layer's cache sits on the card that holds the layer. Setup warns when the attention cache would take more than half of
+the chosen cards' VRAM; it keeps your choice. How much a smaller expert cache slows the answers is not measured yet.
 
 A long context also costs RAM when a conversation is parked (several clients taking turns,
-[below](#parking-and-several-clients)): about 0.15 GB for the KDA layers' state, plus about 11.6 KB per token (the
-11 KB latent and, at most, 0.35 KB of the indexer's pooled keys). Calculated: about 1.7 GB for a 128K-token
-conversation, about 6.2 GB for 512K, about 12.3 GB for 1M. The KDA figure assumes a short-convolution width of 4,
-which is read from the model's file; it is not checked on the real GGUF yet.
+[below](#parking-and-several-clients)): about 0.15 GB for the KDA layers' state, plus about 12.4 KB per token (the
+11 KB latent and 1.4 KB of the indexer's pooled keys). Calculated: about 1.8 GB for a 128K-token conversation, about
+6.8 GB for 512K, about 13.4 GB for 1M. The KDA figure assumes a short-convolution width of 4, which is read from the
+model's file; it is not checked on the real GGUF yet.
 
 To change the context of an installed model: `./setup.sh --setup --model <size> --context <tokens>`, or edit `--ctx` in
 the config's `args` and restart.
@@ -455,7 +455,7 @@ copies it back, so it reads only the new tokens. `--park-mib` caps that RAM. The
 first; one whose state does not fit at all is not kept, and its next request reads it again from the start. The
 engine's log says so (`conversations: ... more than --park-mib; not kept`).
 
-With the default 8192 MiB, about five 128K-token conversations fit, or one of 512K, and a 1M-token conversation does
+With the default 8192 MiB, about four 128K-token conversations fit, or one of 512K, and a 1M-token conversation does
 not fit (calculated from the sizes above; checkpoints share the same RAM). Raise `--park-mib` when several clients
 work with long conversations, but every MiB it takes is RAM that no longer holds the model's files in the page cache
 beside the experts. Which value works best on a given PC is not measured yet.
@@ -490,7 +490,7 @@ has not been run there yet):
 - **Size:** the 3-bit `UD-IQ3_XXS` is recommended (about 79 GiB of RAM left beside its experts, if `/proc/meminfo`
   says 188 GiB as the tests assume). The 4-bit is tight (about 37 GiB left) and gets `--park-mib 4096`.
 - **Build:** all three cards can run the engine, so setup uses all three and builds for `86` only.
-- **Context:** the three cards have 46 GB of VRAM in all, so setup recommends 128K. 512K takes 5.9 GB and 1M 11.8 GB
+- **Context:** the three cards have 46 GB of VRAM in all, so setup recommends 128K. 512K takes 6.6 GB and 1M 13.3 GB
   of it (calculated); neither is more than half, so setup does not warn.
 - **Port:** 8101. Open WebUI (3000), Portainer (8000) and the UPS dashboard (8080) keep theirs.
 - **Clients:** four agents, a chat and a Discord bot take turns on the one engine. With contexts of 512K-1M tokens,

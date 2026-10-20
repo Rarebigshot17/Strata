@@ -89,15 +89,15 @@ When the repository has no IQ4_XS files, the 4-bit size takes UD-Q4_K_XL instead
 leaves of the RAM.
 
 Ask the user how long their conversations get (chats, files, tool output together), and pick the context from that.
-Each token takes 11 KB of VRAM, which the GPUs' expert cache gives up (calculated):
+Each token takes 12.4 KB of VRAM, which the GPUs' expert cache gives up (calculated):
 
 | `--context` | VRAM for the attention cache |
 | --- | --- |
 | 32768 | 0.4 GB |
-| 131072 | 1.5 GB (setup's default when the GPUs have 16 GB of VRAM or more in all) |
-| 262144 | 3.0 GB |
-| 524288 | 5.9 GB |
-| 1048576 | 11.8 GB (the model's whole context) |
+| 131072 | 1.7 GB (setup's default when the GPUs have 16 GB of VRAM or more in all) |
+| 262144 | 3.3 GB |
+| 524288 | 6.6 GB |
+| 1048576 | 13.3 GB (the model's whole context) |
 
 If several apps or agents will take turns on long conversations, read
 [Parking and several clients](INSTALL.md#parking-and-several-clients) and tell the user about `--park-mib`.

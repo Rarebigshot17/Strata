@@ -817,14 +817,23 @@ class Config(unittest.TestCase):
     def test_context_menu_and_its_vram(self):
         code, out, cfgs, _, _ = install(["--no-start", "--model", "UD-IQ3_XXS"])   # questions: stdin is empty
         self.assertEqual(code, 1)                                                  # EOF stops at the question
-        self.assertIn("1.5 GB of VRAM", out)
-        self.assertIn("11.8 GB of VRAM", out)
+        # per token: the 512-wide f16 latent of 11 MLA layers (11 KB) and their indexers' pooled keys, one 128-wide
+        # fp32 key per 4 tokens (attention.indexer.kpool in the real file) in each: 1.4 KB
+        self.assertEqual(setup.VRAM_BYTES_PER_TOKEN, 11 * 512 * 2 + 11 * 128 * 4 // 4)
+        self.assertIn("takes 12.4 KB of VRAM", out)
+        self.assertIn("1.7 GB of VRAM", out)
+        self.assertIn("13.3 GB of VRAM", out)
         self.assertIn("1M tokens", out)
         self.assertIn("128K tokens", out)
-        self.assertAlmostEqual(setup.mla_gb(131072), 1.48, places=2)
-        self.assertAlmostEqual(setup.mla_gb(1048576), 11.81, places=2)
+        self.assertAlmostEqual(setup.mla_gb(131072), 1.66, places=2)
+        self.assertAlmostEqual(setup.mla_gb(1048576), 13.29, places=2)
         self.assertEqual(setup.recommended_context(46.0), 131072)
         self.assertEqual(setup.recommended_context(12.0), 32768)
+        with mock.patch.object(sys, "argv", ["setup.py", "--help"]), \
+                contextlib.redirect_stdout(io.StringIO()) as helped, self.assertRaises(SystemExit):
+            setup.main()
+        self.assertIn("each token takes 12.4 KB of VRAM (1.7 GB at 131072, calculated)",
+                      " ".join(helped.getvalue().split()))
 
     def test_a_long_context_on_little_vram_is_kept_with_a_warning(self):
         smi = "0, NVIDIA GeForce RTX 3060, 12288, 8.6, 580.95.05\n"

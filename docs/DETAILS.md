@@ -660,12 +660,12 @@ are the start of the new prompt. To keep each client's conversation anyway, the 
   first, then the live one's older checkpoints.
 
 How big these are, calculated from the engine's snapshot code with the model's shapes (not measured): a parked
-conversation is about 0.15 GB of KDA state plus about 11 KB per token (the MLA cache's 512-wide f16 latent in 11
-layers, and the indexer's pooled keys); a checkpoint is about 0.15 GB. So `--park-mib 8192` holds one conversation of
-up to roughly 700,000 tokens, or several shorter ones. A conversation that does not fit is not parked (the engine log
-says `... more than --park-mib; not kept`): when another client takes a turn, it is lost with its checkpoints, and
-its next request reads its prompt again from the start. A 1,048,576-token conversation needs `--park-mib` of about
-12,000 or more to be parked, and that RAM must be free beside the experts.
+conversation is about 0.15 GB of KDA state plus about 12.4 KB per token (the MLA cache's 512-wide f16 latent in 11
+layers, 11 KB, and the indexer's pooled keys, 1.4 KB); a checkpoint is about 0.15 GB. So `--park-mib 8192` holds one
+conversation of up to roughly 660,000 tokens, or several shorter ones. A conversation that does not fit is not parked
+(the engine log says `... more than --park-mib; not kept`): when another client takes a turn, it is lost with its
+checkpoints, and its next request reads its prompt again from the start. A 1,048,576-token conversation needs
+`--park-mib` of about 13,000 or more to be parked, and that RAM must be free beside the experts.
 
 On the CPU reference engine this does not change the answers: `tools/glm53_park_check.py` checks each resumed reply
 against a fresh engine's, token for token (with small random models). On the GPU engine, chunked prompts and the
@@ -831,8 +831,8 @@ Strata has had no outside security audit.
 - **One request at a time.** The others wait in arrival order ([above](#several-clients-on-one-engine)).
 - **Context.** The engine's `--ctx` in the run config (setup offers 32,768 to 1,048,576 tokens; 1,048,576 is
   GLM-5.3-Flash's trained context). A prompt plus its output cap must fit, less 8 tokens; requests are never cut. Each
-  token of context takes about 11 KB of VRAM in the MLA cache (calculated: 1.5 GB at 131,072 tokens, 5.9 GB at
-  524,288, 11.8 GB at 1,048,576), which the expert cache gives up.
+  token of context takes about 12.4 KB of VRAM in the MLA cache and the indexer's pooled keys (calculated: 1.7 GB at
+  131,072 tokens, 6.6 GB at 524,288, 13.3 GB at 1,048,576), which the expert cache gives up.
 - **Text only.** No pictures.
 - **No slot save or restore** (`POST /slots/...` is a 501), no batching, no stored responses.
 - **Body size.** 256 MiB per request by default ([Security](#security)).
