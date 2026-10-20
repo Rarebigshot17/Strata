@@ -4,9 +4,9 @@
 //              [--split 24,12,10] [--threads N] [--check-cpu] [--max-tokens N]
 //              [--vram-reserve GB] [--expert-profile PATH] [--max-swaps N] [--no-expert-cache]
 //
-// --out writes the --dump-logits layout (tools/glm53_compare.py). --check-cpu also runs the CPU reference on the
-// same tokens and compares, per position, the residual streams after every layer and the logits: the first layer
-// where they part is where a kernel is wrong.
+// --out writes the --dump-logits layout (tools/glm53_compare.py); with --prefill it holds one row, the logits after
+// the prompt. --check-cpu also runs the CPU reference on the same tokens and compares, per position, the residual
+// streams after every layer and the logits: the first layer where they part is where a kernel is wrong.
 #include "strata/glm/cpu_ref.hpp"
 #include "strata/glm/engine.hpp"
 #include "strata/glm/serve_loop.hpp"
@@ -188,7 +188,8 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "cannot write %s\n", out_path.c_str());
                 return 1;
             }
-            const int32_t hdr[2] = {(int32_t) c.n_vocab, (int32_t) ids.size()};
+            // the prompt path gives the logits of its last token only: one row
+            const int32_t hdr[2] = {(int32_t) c.n_vocab, use_prefill ? 1 : (int32_t) ids.size()};
             std::fwrite(hdr, sizeof hdr, 1, out);
         }
 
@@ -199,14 +200,11 @@ int main(int argc, char** argv) {
             std::vector<float> lg = eng.prefill(ids.data(), (int64_t) ids.size());
             const double s_pp = std::chrono::duration<double>(std::chrono::steady_clock::now() - a).count();
             std::printf("prefill: %zu tokens in %.2f s (%.1f tokens/s)\n", ids.size(), s_pp, (double) ids.size() / s_pp);
+            if (out) {
+                std::fwrite(lg.data(), sizeof(float), lg.size(), out);
+                std::fclose(out);
+            }
             if (!check_cpu) {
-                if (out_path.size()) {
-                    FILE* f = std::fopen(out_path.c_str(), "wb");
-                    const int32_t hdr[2] = {(int32_t) c.n_vocab, 1};
-                    std::fwrite(hdr, sizeof hdr, 1, f);
-                    std::fwrite(lg.data(), sizeof(float), lg.size(), f);
-                    std::fclose(f);
-                }
                 eng.save_profile();
                 return 0;
             }
