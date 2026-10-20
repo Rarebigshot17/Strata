@@ -493,8 +493,8 @@ class LargeBodies(Http):
                 slots.release()
         self.assertEqual(self.post(big)[0], 200)                # with a slot free it is served
         self.assertEqual(self.post(big, chunked=True)[0], 200)
-        for _ in range(held):                                   # and gave its slot back
-            self.assertTrue(slots.acquire(blocking=False))
+        for _ in range(held):                                   # and gave its slot back: do_POST releases it after
+            self.assertTrue(slots.acquire(timeout=10))          # the answer is sent, so it can come a moment later
         self.assertFalse(slots.acquire(blocking=False))
 
     def test_one_huge_chunk_is_not_held_either(self):
