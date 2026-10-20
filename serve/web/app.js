@@ -736,30 +736,49 @@ function apiMessages() {
   }
   return out;
 }
-// An answer that used MCP tools goes back as the model wrote it: per round the text before the calls, the calls and
-// their results (as the model read them), then the rest - so the next question can build on what the tools found.
+// An answer goes back with its thinking (reasoning_content) as it streamed in: GLM-5.3-Flash's template keeps the
+// thinking of earlier turns, so the next turn's prompt starts with this turn's prompt and the reply as the model wrote
+// it, and the engine goes on from the end of the reply instead of reading it again from the last checkpoint.
+// An answer that used MCP tools goes back as the model wrote it: per round the thinking and the text before the calls,
+// the calls and their results (as the model read them), then the rest - so the next question can build on what the
+// tools found.
+const ROUND_GAP = "\n\n";      // send() puts it before a later round's thinking, for the eye: it is not the model's
 function assistantMessages(m) {
   const ran = (m.tools || []).filter((t) => t.round != null && t.result != null && t.state !== "skipped");
+  const thinking = m.reasoning || "";
   // #1392: a turn with no answer text (only reasoning, a stop before the first content token, or an error) still goes
   // back as an assistant turn, so the history keeps alternating and a reasoning model sees that it already answered.
-  // The server leaves such a turn out of the prompt itself (serve/frontend.py, #843); reasoning_content rides along.
+  // The server leaves such a turn out of the prompt itself (serve/frontend.py, #843).
   if (!ran.length) {
     const msg = {role: "assistant", content: m.text || ""};
-    if (!m.text && m.reasoning) msg.reasoning_content = m.reasoning;
+    if (thinking) msg.reasoning_content = thinking;
     return [msg];
   }
   const out = [];
-  let pos = 0;
+  let pos = 0, rpos = 0;
   for (const r of [...new Set(ran.map((t) => t.round))]) {
     const calls = ran.filter((t) => t.round === r);
     const at = Math.min(Math.max(pos, calls[0].at || 0), m.text.length);
-    out.push({role: "assistant", content: m.text.slice(pos, at).trim(),
-              tool_calls: calls.map((t) => ({id: t.id, type: "function", function: {name: t.name, arguments: JSON.stringify(t.arguments || {})}}))});
+    const rat = Math.min(Math.max(rpos, calls[0].rat || 0), thinking.length);
+    const msg = {role: "assistant", content: m.text.slice(pos, at).trim(),
+                 tool_calls: calls.map((t) => ({id: t.id, type: "function", function: {name: t.name, arguments: JSON.stringify(t.arguments || {})}}))};
+    // the round's thinking as the server wrote it into the next round's prompt: trimmed (server.py, run_with_mcp)
+    const thought = thinking.slice(rpos, rat).trim();
+    if (thought) msg.reasoning_content = thought;
+    out.push(msg);
     for (const t of calls) out.push({role: "tool", tool_call_id: t.id, content: t.result});
     pos = at;
+    // the next round's thinking starts after the gap send() put there, when the round's last call came after all
+    // of this round's thinking
+    const last = calls[calls.length - 1];
+    rpos = rat + (rat > 0 && last.rat === rat && thinking.startsWith(ROUND_GAP, rat) ? ROUND_GAP.length : 0);
   }
   const rest = m.text.slice(pos).trim();
-  if (rest) out.push({role: "assistant", content: rest});
+  if (rest) {
+    const msg = {role: "assistant", content: rest};
+    if (thinking.length > rpos) msg.reasoning_content = thinking.slice(rpos);   // the last round's, as written
+    out.push(msg);
+  }
   return out;
 }
 
@@ -822,7 +841,7 @@ async function send() {
         if (d.reasoning_content) {
           if (!firstAt) firstAt = performance.now();
           if (!thinkStart) thinkStart = performance.now();
-          if (lastTool && m.reasoning && lastTool.rat === m.reasoning.length) m.reasoning += "\n\n";
+          if (lastTool && m.reasoning && lastTool.rat === m.reasoning.length) m.reasoning += ROUND_GAP;
           m.reasoning += d.reasoning_content;
         }
         if (d.content) {
