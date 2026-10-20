@@ -169,12 +169,15 @@ Every word a request sends lands on a level, or turns thinking off. Any other wo
 
 - **Thinking off.** The template always ends the prompt with `<|assistant|><think>`, which opens the thinking. When
   a request turns thinking off, the server closes it: the prompt ends `<|assistant|><think></think>`, the way the
-  template writes an earlier turn without thinking, and the model answers at once. The level line says Max, the
-  template's default. A forced call (`tool_choice`) starts right after the `</think>`. A template of your own
+  template writes an earlier turn without thinking, and the model answers at once. The level line says the level the
+  shared settings name, else the one the run config's `"reasoning_effort"` names (`none` names no level), else Max,
+  the template's default. A forced call (`tool_choice`) starts right after the `</think>`. A template of your own
   (`"chat_template"`) that has an `enable_thinking` switch, as GLM-4.7-Flash's has, is used as it renders.
 - **Another level reads the conversation again.** The level is the prompt's first turn, so a request at another
-  level than the one before shares no cached prefix with it: the engine reads the whole conversation again. Thinking
-  off and Max share it, since both write Max.
+  level than the one before shares no cached prefix with it: the engine reads the whole conversation again. A turn
+  with thinking off writes the settings' level (above), so it shares the prefix with turns at that level. A level
+  that a request sends itself counts for that request only. The next request does not carry it: the chat page's
+  Off after High writes the settings' level, or Max. Unless that is High too, the conversation is read again.
 - A request that says nothing gets the shared settings' level, then the run config's `"reasoning_effort"`, then the
   template's default (Max). An Anthropic request that says nothing thinks too, unless the run config has
   `"anthropic_thinking": "on_request"` (Anthropic's own rule: thinking only when asked). The shared settings and the

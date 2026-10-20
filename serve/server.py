@@ -1920,6 +1920,20 @@ class Service:
                     req["output_config"] = {"effort": effort}
         return req
 
+    def level_when_off(self, kw: dict) -> dict:
+        """A request's template kwargs; when they turn thinking off, with the level the Chat settings or the run config
+        name (in that order; "none" names no level).  The template writes the level as the prompt's first line, Max when
+        it gets none, so a conversation at Low or High that turned thinking off for a turn changed its first line, and
+        the engine read the whole conversation again.  A level the request itself gave is not known to the next one:
+        thinking off after it gets the settings' level, or Max."""
+        if kw.get("enable_thinking") is not False or kw.get("reasoning_effort"):
+            return kw
+        for effort in (self.shared.get("reasoning_effort"), self.config_effort):
+            level = effort_kwargs(effort).get("reasoning_effort") if effort else None
+            if level:
+                return {**kw, "reasoning_effort": level}
+        return kw
+
     def start_telemetry(self):
         """The hardware sampler behind GET /metrics (serve/telemetry.py), recording this server's tok/s too, on the
         cards the engine runs on (vram_cards: every card when the config names none)."""
@@ -3982,6 +3996,7 @@ def make_handler(svc: Service):
             req = svc.with_shared(req, "openai")
             bias_api.normalize(req.get("logit_bias"), len(getattr(svc.tok, "tokens", ())) or None)
             messages, tools, kw = openai_to_messages(req)
+            kw = svc.level_when_off(kw)                      # thinking off keeps the settings' first line
             refuse_images(messages)                          # a 400 before the model is loaded for it
             if tool_choice_of(req.get("tool_choice"))[0] == "none":   # as the Responses route: no tools are offered
                 tools = None
@@ -4228,8 +4243,8 @@ def make_handler(svc: Service):
             messages = responses_api.input_messages(req)
             tools, names, skipped = responses_api.request_tools(req)
             # the Chat settings' thinking level, then the config's, as with_shared gives the other routes
-            kw = responses_api.template_kwargs(req, {**svc.shared, "reasoning_effort":
-                                                     svc.shared.get("reasoning_effort") or svc.config_effort})
+            kw = svc.level_when_off(responses_api.template_kwargs(req, {
+                **svc.shared, "reasoning_effort": svc.shared.get("reasoning_effort") or svc.config_effort}))
             try:
                 refuse_images(messages)                      # as on the chat route
             except ValueError as e:
@@ -4309,6 +4324,7 @@ def make_handler(svc: Service):
             req = anthropic_budget(svc.with_shared(req, "anthropic"))   # the same 400 for a bad budget_tokens
             svc.reasoning_budget(req)                         # ... or reasoning_budget_tokens
             messages, tools, kw = anthropic_to_messages(req, svc.anthropic_think_unasked)
+            kw = svc.level_when_off(kw)
             stop_strings(req)                                 # the same 400 as the request itself would get
             check_request_sampling(req)                       # ... likewise a sampling field of the wrong type
             bias_api.normalize(req.get("logit_bias"), len(getattr(svc.tok, "tokens", ())) or None)   # ... and a bias
@@ -4317,6 +4333,7 @@ def make_handler(svc: Service):
         def _anthropic(self, req):
             req = anthropic_budget(svc.with_shared(req, "anthropic"))   # thinking.budget_tokens caps the thinking
             messages, tools, kw = anthropic_to_messages(req, svc.anthropic_think_unasked)
+            kw = svc.level_when_off(kw)                      # thinking off keeps the settings' first line
             refuse_images(messages)
             if tool_choice_of(req.get("tool_choice"))[0] == "none":   # Anthropic's {"type": "none"}: no tools offered
                 tools = None

@@ -8,7 +8,8 @@ llama.cpp's `test-llama-archs -a glm5-next` writes a random 2-layer model whose 
     tokens (`[gMASK]`, `<sop>`, `<|system|>`, `<|user|>`, `<|assistant|>`, `<|observation|>`, `<|endoftext|>` as
     control tokens; `<think>`, `<tool_call>`, `<arg_key>`, ... as user-defined ones), with `pre` = glm5 so
     llama.cpp tokenizes it the way it tokenizes GLM-5
-  * the chat template from TEMPLATE (llama.cpp's models/templates/GLM-4.7-Flash.jinja is GLM's format)
+  * the chat template from TEMPLATE (serve/chat_template.jinja is GLM-5.3-Flash's own, the one
+    tools/glm53_server_check.sh uses)
   * token_embd and output resized to the new vocabulary, random
 
     python tools/glm53_synth_model.py IN.gguf TEMPLATE.jinja OUT.gguf [--merges 80]
