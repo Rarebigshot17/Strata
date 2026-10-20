@@ -154,6 +154,23 @@ from what the plan took in these:
   them: they are IQ2_S (gate and up) and IQ3_S (down), with IQ4_XS and Q3_K too. The GPU kernels take each. Their
   size in RAM is the inspector's section 5 figure, which is not on this page yet.
 
+### Checking against llama.cpp
+
+The indexer's precision differs. Strata keeps the indexer's keys, gates and pooled keys in fp32, in the CPU reference
+and in the GPU engine. llama.cpp keeps them in its KV cache type, f16 by default (`-ctk`). When two pools score nearly
+the same, the two engines can then select different pools. With llama.cpp's default cache the selftest failed that way
+on 5 of seeds 1-100, v1, v2 and v1-bare together (mean KL 4e-5 to 1.5e-4), and on 2 more a Q4_0 near tie failed it
+(CPU builds of both on an x86 machine with AVX-512, not napster-ai, 2026-10-20). So the selftest and the GPU check run
+llama.cpp's reference on the CPU with `-ctk f32 -ctv f32`. That keeps llama.cpp's MLA latent in f32 too, where Strata
+rounds it to f16 as llama.cpp's default cache does. On the same seeds no selection then differs, and the logits differ
+by at most 0.00025 (mean KL 4e-10) on the unquantized models and 0.0042 (mean KL 2.3e-7) on Q4_0. Two top tokens swap
+places in 27 of the 100 runs, 25 of them Q4_0's, always within 0.0017 of each other on both sides; `glm53_compare.py`
+counts such a row as a tie. With both changes the selftest passed all 100 seeds.
+
+Step 7 should see no selection difference: up to 2,051 tokens of context the indexer selects every pool, so the
+precision of its keys cannot change what is selected, and step 6's prompt is far shorter (801 bytes of text, so at
+most about 800 tokens). Step 6 runs llama.cpp with its default f16 cache, which keeps the latent as Strata does.
+
 ## What to run on napster-ai
 
 Each step prints a few lines to paste back. Steps 1-4 need no model download. Steps 0-4 and step 5's inspector first
@@ -195,7 +212,10 @@ ran on napster-ai on 2026-10-20; steps 6-8 have not run yet. Run them from the S
    ```
 
 3. **CPU reference vs llama.cpp** on small random models (paste the five PASS/FAIL lines). It needs no GPU: the
-   script hides the GPUs from llama.cpp's CUDA build, so it runs while another program fills them:
+   script hides the GPUs from llama.cpp's CUDA build, so it runs while another program fills them. llama.cpp runs
+   with an f32 cache ("Checking against llama.cpp"). A line that ends in `(100.00% with 1 tie)` passed: two tokens
+   as likely as each other swapped places. Each run makes new random models; the first line gives the seed, and
+   `SEED=N` before the command runs the same models again:
 
    ```bash
    PYTHONPATH=~/llama.cpp/gguf-py tools/glm53_selftest.sh ~/llama.cpp/build build
@@ -203,7 +223,9 @@ ran on napster-ai on 2026-10-20; steps 6-8 have not run yet. Run them from the S
 
 4. **GPU engine vs the CPU reference and llama.cpp** on the same small models, then conversation parking with the
    layers split over all three cards (paste the whole output). It needs the GPUs free: stop any other program that
-   holds them first (`nvidia-smi` lists them). On napster-ai that is the Qwen service, started again afterwards:
+   holds them first (`nvidia-smi` lists them). On napster-ai that is the Qwen service, started again afterwards.
+   llama.cpp's reference runs on the CPU here too, with step 3's f32 cache: on CUDA, flash attention converts an f32
+   cache to f16, and that path has not been checked:
 
    ```bash
    sudo systemctl stop strata-iq3s.service
@@ -248,6 +270,11 @@ ran on napster-ai on 2026-10-20; steps 6-8 have not run yet. Run them from the S
        --out ~/glm53-ref/strata.bin
    python tools/glm53_compare.py ~/glm53-ref/ref.bin ~/glm53-ref/strata.bin
    ```
+
+   It passes at a mean KL up to 0.01 and 98% top-1 agreement. A row where the engines pick different tokens, but
+   each has the other's within 0.01 of its own, counts as a tie, not a disagreement. The prompt is far below 2,051
+   tokens, up to which the indexer selects every pool, so the indexer's precision makes no difference here
+   ("Checking against llama.cpp").
 
    This compares one token at a time. The VRAM expert cache starts empty and fills from what the prompt uses, so
    the first run is the slowest; `--expert-profile ~/glm53-ref/profile.bin` saves the use counts for the next
