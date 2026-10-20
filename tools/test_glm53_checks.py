@@ -27,9 +27,12 @@ except ImportError:
 # top two tokens 0.0005 apart, in the other order in llama.cpp's (argument "ref"): a tie glm53_compare.py accepts.
 # FAKE_SPREAD=1 gives the rows the scale of the GPU check's small models (the largest logit 0.32) and the engines
 # other than llama.cpp the CUDA rounding measured on Q4_0 (napster-ai, 2026-10-20): the worst row off by 3.23% of its
-# largest logit, and three rows of 40 whose top two tokens, 0.012 apart (more than the tie margin), swap places
+# largest logit, and three rows of 40 whose top two tokens, 0.012 apart (more than the tie margin), swap places.
+# FAKE_SPREAD=kl gives them, at the same scale, every logit 4% of the row's largest up or down instead: within the
+# relative limit of quantized weights, but a mean KL far above the rounding's, as a wrong scale or a dropped term gives
 WRITE_LOGITS = """import os, struct, sys
 spread = os.environ.get("FAKE_SPREAD") == "1"
+bug = os.environ.get("FAKE_SPREAD") == "kl"
 ref = sys.argv[2:] == ["ref"]
 with open(sys.argv[1], "wb") as f:
     f.write(struct.pack("<ii", 8, 40))
@@ -49,6 +52,11 @@ with open(sys.argv[1], "wb") as f:
                     row[b] += 0.0075
             if r == 11 and not ref:
                 row[row.index(min(row))] += 0.0323 * hi
+        if bug:
+            row = [0.032 * v for v in row]
+            if not ref:
+                hi = max(row)
+                row = [v + (0.04 if i % 2 else -0.04) * hi for i, v in enumerate(row)]
         f.write(struct.pack("<8f", *row))
 """
 
@@ -235,6 +243,18 @@ class Checks(unittest.TestCase):
         for m in ("glm5-next-moe", "v1", "v1-bare"):
             self.assertIn("FAIL", lines[m])
             self.assertIn("worst relative diff <= 0.005", lines[m])
+        self.assertNotEqual(rc, 0)
+        self.assertNotIn("Traceback", out)
+
+    def test_gpu_check_fails_a_kl_far_above_the_cuda_rounding(self):
+        # the relative diff of a wrong scale or a dropped term can stay within the quantized weights' 0.05; the mean
+        # KL limit (1e-5, glm53_compare.py's default is 0.01) is what catches it
+        rc, out = self.run_script("glm53_gpu_check.sh", FAKE_SMI="0, 23900\\n", FAKE_SPREAD="kl")
+        lines = self.vs_llama(out)
+        self.assertEqual(sorted(lines), sorted(GPU_MODELS), out)
+        for m in ("q4_0", "q8_0"):
+            self.assertIn("worst relative diff 0.04 ", lines[m])
+            self.assertIn("FAIL (needs mean KL <= 1e-05 and worst relative diff <= 0.05)", lines[m])
         self.assertNotEqual(rc, 0)
         self.assertNotIn("Traceback", out)
 
