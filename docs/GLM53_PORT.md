@@ -44,14 +44,14 @@ below are calculated, not measured.
 | Option | Expert quant | Experts in RAM | RAM left beside them on 192 GB (188 GiB reported) |
 |---|---|---|---|
 | 3-bit | UD-IQ3_XXS (IQ3_XXS: 3.06 bits) | about 117 GB (109 GiB) | about 79 GiB |
-| 4-bit | IQ4_XS (4.25 bits); UD-Q4_K_XL when the repository has no IQ4_XS | about 162 GB (151 GiB) | about 37 GiB |
+| 4-bit | UD-IQ4_XS (IQ4_XS: 4.25 bits); UD-Q4_K_XL when the repository has no UD-IQ4_XS | about 162 GB (151 GiB) | about 37 GiB |
 
 `setup.py` uses the same figures (its `MODELS` table, in GB) and prints what is left beside the experts in GiB,
 taken from the RAM Linux reports (`/proc/meminfo`), which is a few GiB under the installed 192 GB: setup's tests
 take 188 GiB. With less than 40 GiB left it calls a size tight and gives parked conversations 4096 MiB instead of
 8192 (`--park-mib`); below 12 GiB it asks before it installs. With 192 GB it therefore recommends the 3-bit model,
 and keeps the 4-bit one when you choose it. For UD-Q4_K_XL setup takes the experts as the same share of its files as
-for IQ4_XS. The 3-bit row takes IQ3_XXS for every expert; the real 3-bit file's experts are IQ2_S, IQ3_S, IQ4_XS and
+for UD-IQ4_XS. The 3-bit row takes IQ3_XXS for every expert; the real 3-bit file's experts are IQ2_S, IQ3_S, IQ4_XS and
 Q3_K ("The real file" below), and the inspector's section 5 gives their size.
 
 For now napster-ai has 91 GiB of RAM (at the first run, 2026-10-20); more is planned. With setup's figures neither
@@ -220,8 +220,8 @@ ran on napster-ai on 2026-10-20; steps 6-8 have not run yet. Run them from the S
    python -c "from huggingface_hub import list_repo_files as l; print('\n'.join(f for f in l('unsloth/GLM-5.3-Flash-GGUF') if f.endswith('.gguf')))"
    # 3-bit, about 120 GB (calculated):
    hf download unsloth/GLM-5.3-Flash-GGUF --include "*UD-IQ3_XXS*" --local-dir ~/models/glm53
-   # or 4-bit, about 170 GB (calculated): the IQ4_XS shards (or the UD-Q4_K_XL ones, whichever the list shows)
-   hf download unsloth/GLM-5.3-Flash-GGUF --include "*IQ4_XS*" --local-dir ~/models/glm53-q4
+   # or 4-bit, about 170 GB (calculated): the UD-IQ4_XS shards (the repository has no plain IQ4_XS)
+   hf download unsloth/GLM-5.3-Flash-GGUF --include "*UD-IQ4_XS*" --local-dir ~/models/glm53-q4
    python tools/glm53_inspect.py ~/models/glm53/<first .gguf shard>
    ```
 
@@ -266,13 +266,13 @@ ran on napster-ai on 2026-10-20; steps 6-8 have not run yet. Run them from the S
    ./run-glm-ud-iq3_xxs.sh
    ```
 
-   For the 4-bit model: `--model IQ4_XS --gguf-dir ~/models/glm53-q4`, and the script is `run-glm-iq4_xs.sh`. The
-   run script runs `serve/server.py --engine strata --config strata-glm-ud-iq3_xxs.json --port 8101` with the
-   `.venv` Python; later, `./setup.sh` alone starts it too. The engine's output goes to `strata-glm-ud-iq3_xxs.log`
-   in the Strata folder, the server's to the window. The server says `ready: http://127.0.0.1:8101/v1 ...` once the
-   engine has read the experts (`warming the experts: ...` lines meanwhile). Paste the window's lines from
-   `starting the engine` to `ready`, the output of `curl -s http://127.0.0.1:8101/health`, and the `done:` line of a
-   first request:
+   For the 4-bit model: `--model UD-IQ4_XS --gguf-dir ~/models/glm53-q4`, and the script is
+   `run-glm-ud-iq4_xs.sh`. The run script runs `serve/server.py --engine strata --config strata-glm-ud-iq3_xxs.json
+   --port 8101` with the `.venv` Python; later, `./setup.sh` alone starts it too. The engine's output goes to
+   `strata-glm-ud-iq3_xxs.log` in the Strata folder, the server's to the window. The server says
+   `ready: http://127.0.0.1:8101/v1 ...` once the engine has read the experts (`warming the experts: ...` lines
+   meanwhile). Paste the window's lines from `starting the engine` to `ready`, the output of
+   `curl -s http://127.0.0.1:8101/health`, and the `done:` line of a first request:
 
    ```bash
    curl -s http://127.0.0.1:8101/v1/chat/completions -H "Authorization: Bearer $KEY" \

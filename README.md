@@ -76,9 +76,9 @@ every step that is already done:
 5. **Downloads the model.** A stopped download resumes where it stopped. Each file's size and SHA-256 are checked
    against the repository's listing. The files go to `Strata-GLM-data/models` next to the Strata folder
    (`--data-dir` puts them elsewhere; `--gguf-dir` uses files you already have).
-6. **Writes** the run config (`strata-glm-ud-iq3_xxs.json` or `strata-glm-iq4_xs.json`) and a start script
-   (`run-glm-ud-iq3_xxs.sh` or `run-glm-iq4_xs.sh`), and starts the model on port **8101**. Your browser opens the
-   web app when the model is ready.
+6. **Writes** the run config (`strata-glm-ud-iq3_xxs.json` or `strata-glm-ud-iq4_xs.json`) and a start script
+   (`run-glm-ud-iq3_xxs.sh` or `run-glm-ud-iq4_xs.sh`), and starts the model on port **8101**. Your browser opens
+   the web app when the model is ready.
 
 **How long this takes is not measured yet.** The download depends on your connection: at 100 MB/s, 120 GB takes
 about 20 minutes (calculated). Before the server says it is ready, the engine reads every expert into RAM once (the
@@ -101,11 +101,11 @@ The 4-bit size is closer to the full model. How much better its answers are is n
 | Size | Setup's name | Download | Experts in RAM |
 | --- | --- | ---: | ---: |
 | **3-bit** | `UD-IQ3_XXS` | about 120 GB | about 117 GB (109 GiB) |
-| **4-bit** | `IQ4_XS` (`UD-Q4_K_XL` when the repository has no IQ4_XS) | about 170 GB | about 162 GB (151 GiB) |
+| **4-bit** | `UD-IQ4_XS` (`UD-Q4_K_XL` when the repository has no UD-IQ4_XS) | about 170 GB | about 162 GB (151 GiB) |
 
 These sizes are setup's own figures, calculated from the model's shapes (about 305 billion expert parameters at
 3.06 or 4.25 bits each), not measured. Setup reads the real file sizes from the repository before it downloads.
-When it takes `UD-Q4_K_XL` instead of `IQ4_XS`, it works out that file's share of experts from its real size and
+When it takes `UD-Q4_K_XL` instead of `UD-IQ4_XS`, it works out that file's share of experts from its real size and
 says what that leaves.
 
 What is left beside the experts holds Linux, the server, your other programs and the parked conversations

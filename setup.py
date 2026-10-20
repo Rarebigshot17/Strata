@@ -16,7 +16,7 @@ What the first run does (each step is skipped when it is already done):
   5. downloads the model's GGUF files (resumable; sizes and SHA-256 checked)
   6. writes strata-glm-<size>.json and run-glm-<size>.sh and starts the model
 
-Options: --model UD-IQ3_XXS|IQ4_XS, --context 131072, --port 8101, --yes (recommended answers, no questions),
+Options: --model UD-IQ3_XXS|UD-IQ4_XS, --context 131072, --port 8101, --yes (recommended answers, no questions),
 --setup (set up the other size / change settings instead of starting), --no-start, --no-browser, --host 0.0.0.0
 --api-key KEY (reach it from other devices on your network), --gpu N / --gpus 0,2, --park-mib N, --data-dir DIR,
 --models-dir DIR, --gguf-dir DIR (use GGUF files you already have), --build (compile the engine again), --check
@@ -66,13 +66,16 @@ BUILD_DIR = ROOT / "build"
 
 # The two sizes, by the quantization of their routed experts (docs/GLM53_PORT.md, "Memory on napster-ai").  Every
 # expert stays in RAM; the GPUs cache the most used ones.  "fallback": the files taken when the repository has none
-# of the size's own quantization.  The sizes are decimal GB (10^9 bytes), as the Hub and the disks count them; the
-# RAM is counted in GiB (2^30 bytes), as Linux reports it, so the experts are compared with it in GiB (experts_gib).
+# of the size's own quantization.  "was": a name the size had before, still taken wherever it can come from (--model,
+# an earlier install's config, start script and model folder): the 4-bit size was IQ4_XS until the repository's
+# listing showed its files are UD-IQ4_XS, with no plain IQ4_XS.  The sizes are decimal GB (10^9 bytes), as the Hub
+# and the disks count them; the RAM is counted in GiB (2^30 bytes), as Linux reports it, so the experts are compared
+# with it in GiB (experts_gib).
 MODELS = {
     "UD-IQ3_XXS": {"bits": "3-bit", "about": "the recommended size for a PC with about 192 GB of RAM",
                    "download_gb": 120, "experts_gb": 117},
-    "IQ4_XS": {"bits": "4-bit", "about": "better answers, but its experts need about 42 GiB more RAM",
-               "download_gb": 170, "experts_gb": 162, "fallback": ("UD-Q4_K_XL",)},
+    "UD-IQ4_XS": {"bits": "4-bit", "about": "better answers, but its experts need about 42 GiB more RAM",
+                  "download_gb": 170, "experts_gb": 162, "fallback": ("UD-Q4_K_XL",), "was": ("IQ4_XS",)},
 }
 GIB = 2**30
 RAM_LEFT_GIB = 40        # RAM beside the experts from which a size fits well: Linux, the server, parked conversations
@@ -335,6 +338,17 @@ def free_gb(path):
 
 
 # ------------------------------------------------------------------------------------------------ the model's size
+def size_names(model: str) -> tuple:
+    """A size's own name, then the names it had before ("was")."""
+    return (model, *MODELS[model].get("was", ()))
+
+
+def size_name(name) -> str | None:
+    """The size a name stands for: a size of MODELS, or a name one had before (IQ4_XS: the 4-bit UD-IQ4_XS); None
+    for any other name."""
+    return next((m for m in MODELS if name in size_names(m)), None)
+
+
 def experts_gib(model: str) -> float:
     """The size's experts in GiB, the unit of the RAM: 109 at 3-bit, 151 at 4-bit."""
     return MODELS[model]["experts_gb"] * 1e9 / GIB
@@ -470,7 +484,7 @@ def shard_sets(files: list[dict], quant: str) -> list[list[dict]]:
 
 def pick_shards(files: list[dict], model: str):
     """(the quantization, its shards) setup downloads for a size: the size's own files, else its fallback's (the 4-bit:
-    UD-Q4_K_XL when the repository has no IQ4_XS).  None when the listing has neither."""
+    UD-Q4_K_XL when the repository has no UD-IQ4_XS).  None when the listing has neither."""
     for quant in (model, *MODELS[model].get("fallback", ())):
         sets = shard_sets(files, quant)
         if sets:
@@ -484,6 +498,27 @@ def pick_shards(files: list[dict], model: str):
 def model_tag(name: str) -> str:
     """The name of a size's config, start script and expert profile, and of a quantization's model folder."""
     return "glm-" + name.lower()
+
+
+def local_quants(model: str) -> tuple:
+    """The quantizations a size's files already on this PC can have, in the order they are taken: its own, the names
+    it had before (plain IQ4_XS files an older setup downloaded into models/glm-iq4_xs, or one given to --gguf-dir),
+    then its fallback's."""
+    return (*size_names(model), *MODELS[model].get("fallback", ()))
+
+
+def config_tag(model: str, given: str | None = None, folder: Path | None = None) -> str:
+    """The tag of a size's run config, start script, log and expert profile (strata-<tag>.json, run-<tag>.sh, ...):
+    the one its config already has in this Strata folder - an install made as IQ4_XS keeps strata-glm-iq4_xs.json
+    and run-glm-iq4_xs.sh, so what starts it by those names still does - else the one of the name it was given
+    (--model IQ4_XS, the Docker image's MODEL, an earlier install's config), else the size's own."""
+    folder = ROOT if folder is None else folder
+    first = model_tag(given or model)
+    for tag in dict.fromkeys([first, *(model_tag(n) for n in size_names(model))]):
+        cfg = folder / f"strata-{tag}.json"
+        if cfg.exists() or cfg.is_symlink():          # a link whose file is not there yet: written through (#1244)
+            return tag
+    return first
 
 
 # ------------------------------------------------------------------------------------------------ downloads
@@ -628,7 +663,7 @@ def finished_model(folder: Path) -> list[Path] | None:
 def find_model(model: str, bases: list[Path]):
     """A size already downloaded into one of these models folders (this data folder's, or one on another drive):
     (its quantization, its shards), else None."""
-    for quant in (model, *MODELS[model].get("fallback", ())):
+    for quant in local_quants(model):
         for base in dict.fromkeys(bases):
             got = finished_model(base / model_tag(quant))
             if got:
@@ -638,9 +673,9 @@ def find_model(model: str, bases: list[Path]):
 
 def gguf_dir_model(folder: Path, model: str):
     """--gguf-dir: (the quantization, its shards) of GGUF files already on this PC - the first shard under the folder
-    (in sub-folders too, as `hf download --local-dir` leaves them) whose path names the size's quantization or its
-    fallback.  check_shards says later when a shard is missing or short."""
-    for quant in (model, *MODELS[model].get("fallback", ())):
+    (in sub-folders too, as `hf download --local-dir` leaves them) whose path names the size's quantization, a name it
+    had before or its fallback's.  check_shards says later when a shard is missing or short."""
+    for quant in local_quants(model):
         firsts = sorted(p for p in folder.rglob("*.gguf")
                         if not p.name.lower().startswith("mmproj") and quant_in(p.relative_to(folder).as_posix(), quant)
                         and (SHARD_NAME.search(p.name) is None or SHARD_NAME.search(p.name).group(1) == "00001"))
@@ -1394,10 +1429,11 @@ def previous_config(elsewhere_first: list, settings: dict):
 
 
 def choices_from_config(cfg_path: Path) -> dict:
-    """The setup answers a config was written with (size, context, parking, network, GPUs, where its shards are)."""
+    """The setup answers a config was written with (size, context, parking, network, GPUs, where its shards are).  The
+    size is the name its file has: IQ4_XS for strata-glm-iq4_xs.json, so the copy set up from it keeps that name."""
     cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
     tag = cfg_path.stem[len("strata-"):]
-    model = next((m for m in MODELS if model_tag(m) == tag), None)
+    model = next((n for m in MODELS for n in size_names(m) if model_tag(n) == tag), None)
     a = cfg.get("args") or []
     first = flag_value(a, "-m")
     ctx, park = flag_value(a, "--ctx"), flag_value(a, "--park-mib")
@@ -1636,9 +1672,11 @@ def check_only(a) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--model", choices=list(MODELS),
-                    help="UD-IQ3_XXS = 3-bit (~120 GB download, ~109 GiB of experts in RAM), IQ4_XS = 4-bit (~170 GB, "
-                         "~151 GiB; UD-Q4_K_XL when the repository has no IQ4_XS). Default: the one this PC's RAM fits")
+    ap.add_argument("--model", choices=[n for m in MODELS for n in size_names(m)],
+                    metavar="{" + ",".join(MODELS) + "}",
+                    help="UD-IQ3_XXS = 3-bit (~120 GB download, ~109 GiB of experts in RAM), UD-IQ4_XS = 4-bit "
+                         "(~170 GB, ~151 GiB; UD-Q4_K_XL when the repository has no UD-IQ4_XS; IQ4_XS, its earlier "
+                         "name, is taken too). Default: the one this PC's RAM fits")
     ap.add_argument("--context", type=int, metavar="N",
                     help=f"the longest conversation in tokens (up to {MAX_CONTEXT}); each token takes "
                          f"{kb_per_token()} of VRAM ({mla_gb(131072):.1f} GB at 131072, calculated)")
@@ -1750,8 +1788,9 @@ def main() -> int:
             d = MODELS[m]
             say(f"  {i}) {m:10s} {d['bits']}, {d['about']}: download ~{d['download_gb']} GB, ~{experts_gib(m):.0f} "
                 f"GiB of experts in RAM ({fit_text(m, ram)})" + ("   (recommended)" if m == rec else ""))
-    model = a.model or names[int(ask("Which size?", [str(i) for i in range(1, len(names) + 1)],
+    given = a.model or names[int(ask("Which size?", [str(i) for i in range(1, len(names) + 1)],
                                      str(names.index(rec) + 1), a.yes)) - 1]
+    model = size_name(given)                           # IQ4_XS, the 4-bit's earlier name: UD-IQ4_XS
     d = MODELS[model]
     fit = model_fit(model, ram)
     if fit == "no":
@@ -1862,7 +1901,7 @@ def main() -> int:
 
     # ---- 6. the run config and the start script
     step(6, "writing the start script")
-    tag = model_tag(model)
+    tag = config_tag(model, given)                     # an install made as IQ4_XS keeps its names
     cfg_path = ROOT / f"strata-{tag}.json"
     cfg = {"exe": str(exe), "args": engine_args(shards[0], ctx, park, data / f"{tag}.profile"), "cwd": str(ROOT),
            "log": str(ROOT / f"strata-{tag}.log"), "lib_dirs": installed_build().get("lib_dirs") or [],

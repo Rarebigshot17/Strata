@@ -22,7 +22,8 @@ Strata writes to two places:
   such as `strata-glm: <reason>` or `glm gpu kernel <name>: <CUDA error>`. Each start begins with a line
   `[strata] <date> <time> engine started: <command>`.
 
-Commands that help (`<size>` is `ud-iq3_xxs` or `iq4_xs`):
+Commands that help (`<size>` is `ud-iq3_xxs` or `ud-iq4_xs`; `iq4_xs` for a 4-bit install made when setup called
+it `IQ4_XS`):
 
 ```bash
 tail -n 80 strata-glm-<size>.log                         # the end of the engine log

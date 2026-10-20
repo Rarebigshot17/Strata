@@ -79,14 +79,14 @@ with what each size's experts take in GiB (calculated, from `setup.py`: about 10
 
 | RAM (`free -g`) | Size | Why |
 | --- | --- | --- |
-| 191 GiB or more | `--model IQ4_XS` (4-bit) | Its ~151 GiB of experts leave 40 GiB or more. Setup recommends it. |
+| 191 GiB or more | `--model UD-IQ4_XS` (4-bit) | Its ~151 GiB of experts leave 40 GiB or more. Setup recommends it. |
 | 163-190 GiB | `--model UD-IQ3_XXS` (3-bit) | Recommended. The 4-bit would leave under 40 GiB: setup allows it with a warning and gives parked conversations 4096 MiB. A PC with 192 GB installed (about 188 GiB) is here. |
 | 149-162 GiB | `--model UD-IQ3_XXS` | Recommended; the 4-bit does not fit. |
 | 121-148 GiB | `--model UD-IQ3_XXS` | Tight: setup warns and gives parked conversations 4096 MiB. Tell the user to close other big programs while it runs. |
 | under 121 GiB | none | Neither size fits. Tell the user. Setup can be forced (`--model UD-IQ3_XXS --yes`), but the OS would then read experts from the disk: very slow, or no start at all. |
 
-When the repository has no IQ4_XS files, the 4-bit size takes UD-Q4_K_XL instead; setup says so and works out what it
-leaves of the RAM.
+When the repository has no UD-IQ4_XS files, the 4-bit size takes UD-Q4_K_XL instead; setup says so and works out
+what it leaves of the RAM.
 
 Ask the user how long their conversations get (chats, files, tool output together), and pick the context from that.
 Each token takes 12.4 KB of VRAM, which the GPUs' expert cache gives up (calculated):
@@ -125,7 +125,7 @@ tail -f setup.out
 | Option | Why |
 | --- | --- |
 | `--yes` | The recommended answer to every question; no prompts. |
-| `--model UD-IQ3_XXS` or `IQ4_XS` | The size from step 3. With `--yes`, naming it is also the user's consent to a size setup would otherwise stop at. |
+| `--model UD-IQ3_XXS` or `UD-IQ4_XS` | The size from step 3. With `--yes`, naming it is also the user's consent to a size setup would otherwise stop at. |
 | `--context N` | The context from step 3. |
 | `--gpus all` | Every usable card, written into the config in nvidia-smi's order (or `--gpus 0,2` for some of them). Without it the engine uses CUDA's own order. |
 | `--no-browser` | Do not open a browser when the model is ready. |
@@ -148,9 +148,9 @@ nohup ./run-glm-ud-iq3_xxs.sh > strata-server.out 2>&1 &
 echo $! > strata-server.pid
 ```
 
-The script name is the one setup printed (`run-glm-iq4_xs.sh` for the 4-bit). For a server that starts with the PC,
-use the systemd unit in [INSTALL.md](INSTALL.md#running-it-as-a-service) instead, with the user's consent (it needs
-sudo).
+The script name is the one setup printed (`run-glm-ud-iq4_xs.sh` for the 4-bit; `run-glm-iq4_xs.sh` for a 4-bit
+install made when setup called it `IQ4_XS`). For a server that starts with the PC, use the systemd unit in
+[INSTALL.md](INSTALL.md#running-it-as-a-service) instead, with the user's consent (it needs sudo).
 
 The port opens only when the engine is ready. Before that, the engine reads every routed expert into memory: about
 117 GB (3-bit) or 162 GB (4-bit). At 550 MB/s, the top speed of a SATA SSD, that is about 3.5 or 5 minutes

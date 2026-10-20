@@ -39,7 +39,7 @@ Setup lists the repository's files when it runs and takes the shards of the size
 | Size | `--model` | Download | Experts in RAM | A good fit from | Tight (warned) from |
 | --- | --- | --- | --- | --- | --- |
 | 3-bit | `UD-IQ3_XXS` | ~120 GB | ~117 GB (109 GiB) | 149 GiB of RAM | 121 GiB |
-| 4-bit | `IQ4_XS` (`UD-Q4_K_XL` when the repository has no IQ4_XS) | ~170 GB | ~162 GB (151 GiB) | 191 GiB | 163 GiB |
+| 4-bit | `UD-IQ4_XS` (`UD-Q4_K_XL` when the repository has no UD-IQ4_XS) | ~170 GB | ~162 GB (151 GiB) | 191 GiB | 163 GiB |
 
 These figures are calculated from the model's shapes and written into `setup.py`; they are not measured. The
 downloads and the disk are in GB (10^9 bytes); the RAM is in GiB (2^30 bytes), as Linux reports it, and setup
@@ -99,7 +99,7 @@ terminal: when its input ends (a pipe, a script) it stops and says to pass `--ye
 
 | Question | Choices | Default |
 | --- | --- | --- |
-| **Which size?** | 1) `UD-IQ3_XXS` 3-bit, 2) `IQ4_XS` 4-bit. Each line gives the download, the RAM its experts take and what that leaves on this PC. Not asked with `--model`. | The biggest size that fits well; the 3-bit when none does. |
+| **Which size?** | 1) `UD-IQ3_XXS` 3-bit, 2) `UD-IQ4_XS` 4-bit. Each line gives the download, the RAM its experts take and what that leaves on this PC. Not asked with `--model`. | The biggest size that fits well; the 3-bit when none does. |
 | **Context?** | 1) 32K, 2) 128K, 3) 256K, 4) 512K, 5) 1M tokens. Each line says the VRAM its attention cache takes ([Choosing the context](#choosing-the-context)). Not asked with `--context`. | 128K when the chosen GPUs have 16 GB of VRAM or more in all, else 32K. |
 | **Install them now?** | Asked only when the C++ compiler or the CUDA toolkit is missing. `y` installs them with `sudo apt-get`: `build-essential` on any system with apt, the CUDA toolkit on Ubuntu 22.04 / 24.04 only. Without apt, or for CUDA on another distribution, setup stops and says what to install. | `y` |
 | **Install it anyway?** | Asked only when the size you chose leaves less than 12 GiB of RAM beside its experts. | `n` |
@@ -145,9 +145,10 @@ when it is idle (the profile is written), at its next output line during a reque
 `./setup.sh --help` (or `python3 setup.py --help`) prints them. This is that list, as setup.py gives it:
 
 ```
-  --model {UD-IQ3_XXS,IQ4_XS}
-                        UD-IQ3_XXS = 3-bit (~120 GB download, ~109 GiB of experts in RAM), IQ4_XS = 4-bit (~170 GB,
-                        ~151 GiB; UD-Q4_K_XL when the repository has no IQ4_XS). Default: the one this PC's RAM fits
+  --model {UD-IQ3_XXS,UD-IQ4_XS}
+                        UD-IQ3_XXS = 3-bit (~120 GB download, ~109 GiB of experts in RAM), UD-IQ4_XS = 4-bit (~170 GB,
+                        ~151 GiB; UD-Q4_K_XL when the repository has no UD-IQ4_XS; IQ4_XS, its earlier name, is taken
+                        too). Default: the one this PC's RAM fits
   --context N           the longest conversation in tokens (up to 1048576); each token takes 12.4 KB of VRAM (1.7 GB
                         at 131072, calculated)
   --park-mib N          RAM in MiB for parked conversations and checkpoints (default 8192, 4096 where little RAM is
@@ -241,7 +242,10 @@ In the Strata folder (the one with `setup.py`):
 | `strata-glm-<size>.log` | The engine's log: its own output (stderr), and one line from the server at each start with the command it ran. New starts are appended. |
 | `strata-glm-<size>.shared-settings.json` | The web app's Chat settings when you share them with other apps. Written by the server. |
 
-`<size>` is the size in lower case: `ud-iq3_xxs` or `iq4_xs`.
+`<size>` is the size in lower case: `ud-iq3_xxs` or `ud-iq4_xs`. Setup called the 4-bit size `IQ4_XS` until the
+repository's listing showed its files are `UD-IQ4_XS`, and it still takes that name (`--model IQ4_XS`, the Docker
+image's `MODEL=IQ4_XS`): a 4-bit install made or set up under it keeps `iq4_xs` in these names, and setup run again
+writes over them, not new files beside them. Its model files are found where it put them.
 
 In the data folder, `Strata-GLM-data` next to the Strata folder (or where `--data-dir` put it):
 
@@ -607,10 +611,11 @@ docker run -d --name strata --gpus all \
   `-p 127.0.0.1:8101:8101` publishes it to this machine only; to publish it to the network (`-p 8101:8101`, which
   Docker's rules let past ufw), set `-e API_KEY=<secret>` too. Without a key the entrypoint warns at every start.
   `API_KEY` is passed on at every start and saved in the config, so a key added later counts without `REINSTALL`.
-- **The setup choices** are environment variables: `MODEL` (`UD-IQ3_XXS`, the default, or `IQ4_XS`), `CONTEXT`
-  (tokens; empty: setup's pick for the VRAM), `PARK_MIB`, `GPUS` (`"0,2"` or `"all"`) or `GPU` (one card), `HOST`
-  (default `0.0.0.0`), `PORT` (default 8101), `API_KEY`, `GGUF_DIR` (a mounted folder of shards you already have:
-  `-v /models/glm53:/gguf:ro -e GGUF_DIR=/gguf`), `CONFIG` (start with this config file instead).
+- **The setup choices** are environment variables: `MODEL` (`UD-IQ3_XXS`, the default, or `IQ4_XS` for the 4-bit
+  `UD-IQ4_XS` files), `CONTEXT` (tokens; empty: setup's pick for the VRAM), `PARK_MIB`, `GPUS` (`"0,2"` or `"all"`)
+  or `GPU` (one card), `HOST` (default `0.0.0.0`), `PORT` (default 8101), `API_KEY`, `GGUF_DIR` (a mounted folder of
+  shards you already have: `-v /models/glm53:/gguf:ro -e GGUF_DIR=/gguf`), `CONFIG` (start with this config file
+  instead).
 - **The first start** runs setup with these choices, `--no-browser`, `--no-start` and `--yes`, and keeps the config on
   the volume. Later starts go straight to the server. `-e REINSTALL=1` runs setup again, to change the settings of a
   size already set up. Switching `MODEL` to a size already on the volume needs no setup pass.

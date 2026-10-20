@@ -19,8 +19,9 @@ Set Strata up first without starting it:
 ```
 
 Setup writes the run config `strata-glm-<size>.json` (`strata-glm-ud-iq3_xxs.json` for the 3-bit model,
-`strata-glm-iq4_xs.json` for the 4-bit one) and a start script `run-glm-<size>.sh`. The start script fixes the port
-(8101 unless setup was given `--port`), so llama-swap calls `serve/server.py` itself, with its own port:
+`strata-glm-ud-iq4_xs.json` for the 4-bit one; `strata-glm-iq4_xs.json` for a 4-bit install made when setup called it
+`IQ4_XS`) and a start script `run-glm-<size>.sh`. The start script fixes the port (8101 unless setup was given
+`--port`), so llama-swap calls `serve/server.py` itself, with its own port:
 
 ```yaml
 healthCheckTimeout: 1800           # seconds: room for the expert warm-up, which is not measured yet (see below)

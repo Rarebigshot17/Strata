@@ -60,6 +60,26 @@ LISTING = ([{"type": "directory", "oid": "1" * 40, "size": 0, "path": "UD-IQ3_XX
            + shards("UD-IQ4_XS/GLM-5.3-Flash-UD-IQ4_XS", 4)
            + shards("UD-Q4_K_XL/GLM-5.3-Flash-UD-Q4_K_XL", 4))
 
+# unsloth/GLM-5.3-Flash-GGUF as napster-ai listed it on 2026-10-20 (HfApi.model_info): each folder's size in GB, its
+# number of files and its first file, as the listing gives them; the other shards are named as the first one counts
+# them, and a folder's size is split evenly over them.  It has UD-IQ4_XS and no plain IQ4_XS.
+REAL_REPO = [("BF16", 641.6, 14, "BF16/GLM-5.3-Flash-BF16-00001-of-00014.gguf"),
+             ("Q8_0", 341.0, 8, "Q8_0/GLM-5.3-Flash-Q8_0-00001-of-00008.gguf"),
+             ("UD-IQ1_M", 97.6, 3, "UD-IQ1_M/GLM-5.3-Flash-UD-IQ1_M-00001-of-00003.gguf"),
+             ("UD-IQ1_S", 93.1, 3, "UD-IQ1_S/GLM-5.3-Flash-UD-IQ1_S-00001-of-00003.gguf"),
+             ("UD-IQ2_XXS", 101.8, 4, "UD-IQ2_XXS/GLM-5.3-Flash-UD-IQ2_XXS-00001-of-00004.gguf"),
+             ("UD-IQ3_XXS", 120.4, 4, "UD-IQ3_XXS/GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00004.gguf"),
+             ("UD-IQ4_XS", 156.8, 5, "UD-IQ4_XS/GLM-5.3-Flash-UD-IQ4_XS-00001-of-00005.gguf"),
+             ("UD-Q2_K_XL", 108.7, 4, "UD-Q2_K_XL/GLM-5.3-Flash-UD-Q2_K_XL-00001-of-00004.gguf"),
+             ("UD-Q3_K_XL", 147.5, 4, "UD-Q3_K_XL/GLM-5.3-Flash-UD-Q3_K_XL-00001-of-00004.gguf"),
+             ("UD-Q4_K_XL", 199.7, 6, "UD-Q4_K_XL/GLM-5.3-Flash-UD-Q4_K_XL-00001-of-00006.gguf"),
+             ("UD-Q5_K_XL", 240.3, 6, "UD-Q5_K_XL/GLM-5.3-Flash-UD-Q5_K_XL-00001-of-00006.gguf"),
+             ("UD-Q6_K_XL", 291.8, 7, "UD-Q6_K_XL/GLM-5.3-Flash-UD-Q6_K_XL-00001-of-00007.gguf"),
+             ("mmproj-BF16.gguf", 1.2, 1, "mmproj-BF16.gguf"),
+             ("mmproj-F16.gguf", 1.1, 1, "mmproj-F16.gguf")]
+REAL_LISTING = [entry(first.replace("-00001-of-", f"-{i:05d}-of-"), round(gb * GB / n))
+                for _name, gb, n, first in REAL_REPO for i in range(1, n + 1)]
+
 
 class Response:
     """What urlopen returns, enough for hf_tree: read(), headers.get(), a context manager."""
@@ -190,19 +210,19 @@ class ModelByRam(unittest.TestCase):
     def test_192_gb_recommends_the_3_bit_and_allows_the_4_bit_tightly(self):
         self.assertEqual(setup.recommended_model(OWNER_RAM), "UD-IQ3_XXS")
         self.assertEqual(setup.model_fit("UD-IQ3_XXS", OWNER_RAM), "fits")
-        self.assertEqual(setup.model_fit("IQ4_XS", OWNER_RAM), "tight")
+        self.assertEqual(setup.model_fit("UD-IQ4_XS", OWNER_RAM), "tight")
         self.assertEqual(setup.park_mib("UD-IQ3_XXS", OWNER_RAM), 8192)
-        self.assertEqual(setup.park_mib("IQ4_XS", OWNER_RAM), 4096)
-        self.assertEqual(setup.park_mib("IQ4_XS", OWNER_RAM, 2048), 2048)      # --park-mib as given
+        self.assertEqual(setup.park_mib("UD-IQ4_XS", OWNER_RAM), 4096)
+        self.assertEqual(setup.park_mib("UD-IQ4_XS", OWNER_RAM, 2048), 2048)      # --park-mib as given
 
     def test_more_ram_recommends_the_4_bit(self):
-        self.assertEqual(setup.recommended_model(251.0), "IQ4_XS")            # 256 GB
-        self.assertEqual(setup.park_mib("IQ4_XS", 251.0), 8192)
+        self.assertEqual(setup.recommended_model(251.0), "UD-IQ4_XS")            # 256 GB
+        self.assertEqual(setup.park_mib("UD-IQ4_XS", 251.0), 8192)
 
     def test_too_little_ram_for_either(self):
         self.assertEqual(setup.model_fit("UD-IQ3_XXS", 94.0), "no")           # 96 GB
         self.assertEqual(setup.recommended_model(94.0), "UD-IQ3_XXS")         # the smallest: nothing fits
-        self.assertIn("do not fit", setup.fit_text("IQ4_XS", 125.0))
+        self.assertIn("do not fit", setup.fit_text("UD-IQ4_XS", 125.0))
 
     def test_ram_and_experts_are_compared_in_gib(self):
         # MemTotal is in KiB: 197132288 kB is 188 GiB, what a PC with 192 GB installed reports.  The experts' sizes
@@ -210,18 +230,18 @@ class ModelByRam(unittest.TestCase):
         with mock.patch("builtins.open", mock.mock_open(read_data="MemTotal:       197132288 kB\n")):
             self.assertAlmostEqual(setup.ram_gib(), 188.0, places=3)
         self.assertAlmostEqual(setup.ram_left("UD-IQ3_XXS", 188.0), 188.0 - 117e9 / 2**30, places=6)
-        self.assertAlmostEqual(setup.ram_left("IQ4_XS", 188.0), 188.0 - 162e9 / 2**30, places=6)
+        self.assertAlmostEqual(setup.ram_left("UD-IQ4_XS", 188.0), 188.0 - 162e9 / 2**30, places=6)
         self.assertEqual(setup.fit_text("UD-IQ3_XXS", OWNER_RAM), "~79 GiB of RAM left beside them")
-        self.assertEqual(setup.fit_text("IQ4_XS", OWNER_RAM), "only ~37 GiB of RAM left beside them")
+        self.assertEqual(setup.fit_text("UD-IQ4_XS", OWNER_RAM), "only ~37 GiB of RAM left beside them")
 
     def test_the_minimum_is_the_experts_and_12_gib(self):
         self.assertEqual(setup.model_fit("UD-IQ3_XXS", 125.0), "tight")       # 128 GB: 16 GiB beside the experts
         self.assertEqual(setup.model_fit("UD-IQ3_XXS", 121.5), "tight")
         self.assertEqual(setup.model_fit("UD-IQ3_XXS", 120.5), "no")
-        self.assertEqual(setup.model_fit("IQ4_XS", 163.0), "tight")
-        self.assertEqual(setup.model_fit("IQ4_XS", 162.5), "no")
-        self.assertEqual(setup.model_fit("IQ4_XS", 191.0), "fits")
-        self.assertEqual(setup.model_fit("IQ4_XS", 190.5), "tight")
+        self.assertEqual(setup.model_fit("UD-IQ4_XS", 163.0), "tight")
+        self.assertEqual(setup.model_fit("UD-IQ4_XS", 162.5), "no")
+        self.assertEqual(setup.model_fit("UD-IQ4_XS", 191.0), "fits")
+        self.assertEqual(setup.model_fit("UD-IQ4_XS", 190.5), "tight")
 
     def test_yes_installs_the_recommended_size(self):
         code, out, cfgs, _, rec = install(["--yes", "--no-start"])
@@ -293,27 +313,49 @@ class Listing(unittest.TestCase):
         self.assertEqual([f["path"] for f in got],
                          [f"UD-IQ3_XXS/GLM-5.3-Flash-UD-IQ3_XXS-0000{i}-of-00003.gguf" for i in (1, 2, 3)])
 
+    def test_the_real_repository_gives_each_size_its_own_files(self):
+        """napster-ai's listing of the real repository: the 4-bit size is its UD-IQ4_XS folder (5 files, 156.8 GB),
+        not the 199.7 GB UD-Q4_K_XL that setup took while it looked for a plain IQ4_XS the repository does not have."""
+        files = self.files(REAL_LISTING)
+        quant, got = setup.pick_shards(files, "UD-IQ3_XXS")
+        self.assertEqual(quant, "UD-IQ3_XXS")
+        self.assertEqual([f["path"] for f in got],
+                         [f"UD-IQ3_XXS/GLM-5.3-Flash-UD-IQ3_XXS-0000{i}-of-00004.gguf" for i in range(1, 5)])
+        self.assertAlmostEqual(sum(f["size"] for f in got) / GB, 120.4, places=6)
+        quant, got = setup.pick_shards(files, "UD-IQ4_XS")
+        self.assertEqual(quant, "UD-IQ4_XS")
+        self.assertEqual([f["path"] for f in got],
+                         [f"UD-IQ4_XS/GLM-5.3-Flash-UD-IQ4_XS-0000{i}-of-00005.gguf" for i in range(1, 6)])
+        self.assertAlmostEqual(sum(f["size"] for f in got) / GB, 156.8, places=6)
+        self.assertEqual(setup.size_name("IQ4_XS"), "UD-IQ4_XS")             # the 4-bit's earlier name
+        # a repository without UD-IQ4_XS: the fallback, UD-Q4_K_XL (6 files, 199.7 GB)
+        quant, got = setup.pick_shards([f for f in files if not f["path"].startswith("UD-IQ4_XS/")], "UD-IQ4_XS")
+        self.assertEqual((quant, len(got)), ("UD-Q4_K_XL", 6))
+        self.assertAlmostEqual(sum(f["size"] for f in got) / GB, 199.7, places=6)
+
     def test_iq4_xs_is_not_ud_iq4_xs(self):
-        quant, got = setup.pick_shards(self.files(), "IQ4_XS")
-        self.assertEqual(quant, "IQ4_XS")
+        quant, got = setup.pick_shards(self.files(), "UD-IQ4_XS")
+        self.assertEqual(quant, "UD-IQ4_XS")
         self.assertEqual(len(got), 4)
-        self.assertTrue(all(f["path"].startswith("IQ4_XS/") for f in got))
+        self.assertTrue(all(f["path"].startswith("UD-IQ4_XS/") for f in got))  # not the plain IQ4_XS ones
         self.assertFalse(setup.quant_in("UD-IQ4_XS/GLM-5.3-Flash-UD-IQ4_XS-00001-of-00004.gguf", "IQ4_XS"))
+        self.assertFalse(setup.quant_in("IQ4_XS/GLM-5.3-Flash-IQ4_XS-00001-of-00004.gguf", "UD-IQ4_XS"))
         self.assertFalse(setup.quant_in("GLM-5.3-Flash-IQ4_XS_L.gguf", "IQ4_XS"))
         self.assertTrue(setup.quant_in("GLM-5.3-Flash-iq4_xs-00001-of-00002.gguf", "IQ4_XS"))
 
     def test_the_4_bit_falls_back_to_ud_q4_k_xl(self):
-        files = [f for f in self.files() if not f["path"].startswith("IQ4_XS/")]
-        quant, got = setup.pick_shards(files, "IQ4_XS")
+        files = [f for f in self.files() if not f["path"].startswith("UD-IQ4_XS/")]
+        quant, got = setup.pick_shards(files, "UD-IQ4_XS")
         self.assertEqual(quant, "UD-Q4_K_XL")
         self.assertEqual(len(got), 4)
-        self.assertIsNone(setup.pick_shards([f for f in files if "Q4_K_XL" not in f["path"]], "IQ4_XS"))
+        self.assertIsNone(setup.pick_shards([f for f in files if "Q4_K_XL" not in f["path"]], "UD-IQ4_XS"))
 
     def test_files_at_the_top_and_an_unsplit_file(self):
-        files = self.files(shards("GLM-5.3-Flash-UD-IQ3_XXS", 2) + [entry("GLM-5.3-Flash-IQ4_XS.gguf")])
+        files = self.files(shards("GLM-5.3-Flash-UD-IQ3_XXS", 2) + [entry("GLM-5.3-Flash-UD-IQ4_XS.gguf")])
         self.assertEqual([f["path"] for f in setup.pick_shards(files, "UD-IQ3_XXS")[1]],
                          ["GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00002.gguf", "GLM-5.3-Flash-UD-IQ3_XXS-00002-of-00002.gguf"])
-        self.assertEqual([f["path"] for f in setup.pick_shards(files, "IQ4_XS")[1]], ["GLM-5.3-Flash-IQ4_XS.gguf"])
+        self.assertEqual([f["path"] for f in setup.pick_shards(files, "UD-IQ4_XS")[1]],
+                         ["GLM-5.3-Flash-UD-IQ4_XS.gguf"])
 
     def test_an_incomplete_set_and_mmproj_are_left_out(self):
         files = self.files(shards("UD-IQ3_XXS/GLM-5.3-Flash-UD-IQ3_XXS", 3)[:2]
@@ -330,16 +372,36 @@ class Listing(unittest.TestCase):
                           for i in (1, 2, 3)])
         self.assertIn("UD-IQ3_XXS: 3 files, 120 GB", out)
 
-    def test_the_fallback_is_said_and_downloaded(self):
-        listing = [e for e in LISTING if not e["path"].startswith("IQ4_XS/")]
-        code, out, cfgs, _, rec = install(["--model", "IQ4_XS", "--yes", "--no-start"], ram=251.0, listing=listing)
+    def test_the_4_bit_downloads_the_real_repositorys_ud_iq4_xs(self):
+        code, out, cfgs, scripts, rec = install(["--model", "UD-IQ4_XS", "--yes", "--no-start"], listing=REAL_LISTING)
         self.assertEqual(code, 0, out)
-        self.assertIn("the repository has no IQ4_XS files: the 4-bit model is its UD-Q4_K_XL", out)
+        self.assertEqual([dst for _url, dst in rec["downloads"]],
+                         [f"Strata-GLM-data/models/glm-ud-iq4_xs/GLM-5.3-Flash-UD-IQ4_XS-0000{i}-of-00005.gguf"
+                          for i in range(1, 6)])
+        self.assertNotIn("the repository has no", out)
+        self.assertEqual((list(cfgs), list(scripts)), (["strata-glm-ud-iq4_xs.json"], ["run-glm-ud-iq4_xs.sh"]))
+        args = cfgs["strata-glm-ud-iq4_xs.json"]["args"]
+        self.assertEqual(args[args.index("--expert-profile") + 1],
+                         str(Path(rec["base"]) / "Strata-GLM-data" / "glm-ud-iq4_xs.profile"))
+        # IQ4_XS, the name it had (an older command line, the Docker image's MODEL): the same files, and the
+        # config, start script and profile keep the name it was given, as before
+        code, out, cfgs, scripts, rec = install(["--model", "IQ4_XS", "--yes", "--no-start"], listing=REAL_LISTING)
+        self.assertEqual(code, 0, out)
+        self.assertEqual([dst.rsplit("/", 2)[1] for _url, dst in rec["downloads"]], ["glm-ud-iq4_xs"] * 5)
+        self.assertEqual((list(cfgs), list(scripts)), (["strata-glm-iq4_xs.json"], ["run-glm-iq4_xs.sh"]))
+        self.assertIn("size: UD-IQ4_XS (4-bit)", out)
+
+    def test_the_fallback_is_said_and_downloaded(self):
+        listing = [e for e in LISTING if not e["path"].startswith("UD-IQ4_XS/")]
+        code, out, cfgs, _, rec = install(["--model", "UD-IQ4_XS", "--yes", "--no-start"], ram=251.0,
+                                          listing=listing)
+        self.assertEqual(code, 0, out)
+        self.assertIn("the repository has no UD-IQ4_XS files: the 4-bit model is its UD-Q4_K_XL", out)
         self.assertTrue(all("/glm-ud-q4_k_xl/" in dst for _url, dst in rec["downloads"]))
-        self.assertIn("strata-glm-iq4_xs.json", cfgs)                         # the config is named by the size
+        self.assertIn("strata-glm-ud-iq4_xs.json", cfgs)                      # the config is named by the size
 
     def test_a_fallback_too_big_for_the_ram_is_said_before_its_download(self):
-        listing = ([e for e in LISTING if not e["path"].startswith(("IQ4_XS/", "UD-Q4_K_XL/"))]
+        listing = ([e for e in LISTING if not e["path"].startswith(("UD-IQ4_XS/", "UD-Q4_K_XL/"))]
                    + shards("UD-Q4_K_XL/GLM-5.3-Flash-UD-Q4_K_XL", 4, size=50 * GB))       # 200 GB
         argv = ["--model", "IQ4_XS", "--context", "131072", "--no-start"]
         code, out, cfgs, _, rec = install(argv, listing=listing)                 # asked, and no answer
@@ -437,7 +499,18 @@ class Shards(unittest.TestCase):
             self.assertEqual((quant, [p.name for p in got]),
                              ("UD-IQ3_XXS", [f"GLM-5.3-Flash-UD-IQ3_XXS-0000{i}-of-00002.gguf" for i in (1, 2)]))
             with self.assertRaises(SystemExit):
-                quiet(setup.gguf_dir_model, Path(d), "IQ4_XS")              # no 4-bit files (nor UD-Q4_K_XL)
+                quiet(setup.gguf_dir_model, Path(d), "UD-IQ4_XS")           # no 4-bit files (nor UD-Q4_K_XL)
+
+    def test_gguf_dir_takes_4_bit_files_by_the_names_it_had(self):
+        """--gguf-dir for the 4-bit size: its UD-IQ4_XS files first, else files named as setup took them before
+        (plain IQ4_XS), else its fallback's."""
+        with tempfile.TemporaryDirectory() as d:
+            mine = Path(d)
+            plain = [tiny_gguf(mine / f"GLM-5.3-Flash-IQ4_XS-0000{i}-of-00002.gguf") for i in (1, 2)]
+            self.assertEqual(setup.gguf_dir_model(mine, "UD-IQ4_XS"), ("IQ4_XS", plain))
+            (mine / "UD-IQ4_XS").mkdir()
+            ud = [tiny_gguf(mine / "UD-IQ4_XS" / f"GLM-5.3-Flash-UD-IQ4_XS-0000{i}-of-00002.gguf") for i in (1, 2)]
+            self.assertEqual(setup.gguf_dir_model(mine, "UD-IQ4_XS"), ("UD-IQ4_XS", ud))
 
     def test_a_finished_download_is_found_again(self):
         with tempfile.TemporaryDirectory() as d:
@@ -445,9 +518,16 @@ class Shards(unittest.TestCase):
             folder.mkdir(parents=True)
             shards_ = [tiny_gguf(folder / f"GLM-5.3-Flash-UD-Q4_K_XL-0000{i}-of-00002.gguf") for i in (1, 2)]
             setup.mark(shards_[0])
-            self.assertIsNone(setup.find_model("IQ4_XS", [Path(d) / "models"]))   # the second has no finish mark
+            self.assertIsNone(setup.find_model("UD-IQ4_XS", [Path(d) / "models"]))   # the second has no finish mark
             setup.mark(shards_[1])
-            self.assertEqual(setup.find_model("IQ4_XS", [Path(d) / "models"]), ("UD-Q4_K_XL", shards_))
+            self.assertEqual(setup.find_model("UD-IQ4_XS", [Path(d) / "models"]), ("UD-Q4_K_XL", shards_))
+            # plain IQ4_XS files an older setup downloaded into models/glm-iq4_xs are found too, before the fallback
+            older = Path(d) / "models" / "glm-iq4_xs"
+            older.mkdir()
+            plain = [tiny_gguf(older / f"GLM-5.3-Flash-IQ4_XS-0000{i}-of-00002.gguf") for i in (1, 2)]
+            for s in plain:
+                setup.mark(s)
+            self.assertEqual(setup.find_model("UD-IQ4_XS", [Path(d) / "models"]), ("IQ4_XS", plain))
 
 
 class Gpus(unittest.TestCase):
@@ -1060,6 +1140,59 @@ class ModelFilesFound(unittest.TestCase):
         self.assertEqual((rec["downloads"], rec["urls"]), ([], []))
         self.assertIn("(already downloaded)", out)
 
+    def test_an_install_made_as_iq4_xs_keeps_its_names_and_files(self):
+        """A 4-bit install made while setup called the size IQ4_XS: strata-glm-iq4_xs.json, run-glm-iq4_xs.sh and
+        glm-iq4_xs.profile, and the UD-Q4_K_XL files it fell back to.  Setting it up again as UD-IQ4_XS finds those
+        files (nothing is listed or downloaded) and writes over its own config and script, not new ones beside them."""
+        def prepare(base):
+            folder = base / "Strata-GLM-data" / "models" / "glm-ud-q4_k_xl"
+            folder.mkdir(parents=True)
+            for i in (1, 2):
+                s = folder / f"GLM-5.3-Flash-UD-Q4_K_XL-0000{i}-of-00002.gguf"
+                s.write_bytes(b"")
+                setup.mark(s)
+        old = {"exe": "{base}/Strata/build/strata-glm",
+               "args": ["-m", "{base}/Strata-GLM-data/models/glm-ud-q4_k_xl/GLM-5.3-Flash-UD-Q4_K_XL-00001-of-00002"
+                              ".gguf", "--ctx", "131072", "--park-mib", "4096",
+                        "--expert-profile", "{base}/Strata-GLM-data/glm-iq4_xs.profile"],
+               "port": 8103, "api_key": "k1"}
+        code, out, cfgs, scripts, rec = install(["--setup", "--model", "UD-IQ4_XS", "--yes", "--no-start"], ram=251.0,
+                                                configs=[("strata-glm-iq4_xs.json", old)], prepare=prepare)
+        self.assertEqual(code, 0, out)
+        self.assertEqual((rec["downloads"], rec["urls"]), ([], []))
+        self.assertIn("(already downloaded)", out)
+        self.assertEqual((list(cfgs), list(scripts)), (["strata-glm-iq4_xs.json"], ["run-glm-iq4_xs.sh"]))
+        cfg, data = cfgs["strata-glm-iq4_xs.json"], Path(rec["base"]) / "Strata-GLM-data"
+        self.assertEqual(cfg["args"][1], str(data / "models" / "glm-ud-q4_k_xl"
+                                             / "GLM-5.3-Flash-UD-Q4_K_XL-00001-of-00002.gguf"))
+        self.assertEqual(cfg["args"][cfg["args"].index("--expert-profile") + 1], str(data / "glm-iq4_xs.profile"))
+        self.assertEqual(cfg["log"], str(Path(rec["root"]) / "strata-glm-iq4_xs.log"))
+
+    def test_a_new_copy_is_set_up_like_an_iq4_xs_install(self):
+        """A new copy next to a 4-bit install made as IQ4_XS: found, set up the same way under the same names, with
+        the keys added by hand carried over; nothing is downloaded."""
+        old_cfg = {"exe": "{base}/Strata-old/build/strata-glm",
+                   "args": ["-m", "{base}/q4/GLM-5.3-Flash-UD-Q4_K_XL-00001-of-00002.gguf", "--ctx", "131072",
+                            "--park-mib", "4096"],
+                   "port": 8103, "sampling": {"temperature": 0.8}}
+
+        def prepare(base):
+            (base / "q4").mkdir()
+            for i in (1, 2):
+                (base / "q4" / f"GLM-5.3-Flash-UD-Q4_K_XL-0000{i}-of-00002.gguf").write_bytes(b"")
+            (base / "Strata-old").mkdir()
+            (base / "Strata-old" / "strata-glm-iq4_xs.json").write_text(
+                json.dumps(old_cfg).replace("{base}", str(base)), encoding="utf-8")
+        code, out, cfgs, _, rec = install([], ram=251.0, prepare=prepare, others=["Strata-old"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("Found your earlier install", out)
+        self.assertEqual((rec["downloads"], rec["urls"]), ([], []))
+        cfg = cfgs["strata-glm-iq4_xs.json"]
+        first = Path(rec["base"]) / "q4" / "GLM-5.3-Flash-UD-Q4_K_XL-00001-of-00002.gguf"
+        self.assertEqual(cfg["args"][:2], ["-m", str(first)])
+        self.assertEqual((cfg["port"], cfg["sampling"]), (8103, {"temperature": 0.8}))
+        self.assertEqual(rec["starts"], [("strata-glm-iq4_xs.json", 8103)])
+
     def test_a_new_copy_is_set_up_like_the_last_one(self):
         """A Strata folder unzipped next to an earlier one: the earlier one's model files move into the data folder,
         and this copy is set up with its choices and the keys and options added to its config by hand."""
@@ -1099,7 +1232,7 @@ class Check(unittest.TestCase):
         self.assertIn("RAM: 188 GiB", out)
         self.assertIn("UD-IQ3_XXS 3-bit: ~109 GiB of experts in RAM - fits (~79 GiB of RAM left beside them); "
                       "download ~120 GB", out)
-        self.assertIn("IQ4_XS     4-bit: ~151 GiB of experts in RAM - fits, with little RAM to spare (only ~37 GiB of "
+        self.assertIn("UD-IQ4_XS  4-bit: ~151 GiB of experts in RAM - fits, with little RAM to spare (only ~37 GiB of "
                       "RAM left beside them); download ~170 GB", out)
         self.assertEqual((cfgs, rec["downloads"], rec["builds"], rec["urls"]), ({}, [], [], []))
         self.assertFalse((Path(rec["base"]) / "Strata-GLM-data").exists())
