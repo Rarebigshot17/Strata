@@ -192,6 +192,32 @@ by at most 0.00025 (mean KL 4e-10) on the unquantized models and 0.0042 (mean KL
 places in 27 of the 100 runs, 25 of them Q4_0's, always within 0.0017 of each other on both sides; `glm53_compare.py`
 counts such a row as a tie. With both changes the selftest passed all 100 seeds.
 
+The GPU engine is held to one rule (`include/strata/glm/check.hpp`), against the CPU reference (`strata-glm
+--check-cpu`, with or without `--prefill`) and against llama.cpp (step 4). Its relative difference is a row's largest
+logit difference over that row's largest logit, for the worst row. Before a product with quantized weights the GPU
+rounds the activations to q8_1, as llama.cpp's CUDA backend does. On napster-ai (2026-10-20, 36 seeds of step 4's v1,
+Q8_0 and Q4_0 models, on one RTX 3080) that gave Q4_0 a relative difference of up to 0.032 (median 0.023) and a mean
+KL up to 1.3e-6, and top-1 agreement fell to 37 of 40. llama.cpp's own CUDA backend differed from its CPU as much
+(0.034, 37 of 40). Q8_0 reached 0.0077 (llama.cpp's own 0.014), v1 0.0001. That is rounding, not a bug, but the old
+limits (0.02 and 98% top-1) failed it: Q4_0 at 0.0233 and 0.0305 when decoding and 0.027 on the prompt path, in GPU
+check runs on napster-ai the same day. The rule now asks:
+
+- a relative difference within 0.05 when some weights are quantized (1.45 times llama.cpp's worst), and within
+  0.005 when all are F32 or F16, so that a 1% error there fails. The prompt path multiplies in f16: f16 products moved
+  the logits by up to 0.001 on the CPU (strata-glm-ref on F16 copies of 20 seeds' v1, an x86 machine with AVX-512,
+  2026-10-20). The F32 models' prompt path has no GPU measurement yet;
+- a mean KL within 1e-5, 7.6 times the rounding's worst. Bugs land far above it: the indexer's select_tail bug gave
+  7.6e-4, a pool selected differently 4e-5 to 1.5e-4;
+- no NaN or infinity.
+
+Top-1 agreement is printed but not counted. When two engines' logits differ by at most d, they can only pick tokens
+that are less than 2d apart, so the count adds nothing to the limit on d. It counts near ties, and the small models
+have many. Against llama.cpp the two CPU engines' own difference adds to the GPU's: llama.cpp with an f32 cache and
+strata-glm-ref differed by up to 0.011 on Q4_0, 0.014 on Q8_0 and 0.0008 on v1 (20 seeds, the same x86 machine).
+Added up that is at most 0.043, 0.022 and 0.0009, within the same limits. `glm53_compare.py`'s defaults would fail
+it: these models' largest logits are about 0.3, so at 0.032 two tokens 0.02 apart can swap, which is no tie. The
+limits come from the small random models; nothing is measured on the real model yet.
+
 Step 7 should see no selection difference: up to 2,051 tokens of context the indexer selects every pool, so the
 precision of its keys cannot change what is selected, and step 6's prompt is far shorter (801 bytes of text, so at
 most about 800 tokens). Step 6 runs llama.cpp with its default f16 cache, which keeps the latent as Strata does.
@@ -258,6 +284,15 @@ again); steps 6-8 have not run yet. Run them from the Strata folder.
    PYTHONPATH=~/llama.cpp/gguf-py tools/glm53_gpu_check.sh ~/llama.cpp/build build
    sudo systemctl start strata-iq3s.service
    ```
+
+   Each model prints three lines that end in PASS: `check-cpu:` (40 tokens one at a time against the CPU
+   reference), `prefill: check-prefill:` (the prompt in chunks, then 4 decoded tokens) and `vs llama.cpp:`. All
+   three give the worst relative difference and the mean KL; the first two print the limits, the third names them
+   when it fails and rounds the mean KL to 0.00000. The limits are 0.05 on q4_0 and q8_0 and 0.005 on the three F32
+   models, and 1e-5 for the mean KL. Expect up to about 0.03 on q4_0 (0.04 against llama.cpp), less on q8_0, and
+   0.001 or less on the F32 models. Top-1 agreement below 40/40 on q4_0 is rounding and passes ("Checking against
+   llama.cpp"). The last line is the parking check's. Rebuild `strata-glm` (step 2) and run this step again: the
+   rule is new.
 
 5. **The real model.** Pick the 3-bit or the 4-bit GGUF (see "Memory on napster-ai"; Unsloth re-uploaded them on
    2026-10-05 with `glm5-next` metadata). List what the repository has, then download one quant's shards and
