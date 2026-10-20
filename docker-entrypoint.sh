@@ -17,7 +17,7 @@ if [ -r "$cpuinfo" ] && grep -q '^flags' "$cpuinfo" && ! grep -m1 '^flags' "$cpu
 fi
 
 STRATA_DATA="${STRATA_DATA:-/data}"
-MODEL="${MODEL:-UD-IQ3_XXS}"    # UD-IQ3_XXS (3-bit, ~120 GB) | IQ4_XS (4-bit, ~170 GB)
+MODEL="${MODEL:-UD-IQ3_XXS}"    # UD-IQ3_XXS (3-bit, ~120 GB) | UD-IQ4_XS (4-bit, ~157 GB; IQ4_XS too)
 CONTEXT="${CONTEXT:-}"          # tokens; empty: setup.py's pick for the GPUs' VRAM
 PARK_MIB="${PARK_MIB:-}"        # RAM for parked conversations; empty: setup.py's pick for the RAM left
 HOST="${HOST:-0.0.0.0}"          # every interface of the container: what a published port (-p) reaches
@@ -28,17 +28,29 @@ GPU="${GPU:-}"                  # one card, numbered as nvidia-smi numbers them
 GGUF_DIR="${GGUF_DIR:-}"        # a mounted folder with GGUF files you already have: no download
 CONFIG="${CONFIG:-}"            # a config file to start with (wins over MODEL's /data/config/strata-glm-<model>.json)
 
+# The downloads are setup.py's MODELS (the repository's listing). The 4-bit size was IQ4_XS until that listing showed
+# its files are UD-IQ4_XS; setup.py still takes the earlier name, and so does MODEL.
 case "$MODEL" in
-  UD-IQ3_XXS) size="~120 GB" ;;
-  IQ4_XS) size="~170 GB" ;;
-  *) echo "MODEL=$MODEL: use UD-IQ3_XXS (3-bit) or IQ4_XS (4-bit)." >&2; exit 1 ;;
+  UD-IQ3_XXS) size="~120 GB"; names="UD-IQ3_XXS" ;;
+  UD-IQ4_XS|IQ4_XS) size="~157 GB"; names="$MODEL UD-IQ4_XS IQ4_XS" ;;
+  *) echo "MODEL=$MODEL: use UD-IQ3_XXS (3-bit) or UD-IQ4_XS (4-bit)." >&2; exit 1 ;;
 esac
 
 # setup.py starts the strata-glm-*.json it finds (and asks which one when it finds
 # several), so link in exactly the one this model was set up with. The config is the recorded output of that setup (the
 # shards, the context, the parking RAM), not settings the entry point could rebuild
-# from env vars. Its name is setup.py's: strata-glm-<model in lower case>.json.
-tag="glm-$(printf '%s' "$MODEL" | tr 'A-Z' 'a-z')"
+# from env vars. Its name is setup.py's: strata-glm-<name in lower case>.json, the name the size was set up under.
+# As setup.py's config_tag keeps an install's names, a volume set up as IQ4_XS keeps strata-glm-iq4_xs.json whichever
+# 4-bit name MODEL gives: MODEL's own name's config first, then the size's other name's, else MODEL's. setup.py is
+# given that name too, so a setup pass (REINSTALL=1) writes the config of that name and no second one.
+model="$MODEL"
+for name in $names; do
+  if [ -f "$STRATA_DATA/config/strata-glm-$(printf '%s' "$name" | tr 'A-Z' 'a-z').json" ]; then
+    model="$name"
+    break
+  fi
+done
+tag="glm-$(printf '%s' "$model" | tr 'A-Z' 'a-z')"
 cfg="$STRATA_DATA/config/strata-$tag.json"
 mkdir -p "$STRATA_DATA/config"
 
@@ -70,7 +82,7 @@ elif [ "${REINSTALL:-0}" = "1" ] || [ ! -f "$cfg" ]; then
   else
     echo "Setting up $tag: downloading the model ($size; the engine is already in the image)."
   fi
-  set -- --model "$MODEL" --data-dir "$STRATA_DATA" --host "$HOST" --api-key "$API_KEY" \
+  set -- --model "$model" --data-dir "$STRATA_DATA" --host "$HOST" --api-key "$API_KEY" \
     --port "$PORT" --no-browser --no-start
   if [ -n "$CONTEXT" ]; then set -- "$@" --context "$CONTEXT"; fi
   if [ -n "$PARK_MIB" ]; then set -- "$@" --park-mib "$PARK_MIB"; fi

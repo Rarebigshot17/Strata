@@ -9,12 +9,37 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SH = shutil.which("sh")
+sys.path.insert(0, str(ROOT))
+import setup  # noqa: E402
+
+# The stub "python". setup.py --setup writes the config where setup would: strata-<tag>.json in the Strata folder,
+# named by setup's own config_tag (through a link that is there). A plain start prints the config setup.py would start:
+# the one strata-glm-*.json there, or that it would ask which one when there are several.
+STUB = f"""#!{sys.executable}
+import sys
+from pathlib import Path
+sys.path.insert(0, {str(ROOT)!r})
+import setup
+args, here = sys.argv[1:], Path.cwd()
+if args[1:2] == ["--setup"]:
+    given = args[args.index("--model") + 1]
+    tag = setup.config_tag(setup.size_name(given), given, here)
+    (here / f"strata-{{tag}}.json").write_text('{{"args": ["from-setup"]}}')
+    print("SETUP: " + " ".join(args))
+else:
+    cfgs = sorted(setup.model_config_files(here))
+    if len(cfgs) == 1:
+        print("STARTED WITH: " + cfgs[0].read_text().strip() + " ARGS: " + " ".join(args))
+    else:
+        print("ASKS WHICH ONE: " + " ".join(p.name for p in cfgs))
+"""
 
 
 @unittest.skipIf(SH is None, "needs a POSIX sh")
@@ -26,11 +51,8 @@ class Entrypoint(unittest.TestCase):
         self.data = self.tmp / "data"
         (self.opt / ".venv" / "bin").mkdir(parents=True)
         (self.data / "config").mkdir(parents=True)
-        # the stub "python": setup.py --setup writes the config the way setup does; a plain start prints what it would load
         stub = self.opt / ".venv" / "bin" / "python"
-        stub.write_text('#!/bin/sh\nif [ "$2" = "--setup" ]; then echo \'{"args": ["from-setup"]}\' > strata-glm-ud-iq3_xxs.json\n'
-                        '  echo "SETUP: $*"\n'
-                        'else echo "STARTED WITH: $(cat strata-glm-ud-iq3_xxs.json) ARGS: $*"; fi\n', encoding="utf-8")
+        stub.write_text(STUB, encoding="utf-8")
         stub.chmod(0o755)
         script = (ROOT / "docker-entrypoint.sh").read_text(encoding="utf-8").replace("/opt/strata", str(self.opt))
         self.script = self.tmp / "entry.sh"
@@ -127,6 +149,57 @@ class Entrypoint(unittest.TestCase):
         out = self.run_entry("0", MODEL="IQ4_XS", PORT="9000")
         self.assertIn(f"Config: {self.data}/config/strata-glm-iq4_xs.json", out)
 
+    def configs(self):
+        return (sorted(p.name for p in (self.data / "config").iterdir()),
+                sorted(p.name for p in self.opt.glob("strata-glm-*.json")))
+
+    def test_the_4_bit_by_setups_name_is_set_up_and_started(self):
+        """MODEL=UD-IQ4_XS, the name setup.py gives the 4-bit size (its files in the repository), on a new volume."""
+        out = self.run_entry("0", MODEL="UD-IQ4_XS")
+        setup_line = next(line for line in out.splitlines() if line.startswith("SETUP:"))
+        self.assertIn("setup.py --setup --yes --model UD-IQ4_XS", setup_line)
+        self.assertIn("Setting up glm-ud-iq4_xs: downloading the model "
+                      f"(~{setup.MODELS['UD-IQ4_XS']['download_gb']:.0f} GB", out)
+        self.assertIn("STARTED WITH: {\"args\": [\"from-setup\"]}", out)
+        self.assertEqual(self.configs(), (["strata-glm-ud-iq4_xs.json"], ["strata-glm-ud-iq4_xs.json"]))
+        self.assertTrue((self.opt / "strata-glm-ud-iq4_xs.json").is_symlink())
+
+    def test_a_volume_set_up_as_iq4_xs_is_started_by_either_4_bit_name(self):
+        """A volume set up when the 4-bit size was IQ4_XS keeps strata-glm-iq4_xs.json, as setup.py keeps an install's
+        names (config_tag): MODEL=UD-IQ4_XS starts it, with no setup pass (which would download the model again when
+        its files are not found) and no second config beside it."""
+        (self.data / "config" / "strata-glm-iq4_xs.json").write_text('{"args": ["four-bit-as-iq4_xs"]}\n')
+        out = self.run_entry("0", MODEL="UD-IQ4_XS")
+        self.assertNotIn("SETUP:", out)
+        self.assertIn(f"Config: {self.data}/config/strata-glm-iq4_xs.json", out)
+        self.assertIn("STARTED WITH: {\"args\": [\"four-bit-as-iq4_xs\"]}", out)
+        self.assertEqual(self.configs(), (["strata-glm-iq4_xs.json"], ["strata-glm-iq4_xs.json"]))
+        self.assertIn("STARTED WITH: {\"args\": [\"four-bit-as-iq4_xs\"]}", self.run_entry("0", MODEL="IQ4_XS"))
+
+    def test_a_volume_set_up_as_ud_iq4_xs_is_started_by_the_earlier_name(self):
+        (self.data / "config" / "strata-glm-ud-iq4_xs.json").write_text('{"args": ["four-bit"]}\n')
+        out = self.run_entry("0", MODEL="IQ4_XS")
+        self.assertNotIn("SETUP:", out)
+        self.assertIn(f"Config: {self.data}/config/strata-glm-ud-iq4_xs.json", out)
+        self.assertIn("STARTED WITH: {\"args\": [\"four-bit\"]}", out)
+        self.assertEqual(self.configs(), (["strata-glm-ud-iq4_xs.json"], ["strata-glm-ud-iq4_xs.json"]))
+
+    def test_reinstall_keeps_the_name_the_volume_has(self):
+        """REINSTALL=1 with MODEL=UD-IQ4_XS on a volume set up as IQ4_XS: setup is given IQ4_XS, so its config keeps
+        that name and replaces the one on the volume (not a second one the start would have to ask about)."""
+        (self.data / "config" / "strata-glm-iq4_xs.json").write_text('{"args": ["before"]}\n')
+        out = self.run_entry("1", MODEL="UD-IQ4_XS")
+        setup_line = next(line for line in out.splitlines() if line.startswith("SETUP:"))
+        self.assertIn("--model IQ4_XS ", setup_line)
+        self.assertIn("STARTED WITH: {\"args\": [\"from-setup\"]}", out)
+        self.assertEqual(self.configs(), (["strata-glm-iq4_xs.json"], ["strata-glm-iq4_xs.json"]))
+        self.assertIn("from-setup", (self.data / "config" / "strata-glm-iq4_xs.json").read_text())
+
+    def test_the_3_bit_size_is_setups(self):
+        out = self.run_entry("0")
+        self.assertIn("Setting up glm-ud-iq3_xxs: downloading the model "
+                      f"(~{setup.MODELS['UD-IQ3_XXS']['download_gb']:.0f} GB", out)
+
     def entry(self, **extra):
         env = {k: v for k, v in os.environ.items() if k != "STRATA_API_KEY"}
         env.update(STRATA_DATA=str(self.data), MODEL="UD-IQ3_XXS", REINSTALL="0", **extra)
@@ -169,6 +242,7 @@ class Entrypoint(unittest.TestCase):
         r = subprocess.run([SH, str(self.script)], env=env, capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 1)
         self.assertIn("UD-IQ3_XXS", r.stderr)
+        self.assertIn("UD-IQ4_XS", r.stderr)
 
     def warning_for(self, flags):
         info = self.tmp / "cpuinfo"
