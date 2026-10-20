@@ -23,8 +23,9 @@ Work through the steps in order. Tell the user what you are doing in plain words
   first (step 2). If something is missing, ask the user to run the commands in step 4 in their own terminal.
 - **Do not install or change NVIDIA drivers** unless the user asks. Strata needs driver 580 or newer (525 or newer
   when an installed CUDA 12 toolkit builds the engine).
-- **The download is big:** about 120 GB for the 3-bit size, about 170 GB for the 4-bit. Ask the user before you start,
-  especially on a metered connection. At 100 Mbit/s, 120 GB takes about 2.7 hours (calculated).
+- **The download is big:** 120.4 GB for the 3-bit size, 156.8 GB for the 4-bit (the repository's listing). Ask the
+  user before you start, especially on a metered connection. At 100 Mbit/s, 120 GB takes about 2.7 hours
+  (calculated).
 - **Setup runs for a long time** (the build, the download). Run it in the background or with a long timeout and read
   its output; do not stop it because it is quiet for a while. It is resumable: the same command again continues where
   it stopped.
@@ -63,7 +64,7 @@ Check the rest by hand:
 | OS | `cat /etc/os-release` | Linux. Ubuntu 22.04 or 24.04 lets setup install the CUDA toolkit itself. |
 | GPUs, VRAM, driver | `nvidia-smi --query-gpu=index,name,memory.total,compute_cap,driver_version --format=csv` | Compute capability 7.5 or newer (RTX 20, 30, 40, 50 series), driver 580 or newer (525 or newer with an installed CUDA 12 toolkit). |
 | RAM | `free -g` (the `total` of `Mem:`) | See step 3. |
-| Free disk | `df -h .` (and the drive for `--data-dir`) | 120 GB (3-bit) or 170 GB (4-bit), plus about 8-10 GB if the CUDA toolkit is to be installed. |
+| Free disk | `df -h .` (and the drive for `--data-dir`) | 121 GB (3-bit) or 158 GB (4-bit), plus about 8-10 GB if the CUDA toolkit is to be installed. |
 | CPU | `grep -m1 -ow avx2 /proc/cpuinfo` | `avx2`. Without it setup goes on with a warning. |
 | CUDA toolkit | `nvcc --version`, or `ls /usr/local/cuda*/bin/nvcc /opt/cuda*/bin/nvcc` | 12.0 or newer (13.0 or newer for an RTX 50 card). Missing: step 4. |
 | C++ compiler | `g++ --version` | Present. Missing: step 4. |
@@ -75,15 +76,16 @@ If the PC does not meet these, tell the user which part is missing and stop. Det
 ## 3. Pick the size and the context
 
 Every routed expert stays in RAM. Setup compares the RAM `/proc/meminfo` reports (the `total` of `free -g`, in GiB)
-with what each size's experts take in GiB (calculated, from `setup.py`: about 109 GiB at 3-bit, 151 GiB at 4-bit):
+with what each size's experts take in GiB (from `setup.py`: about 105 GiB at 3-bit, counted in the real file; about
+139 GiB at 4-bit, derived from its download, not measured):
 
 | RAM (`free -g`) | Size | Why |
 | --- | --- | --- |
-| 191 GiB or more | `--model UD-IQ4_XS` (4-bit) | Its ~151 GiB of experts leave 40 GiB or more. Setup recommends it. |
-| 163-190 GiB | `--model UD-IQ3_XXS` (3-bit) | Recommended. The 4-bit would leave under 40 GiB: setup allows it with a warning and gives parked conversations 4096 MiB. A PC with 192 GB installed (about 188 GiB) is here. |
-| 149-162 GiB | `--model UD-IQ3_XXS` | Recommended; the 4-bit does not fit. |
-| 121-148 GiB | `--model UD-IQ3_XXS` | Tight: setup warns and gives parked conversations 4096 MiB. Tell the user to close other big programs while it runs. |
-| under 121 GiB | none | Neither size fits. Tell the user. Setup can be forced (`--model UD-IQ3_XXS --yes`), but the OS would then read experts from the disk: very slow, or no start at all. |
+| 179 GiB or more | `--model UD-IQ4_XS` (4-bit) | Its ~139 GiB of experts leave 40 GiB or more. Setup recommends it. A PC with 192 GB installed (about 188 GiB) is here. |
+| 151-178 GiB | `--model UD-IQ3_XXS` (3-bit) | Recommended. The 4-bit would leave under 40 GiB: setup allows it with a warning and gives parked conversations 4096 MiB. |
+| 145-150 GiB | `--model UD-IQ3_XXS` | Recommended; the 4-bit does not fit. |
+| 117-144 GiB | `--model UD-IQ3_XXS` | Tight: setup warns and gives parked conversations 4096 MiB. Tell the user to close other big programs while it runs. |
+| under 117 GiB | none | Neither size fits. Tell the user. Setup can be forced (`--model UD-IQ3_XXS --yes`), but the OS would then read experts from the disk: very slow, or no start at all. |
 
 When the repository has no UD-IQ4_XS files, the 4-bit size takes UD-Q4_K_XL instead; setup says so and works out
 what it leaves of the RAM.
@@ -152,8 +154,8 @@ The script name is the one setup printed (`run-glm-ud-iq4_xs.sh` for the 4-bit; 
 install made when setup called it `IQ4_XS`). For a server that starts with the PC, use the systemd unit in
 [INSTALL.md](INSTALL.md#running-it-as-a-service) instead, with the user's consent (it needs sudo).
 
-The port opens only when the engine is ready. Before that, the engine reads every routed expert into memory: about
-117 GB (3-bit) or 162 GB (4-bit). At 550 MB/s, the top speed of a SATA SSD, that is about 3.5 or 5 minutes
+The port opens only when the engine is ready. Before that, the engine reads every routed expert into memory: 112.5 GB
+(3-bit) or about 149 GB (4-bit). At 550 MB/s, the top speed of a SATA SSD, that is about 3.4 or 4.5 minutes
 (calculated, not measured). `strata-server.out` shows the progress (`[strata] reading the experts into memory ...`,
 then `warming the experts: X of Y GB` about every 20 seconds). The server gives up when the engine has not said it
 is ready within 900 seconds; each step the engine reports (the layers on each GPU, the expert cache, the warm-up's

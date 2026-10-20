@@ -207,13 +207,31 @@ def install(argv, ram=OWNER_RAM, smi=OWNER_SMI, listing=LISTING, configs=(), env
 
 
 class ModelByRam(unittest.TestCase):
-    def test_192_gb_recommends_the_3_bit_and_allows_the_4_bit_tightly(self):
-        self.assertEqual(setup.recommended_model(OWNER_RAM), "UD-IQ3_XXS")
+    def test_the_sizes_come_from_the_real_files(self):
+        # the downloads from the repository's listing (napster-ai, 2026-10-20), the 3-bit's experts from the inspector
+        # on its file; the 4-bit's experts are derived: its download less the 3-bit file's 7.9 GB beside its experts
+        three, four = setup.MODELS["UD-IQ3_XXS"], setup.MODELS["UD-IQ4_XS"]
+        self.assertEqual((three["download_gb"], three["experts_gb"], four["download_gb"]), (120.4, 112.5, 156.8))
+        self.assertAlmostEqual(four["experts_gb"], 156.8 - 7.9, places=9)
+        self.assertEqual({q: gb for q, gb, _n, _first in REAL_REPO if q in setup.MODELS},
+                         {m: d["download_gb"] for m, d in setup.MODELS.items()})
+        more = setup.experts_gib("UD-IQ4_XS") - setup.experts_gib("UD-IQ3_XXS")
+        self.assertIn(f"about {more:.0f} GiB more RAM", four["about"])          # 33.9 GiB
+
+    def test_192_gb_recommends_the_4_bit(self):
+        self.assertEqual(setup.recommended_model(OWNER_RAM), "UD-IQ4_XS")
         self.assertEqual(setup.model_fit("UD-IQ3_XXS", OWNER_RAM), "fits")
-        self.assertEqual(setup.model_fit("UD-IQ4_XS", OWNER_RAM), "tight")
+        self.assertEqual(setup.model_fit("UD-IQ4_XS", OWNER_RAM), "fits")
         self.assertEqual(setup.park_mib("UD-IQ3_XXS", OWNER_RAM), 8192)
-        self.assertEqual(setup.park_mib("UD-IQ4_XS", OWNER_RAM), 4096)
+        self.assertEqual(setup.park_mib("UD-IQ4_XS", OWNER_RAM), 8192)
         self.assertEqual(setup.park_mib("UD-IQ4_XS", OWNER_RAM, 2048), 2048)      # --park-mib as given
+
+    def test_160_gb_recommends_the_3_bit_and_allows_the_4_bit_tightly(self):
+        self.assertEqual(setup.recommended_model(157.0), "UD-IQ3_XXS")
+        self.assertEqual(setup.model_fit("UD-IQ3_XXS", 157.0), "fits")
+        self.assertEqual(setup.model_fit("UD-IQ4_XS", 157.0), "tight")
+        self.assertEqual(setup.park_mib("UD-IQ3_XXS", 157.0), 8192)
+        self.assertEqual(setup.park_mib("UD-IQ4_XS", 157.0), 4096)
 
     def test_more_ram_recommends_the_4_bit(self):
         self.assertEqual(setup.recommended_model(251.0), "UD-IQ4_XS")            # 256 GB
@@ -223,47 +241,60 @@ class ModelByRam(unittest.TestCase):
         self.assertEqual(setup.model_fit("UD-IQ3_XXS", 94.0), "no")           # 96 GB
         self.assertEqual(setup.recommended_model(94.0), "UD-IQ3_XXS")         # the smallest: nothing fits
         self.assertIn("do not fit", setup.fit_text("UD-IQ4_XS", 125.0))
+        self.assertEqual((setup.model_fit("UD-IQ3_XXS", 91.0), setup.model_fit("UD-IQ4_XS", 91.0)), ("no", "no"))
 
     def test_ram_and_experts_are_compared_in_gib(self):
         # MemTotal is in KiB: 197132288 kB is 188 GiB, what a PC with 192 GB installed reports.  The experts' sizes
-        # are decimal GB (117e9 bytes at 3-bit, 162e9 at 4-bit): 109 and 151 GiB
+        # are decimal GB (112.5e9 bytes at 3-bit, 148.9e9 at 4-bit): 104.8 and 138.7 GiB
         with mock.patch("builtins.open", mock.mock_open(read_data="MemTotal:       197132288 kB\n")):
             self.assertAlmostEqual(setup.ram_gib(), 188.0, places=3)
-        self.assertAlmostEqual(setup.ram_left("UD-IQ3_XXS", 188.0), 188.0 - 117e9 / 2**30, places=6)
-        self.assertAlmostEqual(setup.ram_left("UD-IQ4_XS", 188.0), 188.0 - 162e9 / 2**30, places=6)
-        self.assertEqual(setup.fit_text("UD-IQ3_XXS", OWNER_RAM), "~79 GiB of RAM left beside them")
-        self.assertEqual(setup.fit_text("UD-IQ4_XS", OWNER_RAM), "only ~37 GiB of RAM left beside them")
+        self.assertAlmostEqual(setup.experts_gib("UD-IQ3_XXS"), 104.77, places=2)
+        self.assertAlmostEqual(setup.experts_gib("UD-IQ4_XS"), 138.67, places=2)
+        self.assertAlmostEqual(setup.ram_left("UD-IQ3_XXS", 188.0), 188.0 - 112.5e9 / 2**30, places=6)
+        self.assertAlmostEqual(setup.ram_left("UD-IQ4_XS", 188.0), 188.0 - 148.9e9 / 2**30, places=6)
+        self.assertEqual(setup.fit_text("UD-IQ3_XXS", OWNER_RAM), "~83 GiB of RAM left beside them")
+        self.assertEqual(setup.fit_text("UD-IQ4_XS", OWNER_RAM), "~49 GiB of RAM left beside them")
+        self.assertEqual(setup.fit_text("UD-IQ4_XS", 157.0), "only ~18 GiB of RAM left beside them")
 
     def test_the_minimum_is_the_experts_and_12_gib(self):
-        self.assertEqual(setup.model_fit("UD-IQ3_XXS", 125.0), "tight")       # 128 GB: 16 GiB beside the experts
-        self.assertEqual(setup.model_fit("UD-IQ3_XXS", 121.5), "tight")
-        self.assertEqual(setup.model_fit("UD-IQ3_XXS", 120.5), "no")
-        self.assertEqual(setup.model_fit("UD-IQ4_XS", 163.0), "tight")
-        self.assertEqual(setup.model_fit("UD-IQ4_XS", 162.5), "no")
-        self.assertEqual(setup.model_fit("UD-IQ4_XS", 191.0), "fits")
-        self.assertEqual(setup.model_fit("UD-IQ4_XS", 190.5), "tight")
+        self.assertEqual(setup.model_fit("UD-IQ3_XXS", 125.0), "tight")       # 128 GB: 20 GiB beside the experts
+        self.assertEqual(setup.model_fit("UD-IQ3_XXS", 117.0), "tight")
+        self.assertEqual(setup.model_fit("UD-IQ3_XXS", 116.5), "no")
+        self.assertEqual(setup.model_fit("UD-IQ3_XXS", 145.0), "fits")
+        self.assertEqual(setup.model_fit("UD-IQ3_XXS", 144.5), "tight")
+        self.assertEqual(setup.model_fit("UD-IQ4_XS", 151.0), "tight")
+        self.assertEqual(setup.model_fit("UD-IQ4_XS", 150.5), "no")
+        self.assertEqual(setup.model_fit("UD-IQ4_XS", 179.0), "fits")
+        self.assertEqual(setup.model_fit("UD-IQ4_XS", 178.5), "tight")
 
     def test_yes_installs_the_recommended_size(self):
         code, out, cfgs, _, rec = install(["--yes", "--no-start"])
         self.assertEqual(code, 0, out)
-        self.assertEqual(list(cfgs), ["strata-glm-ud-iq3_xxs.json"])
+        self.assertEqual(list(cfgs), ["strata-glm-ud-iq4_xs.json"])            # 192 GB: the 4-bit
         self.assertIn("(recommended)", out)
-        args = cfgs["strata-glm-ud-iq3_xxs.json"]["args"]
+        args = cfgs["strata-glm-ud-iq4_xs.json"]["args"]
         self.assertEqual(args[args.index("--park-mib") + 1], "8192")
-
-    def test_the_4_bit_on_192_gb_warns_and_parks_less(self):
-        code, out, cfgs, _, _ = install(["--model", "IQ4_XS", "--yes", "--no-start"])
+        code, out, cfgs, _, rec = install(["--yes", "--no-start"], ram=157.0)
         self.assertEqual(code, 0, out)
-        self.assertIn("leaves only ~37 GiB of RAM beside its experts", out)
+        self.assertEqual(list(cfgs), ["strata-glm-ud-iq3_xxs.json"])           # 160 GB: the 3-bit
+
+    def test_the_4_bit_on_160_gb_warns_and_parks_less(self):
+        code, out, cfgs, _, _ = install(["--model", "IQ4_XS", "--yes", "--no-start"], ram=157.0)
+        self.assertEqual(code, 0, out)
+        self.assertIn("leaves only ~18 GiB of RAM beside its experts", out)
         self.assertIn("--park-mib 4096", out)
         args = cfgs["strata-glm-iq4_xs.json"]["args"]
         self.assertEqual(args[args.index("--park-mib") + 1], "4096")
+        code, out, cfgs, _, _ = install(["--model", "IQ4_XS", "--yes", "--no-start"])     # 192 GB: no warning
+        self.assertNotIn("leaves only", out)
+        args = cfgs["strata-glm-iq4_xs.json"]["args"]
+        self.assertEqual(args[args.index("--park-mib") + 1], "8192")
 
     def test_a_size_that_does_not_fit_needs_consent(self):
         code, out, cfgs, _, _ = install(["--yes", "--no-start"], ram=94.0)    # --yes alone: no consent
         self.assertEqual(code, 1)
-        self.assertIn("UD-IQ3_XXS's experts (~109 GiB) do not fit beside Linux and the server in this PC's 94 GiB", out)
-        self.assertIn("UD-IQ3_XXS needs about 121 GiB of RAM; this PC has 94 GiB", out)
+        self.assertIn("UD-IQ3_XXS's experts (~105 GiB) do not fit beside Linux and the server in this PC's 94 GiB", out)
+        self.assertIn("UD-IQ3_XXS needs about 117 GiB of RAM; this PC has 94 GiB", out)
         self.assertEqual(cfgs, {})
         code, out, cfgs, _, _ = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start"], ram=94.0)
         self.assertEqual(code, 0, out)                                        # --model is the consent
@@ -363,7 +394,7 @@ class Listing(unittest.TestCase):
         self.assertIsNone(setup.pick_shards(files, "UD-IQ3_XXS"))
 
     def test_the_download_takes_every_shard_from_the_listed_path(self):
-        code, out, cfgs, _, rec = install(["--yes", "--no-start"])
+        code, out, cfgs, _, rec = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start"])
         self.assertEqual(code, 0, out)
         self.assertEqual([d for d in rec["downloads"]],
                          [("https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF/resolve/main/UD-IQ3_XXS/"
@@ -406,7 +437,8 @@ class Listing(unittest.TestCase):
         argv = ["--model", "IQ4_XS", "--context", "131072", "--no-start"]
         code, out, cfgs, _, rec = install(argv, listing=listing)                 # asked, and no answer
         self.assertEqual(code, 1)
-        # 200 GB of files at the 4-bit's share of experts (162 of 170): 190.6e9 bytes, 177.5 GiB of the 188 GiB
+        # 200 GB of files at the 4-bit's share of experts (148.9 of 156.8, derived): 189.9e9 bytes, 176.9 GiB of the
+        # 188 GiB
         self.assertIn("UD-Q4_K_XL (200 GB, about 177 GiB of experts in RAM: ~11 GiB of RAM left beside them)", out)
         self.assertIn("UD-Q4_K_XL's experts do not fit beside Linux and the server in this PC's 188 GiB", out)
         out = install(argv, listing=listing, ram=170.0)[1]                      # less RAM than the experts
@@ -449,12 +481,12 @@ class Listing(unittest.TestCase):
     def test_a_repository_without_the_size_stops(self):
         code, out, cfgs, _, rec = install(["--yes", "--no-start"], listing=[entry("README.md", 10, None)])
         self.assertEqual(code, 1)
-        self.assertIn("has no UD-IQ3_XXS files", out)
+        self.assertIn("has no UD-IQ4_XS files (nor UD-Q4_K_XL)", out)               # 192 GB: the 4-bit
         self.assertIn("--gguf-dir", out)
         self.assertEqual(rec["builds"], [])                                   # stopped before the long steps
 
     def test_not_enough_disk_stops_before_the_download(self):
-        code, out, _, _, rec = install(["--yes", "--no-start"], free=50.0)
+        code, out, _, _, rec = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start"], free=50.0)
         self.assertEqual(code, 1)
         self.assertIn("not enough free disk space", out)
         self.assertIn("need ~121 GB", out)
@@ -556,7 +588,7 @@ class Gpus(unittest.TestCase):
 
     def test_a_usable_card_beside_an_old_one(self):
         smi = OWNER_SMI.splitlines()[0] + "\n1, Tesla P40, 24576, 6.1, 580.95.05\n"
-        code, out, cfgs, _, rec = install(["--yes", "--no-start"], smi=smi)
+        code, out, cfgs, _, rec = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start"], smi=smi)
         self.assertEqual(code, 0, out)
         self.assertEqual(rec["builds"], [[86]])                               # compiled for the usable card only
         self.assertEqual(cfgs["strata-glm-ud-iq3_xxs.json"]["gpu"], 0)       # and the config names it
@@ -625,19 +657,19 @@ class Gpus(unittest.TestCase):
         self.assertEqual((cfgs, rec["builds"]), ({}, []))
 
     def test_gpu_takes_one_card_and_a_list_means_gpus(self):
-        code, out, cfgs, _, _ = install(["--yes", "--no-start", "--gpu", "1"])
+        code, out, cfgs, _, _ = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start", "--gpu", "1"])
         self.assertEqual(cfgs["strata-glm-ud-iq3_xxs.json"]["gpu"], 1)
-        code, out, cfgs, _, _ = install(["--yes", "--no-start", "--gpu", "0,2"])
+        code, out, cfgs, _, _ = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start", "--gpu", "0,2"])
         self.assertEqual(cfgs["strata-glm-ud-iq3_xxs.json"]["gpu"], [0, 2])
         smi = OWNER_SMI.splitlines()[0] + "\n1, Tesla P40, 24576, 6.1, 580.95.05\n"
-        code, out, cfgs, _, _ = install(["--yes", "--no-start", "--gpus", "all"], smi=smi)
+        code, out, cfgs, _, _ = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start", "--gpus", "all"], smi=smi)
         self.assertEqual(cfgs["strata-glm-ud-iq3_xxs.json"]["gpu"], 0)        # every card that can run it
         with contextlib.redirect_stderr(io.StringIO()):
             code, _, cfgs, _, _ = install(["--yes", "--no-start", "--gpu", "first"])
         self.assertEqual((code, cfgs), (2, {}))
 
     def test_a_cpu_without_avx2_is_warned_not_stopped(self):
-        code, out, cfgs, _, _ = install(["--yes", "--no-start"], cpu=("Old Xeon", False))
+        code, out, cfgs, _, _ = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start"], cpu=("Old Xeon", False))
         self.assertEqual(code, 0, out)
         self.assertIn("CPU: Old Xeon has no AVX2", out)
         self.assertIn("strata-glm-ud-iq3_xxs.json", cfgs)
@@ -857,7 +889,7 @@ class Build(unittest.TestCase):
 
 class Config(unittest.TestCase):
     def test_the_config_and_its_args(self):
-        code, out, cfgs, scripts, rec = install(["--yes", "--no-start", "--context", "131072"])
+        code, out, cfgs, scripts, rec = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start", "--context", "131072"])
         self.assertEqual(code, 0, out)
         cfg = cfgs["strata-glm-ud-iq3_xxs.json"]
         root, data = Path(rec["root"]), Path(rec["base"]) / "Strata-GLM-data"
@@ -873,15 +905,15 @@ class Config(unittest.TestCase):
         self.assertNotIn("tokenizer", cfg)                                    # the server reads it from the GGUF
 
     def test_every_engine_option_is_one_strata_glm_takes(self):
-        code, out, cfgs, _, _ = install(["--yes", "--no-start"])
+        code, out, cfgs, _, _ = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start"])
         args = cfgs["strata-glm-ud-iq3_xxs.json"]["args"]
         src = (ROOT / "src" / "glm" / "glm_main.cpp").read_text(encoding="utf-8")
         for flag in (a for a in args if a.startswith("-")):
             self.assertIn(f'"{flag}"', src, flag)
 
     def test_network_key_gpus_and_browser(self):
-        code, out, cfgs, scripts, _ = install(["--yes", "--no-start", "--host", "0.0.0.0", "--api-key", "k1",
-                                               "--gpus", "0,2", "--no-browser", "--port", "9000"])
+        code, out, cfgs, scripts, _ = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start", "--host", "0.0.0.0",
+                                               "--api-key", "k1", "--gpus", "0,2", "--no-browser", "--port", "9000"])
         self.assertEqual(code, 0, out)
         cfg = cfgs["strata-glm-ud-iq3_xxs.json"]
         self.assertEqual((cfg["host"], cfg["api_key"], cfg["gpu"], cfg["open_browser"], cfg["port"]),
@@ -890,7 +922,7 @@ class Config(unittest.TestCase):
         self.assertIn("http://127.0.0.1:9000/", out)
 
     def test_every_gpu_is_used_without_naming_them(self):
-        code, out, cfgs, _, rec = install(["--yes", "--no-start"])
+        code, out, cfgs, _, rec = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start"])
         self.assertNotIn("gpu", cfgs["strata-glm-ud-iq3_xxs.json"])
         self.assertEqual(rec["builds"], [[86]])
 
@@ -917,15 +949,16 @@ class Config(unittest.TestCase):
 
     def test_a_long_context_on_little_vram_is_kept_with_a_warning(self):
         smi = "0, NVIDIA GeForce RTX 3060, 12288, 8.6, 580.95.05\n"
-        code, out, cfgs, _, _ = install(["--yes", "--no-start", "--context", "1048576"], smi=smi)
+        code, out, cfgs, _, _ = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start", "--context", "1048576"],
+                                        smi=smi)
         self.assertEqual(code, 0, out)
         self.assertIn("few experts stay cached in VRAM", out)
         args = cfgs["strata-glm-ud-iq3_xxs.json"]["args"]
         self.assertEqual(args[args.index("--ctx") + 1], "1048576")
 
     def test_choices_from_config_read_it_back(self):
-        code, out, cfgs, _, rec = install(["--yes", "--no-start", "--context", "262144", "--park-mib", "6144",
-                                           "--port", "8102"])
+        code, out, cfgs, _, rec = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start", "--context", "262144",
+                                           "--park-mib", "6144", "--port", "8102"])
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "strata-glm-ud-iq3_xxs.json"
             p.write_text(json.dumps(cfgs["strata-glm-ud-iq3_xxs.json"]), encoding="utf-8")
@@ -934,7 +967,8 @@ class Config(unittest.TestCase):
 
     def test_a_qwen_config_is_left_alone(self):
         qwen = {"exe": "engine/strata", "args": ["--native", "packs/iq3_s", "--max-context", "65536"]}
-        code, out, cfgs, _, rec = install(["--yes", "--no-start"], configs=[("strata-iq3_s.json", qwen)])
+        code, out, cfgs, _, rec = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start"],
+                                          configs=[("strata-iq3_s.json", qwen)])
         self.assertEqual(code, 0, out)
         self.assertIn("strata-iq3_s.json: a config of the earlier Qwen version", out)
         self.assertEqual(cfgs["strata-iq3_s.json"], qwen)
@@ -1036,7 +1070,7 @@ class Ports(unittest.TestCase):
         self.assertIn('PORT="${PORT:-8101}"', (ROOT / "docker-entrypoint.sh").read_text(encoding="utf-8"))
 
     def test_a_new_install_starts_on_8101(self):
-        code, out, cfgs, scripts, rec = install(["--yes"])
+        code, out, cfgs, scripts, rec = install(["--model", "UD-IQ3_XXS", "--yes"])
         self.assertEqual(code, 0, out)
         self.assertEqual(rec["starts"], [("strata-glm-ud-iq3_xxs.json", 8101)])
         self.assertIn("--port 8101", scripts["run-glm-ud-iq3_xxs.sh"])
@@ -1121,7 +1155,8 @@ class ModelFilesFound(unittest.TestCase):
             sub.mkdir(parents=True)
             for i in (1, 2):
                 (sub / f"GLM-5.3-Flash-UD-IQ3_XXS-0000{i}-of-00002.gguf").write_bytes(b"")
-        code, out, cfgs, _, rec = install(["--yes", "--no-start", "--gguf-dir", "{base}/mine"], prepare=prepare)
+        code, out, cfgs, _, rec = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start", "--gguf-dir", "{base}/mine"],
+                                          prepare=prepare)
         self.assertEqual(code, 0, out)
         self.assertEqual((rec["downloads"], rec["urls"]), ([], []))
         first = Path(rec["base"]) / "mine" / "UD-IQ3_XXS" / "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00002.gguf"
@@ -1135,7 +1170,7 @@ class ModelFilesFound(unittest.TestCase):
                 s = folder / f"GLM-5.3-Flash-UD-IQ3_XXS-0000{i}-of-00002.gguf"
                 s.write_bytes(b"")
                 setup.mark(s)
-        code, out, cfgs, _, rec = install(["--yes", "--no-start"], prepare=prepare)
+        code, out, cfgs, _, rec = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start"], prepare=prepare)
         self.assertEqual(code, 0, out)
         self.assertEqual((rec["downloads"], rec["urls"]), ([], []))
         self.assertIn("(already downloaded)", out)
@@ -1228,12 +1263,16 @@ class Check(unittest.TestCase):
     def test_check_writes_nothing(self):
         code, out, cfgs, _, rec = install(["--check"])
         self.assertEqual(code, 0, out)
-        self.assertIn("This PC can run GLM-5.3-Flash (UD-IQ3_XXS recommended)", out)
+        self.assertIn("This PC can run GLM-5.3-Flash (UD-IQ4_XS recommended)", out)
         self.assertIn("RAM: 188 GiB", out)
-        self.assertIn("UD-IQ3_XXS 3-bit: ~109 GiB of experts in RAM - fits (~79 GiB of RAM left beside them); "
+        self.assertIn("UD-IQ3_XXS 3-bit: ~105 GiB of experts in RAM - fits (~83 GiB of RAM left beside them); "
                       "download ~120 GB", out)
-        self.assertIn("UD-IQ4_XS  4-bit: ~151 GiB of experts in RAM - fits, with little RAM to spare (only ~37 GiB of "
-                      "RAM left beside them); download ~170 GB", out)
+        self.assertIn("UD-IQ4_XS  4-bit: ~139 GiB of experts in RAM - fits (~49 GiB of RAM left beside them); "
+                      "download ~157 GB", out)
+        out = install(["--check"], ram=157.0)[1]                              # 160 GB: the 4-bit is tight
+        self.assertIn("This PC can run GLM-5.3-Flash (UD-IQ3_XXS recommended)", out)
+        self.assertIn("UD-IQ4_XS  4-bit: ~139 GiB of experts in RAM - fits, with little RAM to spare (only ~18 GiB of "
+                      "RAM left beside them); download ~157 GB", out)
         self.assertEqual((cfgs, rec["downloads"], rec["builds"], rec["urls"]), ({}, [], [], []))
         self.assertFalse((Path(rec["base"]) / "Strata-GLM-data").exists())
         self.assertFalse((Path(rec["base"]) / "settings.json").exists())
@@ -1244,7 +1283,7 @@ class Check(unittest.TestCase):
             (base / "settings.json").write_text(json.dumps({"data_dir": str(base / "big" / "Strata-GLM-data")}))
         code, out, _, _, rec = install(["--check"], prepare=prepare, free=100.0)
         self.assertEqual(rec["disks"], [Path(rec["base"]) / "big" / "Strata-GLM-data"])   # remembered by setup
-        self.assertIn("download ~170 GB, but only 100 GB of disk space is free", out)
+        self.assertIn("download ~157 GB, but only 100 GB of disk space is free", out)
         _, _, _, _, rec = install(["--check", "--models-dir", "{base}/elsewhere/models"])
         self.assertEqual(rec["disks"], [Path(rec["base"])])                  # the drive a new folder would be on
 

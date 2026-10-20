@@ -37,7 +37,7 @@ USER = {"sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 40, "min_p": 0.
 
 def run_setup(*extra, configs=()):
     """setup --yes --no-start for the 3-bit model: (exit code, output, its config)."""
-    code, out, cfgs, _, _ = install(["--yes", "--no-start", *extra], configs=configs)
+    code, out, cfgs, _, _ = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start", *extra], configs=configs)
     return code, out, cfgs.get(CONFIG)
 
 

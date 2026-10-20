@@ -33,10 +33,10 @@ The same in technical terms:
   server's end of the pipe closing) and loads them at the next start, so the cache starts full. Every ordinary stop
   of the server (Ctrl+C, closing its terminal, SIGTERM) ends the engine with `QUIT`; an engine that is killed ends
   without saving them ([TROUBLESHOOTING.md](TROUBLESHOOTING.md) has the details). Setup puts one in the run config.
-- **RAM:** every routed expert stays in the GGUF file, mapped into memory. At 3-bit that is about 117 GB, at 4-bit
-  about 162 GB (calculated from the model's shapes). The CPU computes the experts the cache doesn't hold, in place,
-  while the GPU computes the shared expert. Before the server says it is ready, the engine reads the experts once
-  so they are in RAM rather than on disk (`--no-warm` skips this).
+- **RAM:** every routed expert stays in the GGUF file, mapped into memory. At 3-bit that is 112.5 GB (counted in the
+  real file), at 4-bit about 149 GB (derived from its download, not measured). The CPU computes the experts the cache
+  doesn't hold, in place, while the GPU computes the shared expert. Before the server says it is ready, the engine
+  reads the experts once so they are in RAM rather than on disk (`--no-warm` skips this).
 - **Reading a prompt:** the prompt is read in chunks of 256 tokens (`--prefill-chunk`). Each expert that a chunk
   uses runs once on the GPU for all of the chunk's tokens. It comes from the expert cache when it is there.
   Otherwise it streams in from RAM through two buffers, so one expert copies in while the previous one computes.
@@ -65,8 +65,9 @@ instead:
   thinking, so it differs from the engine's state from that point on. The engine restarts from the checkpoint and
   reads the reply and the new message, not the whole conversation. A regenerated reply restarts there too.
 - **Memory.** `--park-mib` caps the RAM that parked conversations and checkpoints use: 8192 MiB by default, 4096
-  when setup finds less than 40 GiB of RAM left beside the experts (the 4-bit model on 192 GB). The conversation used
-  least recently goes first. Parking lives in the engine's RAM, so a restart of the engine starts with none.
+  when setup finds less than 40 GiB of RAM left beside the experts (the 3-bit model on 128 GB, the 4-bit one on
+  160 GB). The conversation used least recently goes first. Parking lives in the engine's RAM, so a restart of the
+  engine starts with none.
 
 None of this changes the answers: on the CPU engine, `tools/glm53_park_check.py` checks each resumed reply against
 a fresh engine's, token for token.

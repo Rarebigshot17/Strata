@@ -70,18 +70,23 @@ BUILD_DIR = ROOT / "build"
 # an earlier install's config, start script and model folder): the 4-bit size was IQ4_XS until the repository's
 # listing showed its files are UD-IQ4_XS, with no plain IQ4_XS.  The sizes are decimal GB (10^9 bytes), as the Hub
 # and the disks count them; the RAM is counted in GiB (2^30 bytes), as Linux reports it, so the experts are compared
-# with it in GiB (experts_gib).
+# with it in GiB (experts_gib).  Where they come from: both downloads from the repository's listing, the 3-bit's
+# experts from tools/glm53_inspect.py on its file (napster-ai, 2026-10-20; that inspector counted the MTP layer's
+# experts too, which the engine does not load, so it keeps a little less in RAM).  The 4-bit's experts are not
+# measured: derived as its download less what the 3-bit file holds beside its experts (NON_EXPERT_GB), about 149 GB.
+NON_EXPERT_GB = 7.9      # the real UD-IQ3_XXS file beside its routed experts (the same inspector run)
 MODELS = {
-    "UD-IQ3_XXS": {"bits": "3-bit", "about": "the recommended size for a PC with about 192 GB of RAM",
-                   "download_gb": 120, "experts_gb": 117},
-    "UD-IQ4_XS": {"bits": "4-bit", "about": "better answers, but its experts need about 42 GiB more RAM",
-                  "download_gb": 170, "experts_gb": 162, "fallback": ("UD-Q4_K_XL",), "was": ("IQ4_XS",)},
+    "UD-IQ3_XXS": {"bits": "3-bit", "about": "for a PC with 128 GB of RAM or more",
+                   "download_gb": 120.4, "experts_gb": 112.5},
+    "UD-IQ4_XS": {"bits": "4-bit", "about": "better answers, but its experts need about 34 GiB more RAM",
+                  "download_gb": 156.8, "experts_gb": 156.8 - NON_EXPERT_GB, "fallback": ("UD-Q4_K_XL",),
+                  "was": ("IQ4_XS",)},
 }
 GIB = 2**30
 RAM_LEFT_GIB = 40        # RAM beside the experts from which a size fits well: Linux, the server, parked conversations
 RAM_LEFT_MIN_GIB = 12    # below this the OS pages the experts from the disk: very slow, or no start at all
 PARK_MIB = 8192          # the engine's RAM for parked conversations and checkpoints (its default)
-PARK_MIB_TIGHT = 4096    # with less than RAM_LEFT_GIB beside the experts (the 4-bit model on 192 GB)
+PARK_MIB_TIGHT = 4096    # with less than RAM_LEFT_GIB beside the experts (the 3-bit on 128 GB, the 4-bit on 160 GB)
 CONTEXTS = [32768, 131072, 262144, 524288, 1048576]
 MAX_CONTEXT = 1048576    # GLM-5.3-Flash's trained context
 # The attention cache in VRAM, per token of context (calculated from the engine's buffers, src/glm/engine.cu): the
@@ -350,7 +355,7 @@ def size_name(name) -> str | None:
 
 
 def experts_gib(model: str) -> float:
-    """The size's experts in GiB, the unit of the RAM: 109 at 3-bit, 151 at 4-bit."""
+    """The size's experts in GiB, the unit of the RAM: 105 at 3-bit, 139 at 4-bit (that one derived, see MODELS)."""
     return MODELS[model]["experts_gb"] * 1e9 / GIB
 
 
@@ -366,8 +371,8 @@ def model_fit(model: str, ram: float) -> str:
 
 
 def recommended_model(ram: float) -> str:
-    """The best size that fits well (192 GB installed, 188 GiB reported: the 3-bit; the 4-bit leaves only ~37 GiB
-    there); the smallest when none does."""
+    """The best size that fits well (192 GB installed, 188 GiB reported: the 4-bit, ~49 GiB left beside its experts;
+    160 GB, ~157 GiB: the 3-bit, as the 4-bit would leave ~18 GiB); the smallest when none does."""
     return next((m for m in reversed(list(MODELS)) if model_fit(m, ram) == "fits"), next(iter(MODELS)))
 
 
@@ -611,7 +616,7 @@ def download(url, dst: Path, what=None):
 
 def verify_file(s: Path, size: int, sha: str | None) -> None:
     """A downloaded shard against the repository's listing: its size, and its SHA-256 when the listing has one.  The
-    hash is kept in the finish mark, so the minutes of hashing 120-170 GB happen once.  A wrong file is deleted, so
+    hash is kept in the finish mark, so the minutes of hashing 120-157 GB happen once.  A wrong file is deleted, so
     the next run downloads it again."""
     m = s.with_name(s.name + ".done")
     if sha and m.exists() and f"sha256 {sha}" in m.read_text(encoding="utf-8", errors="replace"):
@@ -1125,7 +1130,7 @@ def update_installed_engine(force=False, yes=False) -> None:
 
 
 # ------------------------------------------------------------------------------------------------ the data folder
-# The model files (120-170 GB) live in a data folder NEXT TO the Strata folder (`Strata-GLM-data`), not inside it:
+# The model files (120-157 GB) live in a data folder NEXT TO the Strata folder (`Strata-GLM-data`), not inside it:
 # updating Strata by unzipping a new copy then finds them instead of downloading them again.  Where it is, and which
 # Strata folders this user ran, is kept in a small per-user file, so every Strata folder on the PC finds the same
 # files.  Its name and the data folder's are this version's own: an older Strata of the Qwen model keeps its own.
@@ -1658,7 +1663,7 @@ def check_only(a) -> int:
     for m, d in MODELS.items():
         verdict = {"fits": "fits", "tight": "fits, with little RAM to spare", "no": "does not fit"}
         say(f"  {m:10s} {d['bits']}: ~{experts_gib(m):.0f} GiB of experts in RAM - "
-            f"{verdict[model_fit(m, ram)]} ({fit_text(m, ram)}); download ~{d['download_gb']} GB"
+            f"{verdict[model_fit(m, ram)]} ({fit_text(m, ram)}); download ~{d['download_gb']:.0f} GB"
             + ("" if free >= d["download_gb"] + 1 else f", but only {free:.0f} GB of disk space is free"))
     if not any(model_fit(m, ram) != "no" for m in MODELS):
         # #977: every size says "does not fit", so the verdict says so too (and the exit code, for scripts)
@@ -1672,11 +1677,13 @@ def check_only(a) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    q3, q4 = MODELS
     ap.add_argument("--model", choices=[n for m in MODELS for n in size_names(m)],
                     metavar="{" + ",".join(MODELS) + "}",
-                    help="UD-IQ3_XXS = 3-bit (~120 GB download, ~109 GiB of experts in RAM), UD-IQ4_XS = 4-bit "
-                         "(~170 GB, ~151 GiB; UD-Q4_K_XL when the repository has no UD-IQ4_XS; IQ4_XS, its earlier "
-                         "name, is taken too). Default: the one this PC's RAM fits")
+                    help=f"{q3} = 3-bit (~{MODELS[q3]['download_gb']:.0f} GB download, ~{experts_gib(q3):.0f} GiB of "
+                         f"experts in RAM), {q4} = 4-bit (~{MODELS[q4]['download_gb']:.0f} GB, "
+                         f"~{experts_gib(q4):.0f} GiB, estimated; UD-Q4_K_XL when the repository has no {q4}; IQ4_XS, "
+                         "its earlier name, is taken too). Default: the one this PC's RAM fits")
     ap.add_argument("--context", type=int, metavar="N",
                     help=f"the longest conversation in tokens (up to {MAX_CONTEXT}); each token takes "
                          f"{kb_per_token()} of VRAM ({mla_gb(131072):.1f} GB at 131072, calculated)")
@@ -1698,7 +1705,7 @@ def main() -> int:
                          "that uses the API; remembered for this model, also in run-<model>.sh)")
     ap.add_argument("--browser", dest="browser", action="store_true",
                     help="open the chat page again when the model is ready (the default; undoes --no-browser)")
-    ap.add_argument("--data-dir", help="where the model files go (120-170 GB): default Strata-GLM-data next to this "
+    ap.add_argument("--data-dir", help="where the model files go (120-157 GB): default Strata-GLM-data next to this "
                                        "folder, remembered for every Strata folder on this PC")
     ap.add_argument("--models-dir", help="where the GGUF files go (default: <data folder>/models)")
     ap.add_argument("--gguf-dir", help="use GGUF files you already have: a folder with every shard of the size "
@@ -1786,7 +1793,7 @@ def main() -> int:
     if not a.model:
         for i, m in enumerate(names, 1):
             d = MODELS[m]
-            say(f"  {i}) {m:10s} {d['bits']}, {d['about']}: download ~{d['download_gb']} GB, ~{experts_gib(m):.0f} "
+            say(f"  {i}) {m:10s} {d['bits']}, {d['about']}: download ~{d['download_gb']:.0f} GB, ~{experts_gib(m):.0f} "
                 f"GiB of experts in RAM ({fit_text(m, ram)})" + ("   (recommended)" if m == rec else ""))
     given = a.model or names[int(ask("Which size?", [str(i) for i in range(1, len(names) + 1)],
                                      str(names.index(rec) + 1), a.yes)) - 1]
@@ -1854,7 +1861,8 @@ def main() -> int:
         on_disk = sum(p.stat().st_size for s in shards for p in (s, s.with_name(s.name + ".part")) if p.is_file()) / 1e9
         ok(f"{quant}: {len(files)} file{'s' if len(files) > 1 else ''}, {total:.0f} GB")
         if quant != model:
-            # its experts, taken as the same share of its files as the size's own: what it leaves of the RAM (GiB)
+            # its experts, taken as the same share of its files as the size's own (the 4-bit's is derived, see
+            # MODELS): what it leaves of the RAM (GiB)
             experts = total * d["experts_gb"] / d["download_gb"] * 1e9 / GIB
             warn(f"the repository has no {model} files: the {d['bits']} model is its {quant} ({total:.0f} GB, about "
                  f"{experts:.0f} GiB of experts in RAM: "
