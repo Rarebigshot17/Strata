@@ -84,7 +84,15 @@ class Monitor(unittest.TestCase):
                             {"messages": [{"role": "user", "content": "Say hello."}],
                              "max_tokens": 256, **think, **kwargs})
 
+    def settled(self):
+        """The handler writes a request's final state (and finished_at) in its finally clause, after the answer is
+        sent: wait until every request has it."""
+        deadline = time.monotonic() + 5
+        while any(r.get("finished_at") is None for r in list(self.svc.api_requests)) and time.monotonic() < deadline:
+            time.sleep(0.01)
+
     def latest(self):
+        self.settled()
         summary = self.request("/api/requests")[1]["requests"][0]
         return self.request("/api/requests?id=" + summary["id"])[1]
 
@@ -181,7 +189,8 @@ class Monitor(unittest.TestCase):
         self.assertGreater(records[0]["load_s"], 0.02)
         self.assertGreater(records[1]["queue_s"], 0.02)
         self.assertLess(records[1]["load_s"], records[0]["load_s"])
-        self.assertTrue(all(r["state"] == "completed" for r in records))
+        self.settled()
+        self.assertEqual([r["state"] for r in records], ["completed", "completed"])
 
     def test_page_and_relative_assets_are_served(self):
         code, html = self.request("/api-monitor")
