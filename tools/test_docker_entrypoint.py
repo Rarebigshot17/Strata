@@ -200,6 +200,18 @@ class Entrypoint(unittest.TestCase):
         self.assertIn("Setting up glm-ud-iq3_xxs: downloading the model "
                       f"(~{setup.MODELS['UD-IQ3_XXS']['download_gb']:.0f} GB", out)
 
+    def test_the_dockerfile_gives_setups_sizes(self):
+        """The Dockerfile's comments: each size's download and experts as setup.py's MODELS has them, and the room the
+        volume needs.  Not the plan's earlier figures (117 and 162 GB of experts, a 170 GB download)."""
+        text = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        for m, d in setup.MODELS.items():
+            self.assertIn(m, text)
+            self.assertIn(f"~{d['download_gb']:.0f} GB", text)
+            self.assertIn(f"~{d['experts_gb']:.0f} GB", text)
+        self.assertIn("{:.0f}-{:.0f} GB".format(*(d["download_gb"] for d in setup.MODELS.values())), text)
+        for old in ("117 GB", "162 GB", "170 GB", "4-bit IQ4_XS"):
+            self.assertNotIn(old, text)
+
     def entry(self, **extra):
         env = {k: v for k, v in os.environ.items() if k != "STRATA_API_KEY"}
         env.update(STRATA_DATA=str(self.data), MODEL="UD-IQ3_XXS", REINSTALL="0", **extra)
