@@ -88,7 +88,10 @@ inline double kl_div(const std::vector<float>& a, const std::vector<float>& b) {
 /// The residual streams after every layer, compared position by position (--check-cpu): the first layer where the
 /// GPU parts from the CPU is where a kernel is wrong. It says where to look and is not part of the rule. A NaN or an
 /// infinity in a layer's streams parts it too (rel_diff gives NaN, which no comparison with a limit lets through),
-/// and keeps the worst diff at NaN: an overflow is the kind of wrong a GPU kernel makes.
+/// and keeps the worst diff at NaN: an overflow is the kind of wrong a GPU kernel makes. layer_check() gives it the
+/// logits' relative limit for the weights: the CUDA rounding moves the residual streams about as much as the logits
+/// (0.57 to 0.96 times, strata-glm-ref layer dumps of quantized copies, an x86 CPU), and with a fixed 1e-2 q4_0's
+/// first layer parted on positions of runs whose logits were within the rounding (napster-ai: 1.1% to 1.7%).
 struct LayerCheck {
     double limit = 1e-2;    ///< a layer whose relative diff is above this has parted
     double worst = 0;       ///< over the layers compared; NaN once one held a NaN or an infinity
@@ -102,6 +105,13 @@ struct LayerCheck {
     /// Whether a layer whose relative diff is `d` has parted from the CPU's.
     bool parted(double d) const { return !(d <= limit); }
 };
+
+/// A LayerCheck whose limit is the logits' relative limit for these weights (check_limits).
+inline LayerCheck layer_check(const CheckLimits& l) {
+    LayerCheck c;
+    c.limit = l.rel_diff_max;
+    return c;
+}
 
 /// The CPU's and the GPU's logits, compared row by row.
 struct LogitCheck {

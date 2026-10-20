@@ -181,6 +181,17 @@ int main() {
             std::snprintf(msg, sizeof msg, "the worst layer diff still shows %s", what[k]);
             expect(!(c.worst <= c.limit), msg);
         }
+        // the limit follows the weights, as the logits' does: on napster-ai q4_0's first layer differed from the
+        // CPU's by 1.1% to 1.7% on the GPU in runs whose logits were within the rounding
+        const LayerCheck q = layer_check(quant), f = layer_check(flt);
+        auto q4 = cpu, q_far = cpu, f_off = cpu;
+        q4[3] += 0.0172f * row_max(cpu);
+        q_far[3] += 0.06f * row_max(cpu);
+        f_off[3] += 0.01f * row_max(cpu);
+        expect(!q.parted(rel_diff(cpu, q4)), "q4_0's 1.7% has not parted with quantized weights");
+        expect(q.parted(rel_diff(cpu, q_far)), "6% has parted with quantized weights");
+        expect(f.parted(rel_diff(cpu, f_off)), "1% has parted with float weights");
+        expect(!f.parted(rel_diff(cpu, cpu)), "the same streams have not parted");
     }
 
     std::printf(bad ? "FAILED\n" : "all ok\n");

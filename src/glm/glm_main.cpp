@@ -233,7 +233,7 @@ int main(int argc, char** argv) {
         strata::glm::Trace tg, tc;
         const strata::glm::CheckLimits lim = strata::glm::check_limits(quantized_weights(model));
         strata::glm::LogitCheck chk;
-        strata::glm::LayerCheck layers;
+        strata::glm::LayerCheck layers = strata::glm::layer_check(lim);
         double gpu_s = 0;
         for (size_t i = 0; i < ids.size(); ++i) {
             const auto a = std::chrono::steady_clock::now();
