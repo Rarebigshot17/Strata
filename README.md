@@ -9,17 +9,17 @@ coding agents and bots talk to it as they would to a cloud model, and nothing le
 [Niko1221/Strata](https://github.com/Niko1221/Strata), which runs Qwen3.8-Flash-Next on gaming PCs. This fork keeps
 its design, its server and its web app, replaces the engine, and runs GLM-5.3-Flash only.
 
-> **Status: the engine has not run on a GPU or on the real model yet.** There are no measured speeds, load times or
-> memory figures. The numbers on this page are calculated from the model's shapes, and they say so. What is checked
-> and what is not: [Status](#status).
+> **Status: the engine has run on the owner's GPUs, but only on small random test models, not yet on the real
+> model.** There are no measured speeds, load times or memory figures. The sizes on this page come from the real
+> files or are calculated or derived, and they say which. What is checked and what is not: [Status](#status).
 
 ## What you need
 
 | | |
 | --- | --- |
 | **Graphics cards** | **NVIDIA**, compute capability 7.5 or newer (GeForce RTX 20 series and newer). One card or several: the model's layers are split over them. Driver **580** or newer for the CUDA 13 toolkit setup installs; 525 or newer when it builds with a CUDA 12 toolkit you have. Setup stops with an older one. |
-| **RAM** | Every expert of the model stays in RAM: about 117 GB (109 GiB) at 3-bit, about 162 GB (151 GiB) at 4-bit (calculated). Setup counts RAM in GiB, as Linux reports it (`free -g`). It wants at least 12 GiB left beside the experts for Linux and the server, and calls a size a good fit when 40 GiB are left. So Linux must report about **121 GiB** at the least for the 3-bit size (a PC with 128 GB installed reports about 125) and about **163 GiB** for the 4-bit size (192 GB installed: about 188). [Which size](#which-size-should-i-pick). |
-| **Disk** | About 120 GB free for the 3-bit download, about 170 GB for the 4-bit one, and about 10 GB more when setup installs the CUDA toolkit. An SSD helps: the first start after a reboot reads every expert from it. |
+| **RAM** | Every expert of the model stays in RAM: 109.9 GB (102.4 GiB) at 3-bit, counted in the real file; about 146 GB (136 GiB) at 4-bit, derived from its download ([Which size](#which-size-should-i-pick)). Setup counts RAM in GiB, as Linux reports it (`free -g`). It wants at least 12 GiB left beside the experts for Linux and the server, and calls a size a good fit when 40 GiB are left. So Linux must report about **114 GiB** at the least for the 3-bit size (a PC with 128 GB installed reports about 125) and about **148 GiB** for the 4-bit size (192 GB installed: about 188). |
+| **Disk** | 120.4 GB free for the 3-bit download, 156.8 GB for the 4-bit one (the repository's listing), and about 10 GB more when setup installs the CUDA toolkit. An SSD helps: the first start after a reboot reads every expert from it. |
 | **System** | **Linux** only: setup stops on any other system. A CPU with **AVX2**: without it setup warns, because the experts the cards do not hold run on the CPU. |
 
 The cards hold everything except the routed experts, plus the attention cache and a cache of the most used experts.
@@ -76,15 +76,15 @@ every step that is already done:
 5. **Downloads the model.** A stopped download resumes where it stopped. Each file's size and SHA-256 are checked
    against the repository's listing. The files go to `Strata-GLM-data/models` next to the Strata folder
    (`--data-dir` puts them elsewhere; `--gguf-dir` uses files you already have).
-6. **Writes** the run config (`strata-glm-ud-iq3_xxs.json` or `strata-glm-iq4_xs.json`) and a start script
-   (`run-glm-ud-iq3_xxs.sh` or `run-glm-iq4_xs.sh`), and starts the model on port **8101**. Your browser opens the
-   web app when the model is ready.
+6. **Writes** the run config (`strata-glm-ud-iq3_xxs.json` or `strata-glm-ud-iq4_xs.json`) and a start script
+   (`run-glm-ud-iq3_xxs.sh` or `run-glm-ud-iq4_xs.sh`), and starts the model on port **8101**. Your browser opens
+   the web app when the model is ready.
 
-**How long this takes is not measured yet.** The download depends on your connection: at 100 MB/s, 120 GB takes
-about 20 minutes (calculated). Before the server says it is ready, the engine reads every expert into RAM once (the
-warm-up; it prints its progress). From a SATA SSD, at most about 550 MB/s, 117 GB takes at least about 3.5 minutes
-(calculated). Setup prints its own estimates for the compile and the toolkit install. None of them is measured on
-this version.
+**How long this takes is not measured yet.** The download depends on your connection: at 100 MB/s, 120 GB takes about
+20 minutes (calculated). Before the server says it is ready, the engine reads every expert into RAM once (the
+warm-up; it prints its progress). From a SATA SSD, at most about 550 MB/s, the 3-bit's 109.9 GB take at least about
+3.3 minutes (calculated). Setup prints its own estimates for the compile and the toolkit install. None of them is
+measured on this version.
 
 **Next time**, run `./setup.sh` again (or the start script). It starts right away and downloads nothing twice.
 Press Ctrl+C, or close the terminal, to stop the model. `./update.sh` updates Strata without starting it.
@@ -100,13 +100,15 @@ The 4-bit size is closer to the full model. How much better its answers are is n
 
 | Size | Setup's name | Download | Experts in RAM |
 | --- | --- | ---: | ---: |
-| **3-bit** | `UD-IQ3_XXS` | about 120 GB | about 117 GB (109 GiB) |
-| **4-bit** | `IQ4_XS` (`UD-Q4_K_XL` when the repository has no IQ4_XS) | about 170 GB | about 162 GB (151 GiB) |
+| **3-bit** | `UD-IQ3_XXS` | 120.4 GB | 109.9 GB (102.4 GiB) |
+| **4-bit** | `UD-IQ4_XS` (`UD-Q4_K_XL` when the repository has no UD-IQ4_XS) | 156.8 GB | about 146 GB (136 GiB), derived |
 
-These sizes are setup's own figures, calculated from the model's shapes (about 305 billion expert parameters at
-3.06 or 4.25 bits each), not measured. Setup reads the real file sizes from the repository before it downloads.
-When it takes `UD-Q4_K_XL` instead of `IQ4_XS`, it works out that file's share of experts from its real size and
-says what that leaves.
+These are setup's own figures. The downloads are the repository's listing (2026-10-20). The 3-bit experts are what
+`tools/glm53_inspect.py` counted in the real file on napster-ai for the 45 layers the engine runs. The file holds
+7.7 GB of other tensors (on the GPUs) and 2.8 GB for the MTP layer, which the engine does not load. The 4-bit
+experts are not measured: they are its download less those 7.7 and 2.8 GB. Setup reads the real file sizes from the
+repository before it downloads. When it takes `UD-Q4_K_XL` (199.7 GB) instead of `UD-IQ4_XS`, it works out that
+file's experts as the same share of its size and says what that leaves.
 
 What is left beside the experts holds Linux, the server, your other programs and the parked conversations
 ([Using it](#using-it)). Setup's verdict is the RAM Linux reports minus the experts, both in GiB:
@@ -114,9 +116,10 @@ What is left beside the experts holds Linux, the server, your other programs and
 | Your RAM (Linux reports) | 3-bit: RAM left | 4-bit: RAM left | Setup recommends |
 | --- | --- | --- | --- |
 | 96 GB (about 94 GiB) | does not fit | does not fit | neither fits: 3-bit is the default answer, and setup asks before it installs it |
-| 128 GB (about 125 GiB) | about 16 GiB: tight | does not fit | 3-bit, with less RAM for parked conversations |
-| **192 GB** (about 188 GiB) | about 79 GiB: fits | about 37 GiB: tight | **3-bit** |
-| 256 GB (about 251 GiB) | about 142 GiB: fits | about 100 GiB: fits | 4-bit |
+| 128 GB (about 125 GiB) | about 23 GiB: tight | does not fit | 3-bit, with less RAM for parked conversations |
+| 160 GB (about 157 GiB) | about 55 GiB: fits | about 21 GiB: tight | 3-bit |
+| **192 GB** (about 188 GiB) | about 86 GiB: fits | about 52 GiB: fits | **4-bit** |
+| 256 GB (about 251 GiB) | about 149 GiB: fits | about 115 GiB: fits | 4-bit |
 
 - **Fits:** 40 GiB or more left.
 - **Tight:** 12 to 40 GiB left. Setup warns and gives parked conversations 4096 MiB instead of 8192
@@ -127,8 +130,8 @@ What is left beside the experts holds Linux, the server, your other programs and
 
 The RAM Linux reports in this table is about 2% under the RAM installed (188 GiB for 192 GB, as setup's tests
 take it); it differs a little from PC to PC. `./setup.sh --check` prints the figures for your PC without installing
-anything. On napster-ai with 192 GB setup recommends the 3-bit size; with the 91 GiB it has for now, neither size
-fits.
+anything. On napster-ai with 192 GB setup recommends the 4-bit size; with the 91 GiB it has for now, neither size
+fits. The 4-bit column rests on the derived figure: its file's own count may move it a few GiB.
 
 ## Using it
 
@@ -163,8 +166,9 @@ fits.
   which uses context in long sessions: [DETAILS.md](docs/DETAILS.md#thinking).
 - **Tool calls** are read from the model's own special tokens only. A call that the model copies as plain text, from
   a tool result, a web page or the user's message, stays text: it is never returned as a call, and never runs as an
-  MCP tool. This needs GLM's tags to be special tokens in the model's tokenizer; that is expected, but not checked
-  on the real GGUF yet (the server window says at the start: a `WARNING` line means it reads them from the text). A
+  MCP tool. This needs GLM's tags to be special tokens in the model's tokenizer. The real 3-bit GGUF has them so,
+  read on napster-ai (`tools/glm53_template_probe.py`); the server window says it at the start, and a `WARNING`
+  line there means it reads them from the text. A
   request that declares no tools, or sets `tool_choice` to `"none"`, gets no calls at all. This matters for an agent
   that runs shell commands. MCP tools set up on the server run only for Strata's own web page, unless the run config
   says `"mcp_for_api": true`.
@@ -236,10 +240,22 @@ The longer explanation: [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md).
 
 ## Status
 
-What is checked, without a GPU and without the real model:
+What has run on napster-ai, the owner's PC, on 2026-10-20 (an RTX 3090 Ti 24 GB, an RTX 3080 Ti 12 GB and an
+RTX 3080 10 GB, compute capability 8.6, driver 580.95.05, CUDA 13.2, gcc 14.2):
 
-- **The CPU reference** (`strata-glm-ref`) matches llama.cpp to float rounding on small random GLM-5.3-Flash models
-  (`tools/glm53_selftest.sh`).
+- **The builds:** llama.cpp and the engine (`strata-glm`, `strata-glm-ref`), compiled with CUDA.
+- **The CPU reference** (`strata-glm-ref`) against llama.cpp on small random GLM-5.3-Flash models: every model
+  passes, KL 0 (`tools/glm53_selftest.sh`).
+- **The GPU engine** (`strata-glm`) on the same small models (`tools/glm53_gpu_check.sh`): its decode matched the
+  CPU reference (40 of 40) and llama.cpp (KL 0), on one card and with the layers split over the three. Conversation
+  parking passed there too. The check of the prompt path failed on a bug in the check itself; the bug is fixed, and
+  that check has not run again yet.
+- **The real 3-bit file, read but not run:** `tools/glm53_inspect.py` read its shapes and its expert types and
+  sizes, and `tools/glm53_template_probe.py` its special tokens and chat template. The server's tokenizer agrees
+  with llama.cpp's on 21 of 21 strings. The server ships the real file's chat template, and the tests use it.
+
+What is checked without a GPU:
+
 - **Conversation parking and checkpoints:** every resumed reply is the same, token for token, as a fresh engine's
   (`tools/glm53_park_check.py`, on the CPU engine).
 - **The server end to end** on the CPU engine: tokenizer, chat, streaming, a resumed second turn, completions,
@@ -249,12 +265,10 @@ What is checked, without a GPU and without the real model:
 
 What is **not** checked yet:
 
-- **The GPU engine** (`strata-glm`) is written but has never run on a GPU. Its logits have not been compared with
-  llama.cpp's on the real model.
-- **The real model** has not run in Strata. Only its tokenizer and chat template were read from the real GGUF, on
-  napster-ai (`tools/glm53_template_probe.py`): the server ships that template (`serve/chat_template.jinja`), and the
-  tests use it.
-- **No speed, load time or memory use is measured.** Every such figure in these docs is calculated.
+- **The real model** has not run in Strata: it needs more RAM on napster-ai (91 GiB for now, 192 GB planned). So
+  the GPU engine's logits have not been compared with llama.cpp's on it.
+- **No speed, load time or memory use is measured.** Every such figure in these docs is calculated or derived, and
+  says so.
 - **A full install** that ends with the real model answering has not run yet.
 
 The steps that check these on napster-ai, one by one: [docs/GLM53_PORT.md](docs/GLM53_PORT.md) ("What to run on

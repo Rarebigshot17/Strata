@@ -4,12 +4,14 @@ This is the reference for using Strata's server: every route, the request fields
 how several clients share the engine, monitoring, security and limits. How the engine works is in
 [HOW_IT_WORKS.md](HOW_IT_WORKS.md); installing is in [INSTALL.md](INSTALL.md).
 
-**What has been checked so far.** Nothing has run on a GPU or on the real GLM-5.3-Flash model yet, so this page has
-no measured speeds, load times or memory figures. Figures marked "calculated" come from the model's shapes. What is
-checked: the server's behaviour by its Python tests (a scripted engine stands in for the model), the server end to
-end on the CPU reference engine with a small random GLM model (`tools/glm53_server_check.sh`), conversation parking
-(`tools/glm53_park_check.py`) and the CPU reference against llama.cpp (`tools/glm53_selftest.sh`). Where something
-depends on the real model's files (its chat template, its token types), the page says so.
+**What has been checked so far.** The real GLM-5.3-Flash model has not run yet, so this page has no measured speeds,
+load times or memory figures. Figures marked "calculated" come from the model's shapes. What is checked: the
+server's behaviour by its Python tests (a scripted engine stands in for the model), the server end to end on the CPU
+reference engine with a small random GLM model (`tools/glm53_server_check.sh`), conversation parking
+(`tools/glm53_park_check.py`) and the CPU reference against llama.cpp (`tools/glm53_selftest.sh`). On napster-ai's
+GPUs (2026-10-20, small random models) the GPU engine's decode matched the CPU reference and llama.cpp, and
+conversation parking passed; its prompt path's check failed on a bug in the check, fixed since and not yet rerun.
+Where something depends on the real model's files (its chat template, its token types), the page says so.
 
 Contents: [The API](#the-api) · [Settings](#settings) ·
 [Several clients on one engine](#several-clients-on-one-engine) · [Monitoring](#monitoring) · [Security](#security) ·
@@ -257,8 +259,9 @@ every one of them as a special token (`output_tags` in `serve/server.py`; `ORDIN
 page or the user - stays text and is never run, and an ordinary `</think>` does not end the thinking. This matters for
 an agent that runs shell commands: a call written into a fetched page does not run because the model repeats its
 text; only a call the model writes itself, with its own tokens, is a call.
-GLM's GGUF files are expected to list these tags as special tokens; on the real file this is still to be checked
-([GLM53_SERVER_PORT.md](GLM53_SERVER_PORT.md), "Known risks"). Should one of them not be a special token, the
+The real 3-bit GGUF lists every one of these tags as a special token (user-defined, type 4; read on napster-ai with
+`tools/glm53_template_probe.py`, whose start line there says calls come from the special tokens only). Should one
+of them not be a special token in some other GGUF, the
 server reads all of them from the text instead, and that protection is gone. The server window says which at the
 start: a line that calls come from the special tokens only, or a `WARNING` line that names the missing tags. Requests
 with tools are served either way (refusing them would leave every agent without tools on such a GGUF).
@@ -701,7 +704,8 @@ checkpoints, and its next request reads its prompt again from the start. A 1,048
 On the CPU reference engine this does not change the answers: `tools/glm53_park_check.py` checks each resumed reply
 against a fresh engine's, token for token (with small random models). On the GPU engine, chunked prompts and the
 expert cache change the rounding, so a resumed reply may pick different tokens from a fresh one (the script is exact
-there only with `--prefill-chunk 0 --no-expert-cache`); it has not run on a GPU yet.
+there only with `--prefill-chunk 0 --no-expert-cache`). With those options it passed on napster-ai's GPUs, the
+layers split over three cards (2026-10-20, small random models).
 
 The **Conversation cache** card in the Monitor tab shows: the parked conversations and checkpoints and the RAM they
 use against `--park-mib`; how many requests reused part of their prompt; the last request's reused tokens of its

@@ -7,9 +7,10 @@ is [INSTALL.md](INSTALL.md).
 
 Work through the steps in order. Tell the user what you are doing in plain words.
 
-> **Nothing has run on a GPU or on the real model yet.** The project has no measured speeds, load times or memory
-> figures. The sizes below are calculated. Do not promise the user a speed or a load time. If you time something on
-> their PC, say what you timed and that it was one run on their PC.
+> **The real model has not run yet.** The project has no measured speeds, load times or memory figures: the engine
+> has run on GPUs only on small random test models. The sizes below come from the repository's listing and the real
+> 3-bit file, or are derived or calculated, as each says. Do not promise the user a speed or a load time. If you
+> time something on their PC, say what you timed and that it was one run on their PC.
 
 ## 0. Rules
 
@@ -23,8 +24,9 @@ Work through the steps in order. Tell the user what you are doing in plain words
   first (step 2). If something is missing, ask the user to run the commands in step 4 in their own terminal.
 - **Do not install or change NVIDIA drivers** unless the user asks. Strata needs driver 580 or newer (525 or newer
   when an installed CUDA 12 toolkit builds the engine).
-- **The download is big:** about 120 GB for the 3-bit size, about 170 GB for the 4-bit. Ask the user before you start,
-  especially on a metered connection. At 100 Mbit/s, 120 GB takes about 2.7 hours (calculated).
+- **The download is big:** 120.4 GB for the 3-bit size, 156.8 GB for the 4-bit (the repository's listing). Ask the
+  user before you start, especially on a metered connection. At 100 Mbit/s, 120 GB takes about 2.7 hours
+  (calculated).
 - **Setup runs for a long time** (the build, the download). Run it in the background or with a long timeout and read
   its output; do not stop it because it is quiet for a while. It is resumable: the same command again continues where
   it stopped.
@@ -63,7 +65,7 @@ Check the rest by hand:
 | OS | `cat /etc/os-release` | Linux. Ubuntu 22.04 or 24.04 lets setup install the CUDA toolkit itself. |
 | GPUs, VRAM, driver | `nvidia-smi --query-gpu=index,name,memory.total,compute_cap,driver_version --format=csv` | Compute capability 7.5 or newer (RTX 20, 30, 40, 50 series), driver 580 or newer (525 or newer with an installed CUDA 12 toolkit). |
 | RAM | `free -g` (the `total` of `Mem:`) | See step 3. |
-| Free disk | `df -h .` (and the drive for `--data-dir`) | 120 GB (3-bit) or 170 GB (4-bit), plus about 8-10 GB if the CUDA toolkit is to be installed. |
+| Free disk | `df -h .` (and the drive for `--data-dir`) | 121 GB (3-bit) or 158 GB (4-bit), plus about 8-10 GB if the CUDA toolkit is to be installed. |
 | CPU | `grep -m1 -ow avx2 /proc/cpuinfo` | `avx2`. Without it setup goes on with a warning. |
 | CUDA toolkit | `nvcc --version`, or `ls /usr/local/cuda*/bin/nvcc /opt/cuda*/bin/nvcc` | 12.0 or newer (13.0 or newer for an RTX 50 card). Missing: step 4. |
 | C++ compiler | `g++ --version` | Present. Missing: step 4. |
@@ -75,18 +77,19 @@ If the PC does not meet these, tell the user which part is missing and stop. Det
 ## 3. Pick the size and the context
 
 Every routed expert stays in RAM. Setup compares the RAM `/proc/meminfo` reports (the `total` of `free -g`, in GiB)
-with what each size's experts take in GiB (calculated, from `setup.py`: about 109 GiB at 3-bit, 151 GiB at 4-bit):
+with what each size's experts take in GiB (from `setup.py`: about 102 GiB at 3-bit, counted in the real file; about
+136 GiB at 4-bit, derived from its download, not measured):
 
 | RAM (`free -g`) | Size | Why |
 | --- | --- | --- |
-| 191 GiB or more | `--model IQ4_XS` (4-bit) | Its ~151 GiB of experts leave 40 GiB or more. Setup recommends it. |
-| 163-190 GiB | `--model UD-IQ3_XXS` (3-bit) | Recommended. The 4-bit would leave under 40 GiB: setup allows it with a warning and gives parked conversations 4096 MiB. A PC with 192 GB installed (about 188 GiB) is here. |
-| 149-162 GiB | `--model UD-IQ3_XXS` | Recommended; the 4-bit does not fit. |
-| 121-148 GiB | `--model UD-IQ3_XXS` | Tight: setup warns and gives parked conversations 4096 MiB. Tell the user to close other big programs while it runs. |
-| under 121 GiB | none | Neither size fits. Tell the user. Setup can be forced (`--model UD-IQ3_XXS --yes`), but the OS would then read experts from the disk: very slow, or no start at all. |
+| 177 GiB or more | `--model UD-IQ4_XS` (4-bit) | Its ~136 GiB of experts leave 40 GiB or more. Setup recommends it. A PC with 192 GB installed (about 188 GiB) is here. |
+| 149-176 GiB | `--model UD-IQ3_XXS` (3-bit) | Recommended. The 4-bit would leave under 40 GiB: setup allows it with a warning and gives parked conversations 4096 MiB. |
+| 143-148 GiB | `--model UD-IQ3_XXS` | Recommended; the 4-bit does not fit. |
+| 115-142 GiB | `--model UD-IQ3_XXS` | Tight: setup warns and gives parked conversations 4096 MiB. Tell the user to close other big programs while it runs. |
+| under 115 GiB | none | Neither size fits. Tell the user. Setup can be forced (`--model UD-IQ3_XXS --yes`), but the OS would then read experts from the disk: very slow, or no start at all. |
 
-When the repository has no IQ4_XS files, the 4-bit size takes UD-Q4_K_XL instead; setup says so and works out what it
-leaves of the RAM.
+When the repository has no UD-IQ4_XS files, the 4-bit size takes UD-Q4_K_XL instead; setup says so and works out
+what it leaves of the RAM.
 
 Ask the user how long their conversations get (chats, files, tool output together), and pick the context from that.
 Each token takes 12.4 KB of VRAM, which the GPUs' expert cache gives up (calculated):
@@ -125,7 +128,7 @@ tail -f setup.out
 | Option | Why |
 | --- | --- |
 | `--yes` | The recommended answer to every question; no prompts. |
-| `--model UD-IQ3_XXS` or `IQ4_XS` | The size from step 3. With `--yes`, naming it is also the user's consent to a size setup would otherwise stop at. |
+| `--model UD-IQ3_XXS` or `UD-IQ4_XS` | The size from step 3. With `--yes`, naming it is also the user's consent to a size setup would otherwise stop at. |
 | `--context N` | The context from step 3. |
 | `--gpus all` | Every usable card, written into the config in nvidia-smi's order (or `--gpus 0,2` for some of them). Without it the engine uses CUDA's own order. |
 | `--no-browser` | Do not open a browser when the model is ready. |
@@ -148,12 +151,12 @@ nohup ./run-glm-ud-iq3_xxs.sh > strata-server.out 2>&1 &
 echo $! > strata-server.pid
 ```
 
-The script name is the one setup printed (`run-glm-iq4_xs.sh` for the 4-bit). For a server that starts with the PC,
-use the systemd unit in [INSTALL.md](INSTALL.md#running-it-as-a-service) instead, with the user's consent (it needs
-sudo).
+The script name is the one setup printed (`run-glm-ud-iq4_xs.sh` for the 4-bit; `run-glm-iq4_xs.sh` for a 4-bit
+install made when setup called it `IQ4_XS`). For a server that starts with the PC, use the systemd unit in
+[INSTALL.md](INSTALL.md#running-it-as-a-service) instead, with the user's consent (it needs sudo).
 
-The port opens only when the engine is ready. Before that, the engine reads every routed expert into memory: about
-117 GB (3-bit) or 162 GB (4-bit). At 550 MB/s, the top speed of a SATA SSD, that is about 3.5 or 5 minutes
+The port opens only when the engine is ready. Before that, the engine reads every routed expert into memory: 109.9 GB
+(3-bit) or about 146 GB (4-bit). At 550 MB/s, the top speed of a SATA SSD, that is about 3.3 or 4.4 minutes
 (calculated, not measured). `strata-server.out` shows the progress (`[strata] reading the experts into memory ...`,
 then `warming the experts: X of Y GB` about every 20 seconds). The server gives up when the engine has not said it
 is ready within 900 seconds; each step the engine reports (the layers on each GPU, the expert cache, the warm-up's
@@ -206,9 +209,8 @@ What the user should know about it:
 - **Agents that run tools** (a shell, the web): the model's tool calls come back as tool calls only when the request
   declares tools, and not with `"tool_choice": "none"`. When the model's tokenizer has GLM's tags as special tokens, a
   call is read only from those tokens, so call-like text copied from a tool result, a web page or the user stays text
-  and is never run. Whether the real GGUF has them as special tokens is still to be checked on a real install
-  ([GLM53_SERVER_PORT.md](GLM53_SERVER_PORT.md)): the server's start line says it, and a `WARNING` line about tool
-  calls read from the plain text means it does not; tell the user. The agent still decides what it runs: keep its own
+  and is never run. The real 3-bit GGUF has them as special tokens (read on napster-ai): the server's start line
+  says it, and a `WARNING` line about tool calls read from the plain text means a GGUF does not; tell the user. The agent still decides what it runs: keep its own
   confirmation for shell commands.
 - **MCP tools** set up in Strata's run config run for Strata's own chat page only, unless the config says
   `"mcp_for_api": true`.

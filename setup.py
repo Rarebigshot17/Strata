@@ -16,7 +16,7 @@ What the first run does (each step is skipped when it is already done):
   5. downloads the model's GGUF files (resumable; sizes and SHA-256 checked)
   6. writes strata-glm-<size>.json and run-glm-<size>.sh and starts the model
 
-Options: --model UD-IQ3_XXS|IQ4_XS, --context 131072, --port 8101, --yes (recommended answers, no questions),
+Options: --model UD-IQ3_XXS|UD-IQ4_XS, --context 131072, --port 8101, --yes (recommended answers, no questions),
 --setup (set up the other size / change settings instead of starting), --no-start, --no-browser, --host 0.0.0.0
 --api-key KEY (reach it from other devices on your network), --gpu N / --gpus 0,2, --park-mib N, --data-dir DIR,
 --models-dir DIR, --gguf-dir DIR (use GGUF files you already have), --build (compile the engine again), --check
@@ -66,19 +66,29 @@ BUILD_DIR = ROOT / "build"
 
 # The two sizes, by the quantization of their routed experts (docs/GLM53_PORT.md, "Memory on napster-ai").  Every
 # expert stays in RAM; the GPUs cache the most used ones.  "fallback": the files taken when the repository has none
-# of the size's own quantization.  The sizes are decimal GB (10^9 bytes), as the Hub and the disks count them; the
-# RAM is counted in GiB (2^30 bytes), as Linux reports it, so the experts are compared with it in GiB (experts_gib).
+# of the size's own quantization.  "was": a name the size had before, still taken wherever it can come from (--model,
+# an earlier install's config, start script and model folder): the 4-bit size was IQ4_XS until the repository's
+# listing showed its files are UD-IQ4_XS, with no plain IQ4_XS.  The sizes are decimal GB (10^9 bytes), as the Hub
+# and the disks count them; the RAM is counted in GiB (2^30 bytes), as Linux reports it, so the experts are compared
+# with it in GiB (experts_gib).  Where they come from: both downloads from the repository's listing, the 3-bit's
+# experts from tools/glm53_inspect.py on its file (napster-ai, 2026-10-20): those of the 45 layers the engine runs,
+# the ones it keeps in RAM and its warm-up reads, not the MTP layer's (blk.45), which it does not load.  The 4-bit's
+# experts are not measured: derived as its download less what the 3-bit file holds beside them (NON_EXPERT_GB and
+# MTP_GB), about 146 GB.
+NON_EXPERT_GB = 7.7      # the real UD-IQ3_XXS file's tensors beside the routed experts, on the GPU (the same run)
+MTP_GB = 2.8             # its MTP layer, not loaded (the same run)
 MODELS = {
-    "UD-IQ3_XXS": {"bits": "3-bit", "about": "the recommended size for a PC with about 192 GB of RAM",
-                   "download_gb": 120, "experts_gb": 117},
-    "IQ4_XS": {"bits": "4-bit", "about": "better answers, but its experts need about 42 GiB more RAM",
-               "download_gb": 170, "experts_gb": 162, "fallback": ("UD-Q4_K_XL",)},
+    "UD-IQ3_XXS": {"bits": "3-bit", "about": "for a PC with 128 GB of RAM or more",
+                   "download_gb": 120.4, "experts_gb": 109.9},
+    "UD-IQ4_XS": {"bits": "4-bit", "about": "better answers, but its experts need about 34 GiB more RAM",
+                  "download_gb": 156.8, "experts_gb": 156.8 - NON_EXPERT_GB - MTP_GB, "fallback": ("UD-Q4_K_XL",),
+                  "was": ("IQ4_XS",)},
 }
 GIB = 2**30
 RAM_LEFT_GIB = 40        # RAM beside the experts from which a size fits well: Linux, the server, parked conversations
 RAM_LEFT_MIN_GIB = 12    # below this the OS pages the experts from the disk: very slow, or no start at all
 PARK_MIB = 8192          # the engine's RAM for parked conversations and checkpoints (its default)
-PARK_MIB_TIGHT = 4096    # with less than RAM_LEFT_GIB beside the experts (the 4-bit model on 192 GB)
+PARK_MIB_TIGHT = 4096    # with less than RAM_LEFT_GIB beside the experts (the 3-bit on 128 GB, the 4-bit on 160 GB)
 CONTEXTS = [32768, 131072, 262144, 524288, 1048576]
 MAX_CONTEXT = 1048576    # GLM-5.3-Flash's trained context
 # The attention cache in VRAM, per token of context (calculated from the engine's buffers, src/glm/engine.cu): the
@@ -335,8 +345,19 @@ def free_gb(path):
 
 
 # ------------------------------------------------------------------------------------------------ the model's size
+def size_names(model: str) -> tuple:
+    """A size's own name, then the names it had before ("was")."""
+    return (model, *MODELS[model].get("was", ()))
+
+
+def size_name(name) -> str | None:
+    """The size a name stands for: a size of MODELS, or a name one had before (IQ4_XS: the 4-bit UD-IQ4_XS); None
+    for any other name."""
+    return next((m for m in MODELS if name in size_names(m)), None)
+
+
 def experts_gib(model: str) -> float:
-    """The size's experts in GiB, the unit of the RAM: 109 at 3-bit, 151 at 4-bit."""
+    """The size's experts in GiB, the unit of the RAM: 102 at 3-bit, 136 at 4-bit (that one derived, see MODELS)."""
     return MODELS[model]["experts_gb"] * 1e9 / GIB
 
 
@@ -352,8 +373,8 @@ def model_fit(model: str, ram: float) -> str:
 
 
 def recommended_model(ram: float) -> str:
-    """The best size that fits well (192 GB installed, 188 GiB reported: the 3-bit; the 4-bit leaves only ~37 GiB
-    there); the smallest when none does."""
+    """The best size that fits well (192 GB installed, 188 GiB reported: the 4-bit, ~52 GiB left beside its experts;
+    160 GB, ~157 GiB: the 3-bit, as the 4-bit would leave ~21 GiB); the smallest when none does."""
     return next((m for m in reversed(list(MODELS)) if model_fit(m, ram) == "fits"), next(iter(MODELS)))
 
 
@@ -370,6 +391,29 @@ def fit_text(model: str, ram: float) -> str:
     return {"fits": f"~{left:.0f} GiB of RAM left beside them",
             "tight": f"only ~{left:.0f} GiB of RAM left beside them",
             "no": f"they do not fit this PC's {ram:.0f} GiB of RAM"}[model_fit(model, ram)]
+
+
+def fallback_park(model: str, quant: str, total: float, ram: float, park: int, a, lead: str) -> int:
+    """A size's fallback files (the 4-bit: UD-Q4_K_XL), `total` GB listed for the download or found on this PC: their
+    experts, taken as the same share of the files as the size's own (the 4-bit's is derived, see MODELS), and what
+    they leave of the RAM (GiB), said after `lead`.  Judged as model_fit judges a size: asked below RAM_LEFT_MIN_GIB
+    (--model --yes is the consent), less parking below RAM_LEFT_GIB.  The parking RAM to use."""
+    d = MODELS[model]
+    experts = total * d["experts_gb"] / d["download_gb"] * 1e9 / GIB
+    warn(f"{lead}{quant} ({total:.0f} GB, about {experts:.0f} GiB of experts in RAM: "
+         + (f"~{ram - experts:.0f} GiB of RAM left beside them)" if ram >= experts else
+            f"more than this PC's {ram:.0f} GiB)"))
+    if model_fit(model, ram) != "no" and ram - experts < RAM_LEFT_MIN_GIB:
+        confirm_risk(f"{quant}'s experts do not fit beside Linux and the server in this PC's {ram:.0f} GiB of "
+                     "RAM: the OS would page them from the disk, so it would be very slow, or not start at all",
+                     bool(a.model), a.yes,
+                     f"{quant} needs about {experts + RAM_LEFT_MIN_GIB:.0f} GiB of RAM; this PC has {ram:.0f} GiB",
+                     f"choose {next(iter(MODELS))}, or --model {model} --yes to install it anyway",
+                     "  Install it anyway?")
+    elif ram - experts < RAM_LEFT_GIB and a.park_mib is None and park != PARK_MIB_TIGHT:
+        park = PARK_MIB_TIGHT
+        warn(f"parked conversations get {PARK_MIB_TIGHT} MiB instead of {PARK_MIB} (--park-mib {PARK_MIB_TIGHT})")
+    return park
 
 
 def mla_gb(ctx: int) -> float:
@@ -470,7 +514,7 @@ def shard_sets(files: list[dict], quant: str) -> list[list[dict]]:
 
 def pick_shards(files: list[dict], model: str):
     """(the quantization, its shards) setup downloads for a size: the size's own files, else its fallback's (the 4-bit:
-    UD-Q4_K_XL when the repository has no IQ4_XS).  None when the listing has neither."""
+    UD-Q4_K_XL when the repository has no UD-IQ4_XS).  None when the listing has neither."""
     for quant in (model, *MODELS[model].get("fallback", ())):
         sets = shard_sets(files, quant)
         if sets:
@@ -484,6 +528,27 @@ def pick_shards(files: list[dict], model: str):
 def model_tag(name: str) -> str:
     """The name of a size's config, start script and expert profile, and of a quantization's model folder."""
     return "glm-" + name.lower()
+
+
+def local_quants(model: str) -> tuple:
+    """The quantizations a size's files already on this PC can have, in the order they are taken: its own, the names
+    it had before (plain IQ4_XS files an older setup downloaded into models/glm-iq4_xs, or one given to --gguf-dir),
+    then its fallback's."""
+    return (*size_names(model), *MODELS[model].get("fallback", ()))
+
+
+def config_tag(model: str, given: str | None = None, folder: Path | None = None) -> str:
+    """The tag of a size's run config, start script, log and expert profile (strata-<tag>.json, run-<tag>.sh, ...):
+    the one its config already has in this Strata folder - an install made as IQ4_XS keeps strata-glm-iq4_xs.json
+    and run-glm-iq4_xs.sh, so what starts it by those names still does - else the one of the name it was given
+    (--model IQ4_XS, the Docker image's MODEL, an earlier install's config), else the size's own."""
+    folder = ROOT if folder is None else folder
+    first = model_tag(given or model)
+    for tag in dict.fromkeys([first, *(model_tag(n) for n in size_names(model))]):
+        cfg = folder / f"strata-{tag}.json"
+        if cfg.exists() or cfg.is_symlink():          # a link whose file is not there yet: written through (#1244)
+            return tag
+    return first
 
 
 # ------------------------------------------------------------------------------------------------ downloads
@@ -576,7 +641,7 @@ def download(url, dst: Path, what=None):
 
 def verify_file(s: Path, size: int, sha: str | None) -> None:
     """A downloaded shard against the repository's listing: its size, and its SHA-256 when the listing has one.  The
-    hash is kept in the finish mark, so the minutes of hashing 120-170 GB happen once.  A wrong file is deleted, so
+    hash is kept in the finish mark, so the minutes of hashing 120-157 GB happen once.  A wrong file is deleted, so
     the next run downloads it again."""
     m = s.with_name(s.name + ".done")
     if sha and m.exists() and f"sha256 {sha}" in m.read_text(encoding="utf-8", errors="replace"):
@@ -628,7 +693,7 @@ def finished_model(folder: Path) -> list[Path] | None:
 def find_model(model: str, bases: list[Path]):
     """A size already downloaded into one of these models folders (this data folder's, or one on another drive):
     (its quantization, its shards), else None."""
-    for quant in (model, *MODELS[model].get("fallback", ())):
+    for quant in local_quants(model):
         for base in dict.fromkeys(bases):
             got = finished_model(base / model_tag(quant))
             if got:
@@ -638,9 +703,9 @@ def find_model(model: str, bases: list[Path]):
 
 def gguf_dir_model(folder: Path, model: str):
     """--gguf-dir: (the quantization, its shards) of GGUF files already on this PC - the first shard under the folder
-    (in sub-folders too, as `hf download --local-dir` leaves them) whose path names the size's quantization or its
-    fallback.  check_shards says later when a shard is missing or short."""
-    for quant in (model, *MODELS[model].get("fallback", ())):
+    (in sub-folders too, as `hf download --local-dir` leaves them) whose path names the size's quantization, a name it
+    had before or its fallback's.  check_shards says later when a shard is missing or short."""
+    for quant in local_quants(model):
         firsts = sorted(p for p in folder.rglob("*.gguf")
                         if not p.name.lower().startswith("mmproj") and quant_in(p.relative_to(folder).as_posix(), quant)
                         and (SHARD_NAME.search(p.name) is None or SHARD_NAME.search(p.name).group(1) == "00001"))
@@ -1090,7 +1155,7 @@ def update_installed_engine(force=False, yes=False) -> None:
 
 
 # ------------------------------------------------------------------------------------------------ the data folder
-# The model files (120-170 GB) live in a data folder NEXT TO the Strata folder (`Strata-GLM-data`), not inside it:
+# The model files (120-157 GB) live in a data folder NEXT TO the Strata folder (`Strata-GLM-data`), not inside it:
 # updating Strata by unzipping a new copy then finds them instead of downloading them again.  Where it is, and which
 # Strata folders this user ran, is kept in a small per-user file, so every Strata folder on the PC finds the same
 # files.  Its name and the data folder's are this version's own: an older Strata of the Qwen model keeps its own.
@@ -1394,10 +1459,11 @@ def previous_config(elsewhere_first: list, settings: dict):
 
 
 def choices_from_config(cfg_path: Path) -> dict:
-    """The setup answers a config was written with (size, context, parking, network, GPUs, where its shards are)."""
+    """The setup answers a config was written with (size, context, parking, network, GPUs, where its shards are).  The
+    size is the name its file has: IQ4_XS for strata-glm-iq4_xs.json, so the copy set up from it keeps that name."""
     cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
     tag = cfg_path.stem[len("strata-"):]
-    model = next((m for m in MODELS if model_tag(m) == tag), None)
+    model = next((n for m in MODELS for n in size_names(m) if model_tag(n) == tag), None)
     a = cfg.get("args") or []
     first = flag_value(a, "-m")
     ctx, park = flag_value(a, "--ctx"), flag_value(a, "--park-mib")
@@ -1622,7 +1688,7 @@ def check_only(a) -> int:
     for m, d in MODELS.items():
         verdict = {"fits": "fits", "tight": "fits, with little RAM to spare", "no": "does not fit"}
         say(f"  {m:10s} {d['bits']}: ~{experts_gib(m):.0f} GiB of experts in RAM - "
-            f"{verdict[model_fit(m, ram)]} ({fit_text(m, ram)}); download ~{d['download_gb']} GB"
+            f"{verdict[model_fit(m, ram)]} ({fit_text(m, ram)}); download ~{d['download_gb']:.0f} GB"
             + ("" if free >= d["download_gb"] + 1 else f", but only {free:.0f} GB of disk space is free"))
     if not any(model_fit(m, ram) != "no" for m in MODELS):
         # #977: every size says "does not fit", so the verdict says so too (and the exit code, for scripts)
@@ -1636,9 +1702,13 @@ def check_only(a) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--model", choices=list(MODELS),
-                    help="UD-IQ3_XXS = 3-bit (~120 GB download, ~109 GiB of experts in RAM), IQ4_XS = 4-bit (~170 GB, "
-                         "~151 GiB; UD-Q4_K_XL when the repository has no IQ4_XS). Default: the one this PC's RAM fits")
+    q3, q4 = MODELS
+    ap.add_argument("--model", choices=[n for m in MODELS for n in size_names(m)],
+                    metavar="{" + ",".join(MODELS) + "}",
+                    help=f"{q3} = 3-bit (~{MODELS[q3]['download_gb']:.0f} GB download, ~{experts_gib(q3):.0f} GiB of "
+                         f"experts in RAM), {q4} = 4-bit (~{MODELS[q4]['download_gb']:.0f} GB, "
+                         f"~{experts_gib(q4):.0f} GiB, derived; UD-Q4_K_XL when the repository has no {q4}; IQ4_XS, "
+                         "its earlier name, is taken too). Default: the one this PC's RAM fits")
     ap.add_argument("--context", type=int, metavar="N",
                     help=f"the longest conversation in tokens (up to {MAX_CONTEXT}); each token takes "
                          f"{kb_per_token()} of VRAM ({mla_gb(131072):.1f} GB at 131072, calculated)")
@@ -1660,7 +1730,7 @@ def main() -> int:
                          "that uses the API; remembered for this model, also in run-<model>.sh)")
     ap.add_argument("--browser", dest="browser", action="store_true",
                     help="open the chat page again when the model is ready (the default; undoes --no-browser)")
-    ap.add_argument("--data-dir", help="where the model files go (120-170 GB): default Strata-GLM-data next to this "
+    ap.add_argument("--data-dir", help="where the model files go (120-157 GB): default Strata-GLM-data next to this "
                                        "folder, remembered for every Strata folder on this PC")
     ap.add_argument("--models-dir", help="where the GGUF files go (default: <data folder>/models)")
     ap.add_argument("--gguf-dir", help="use GGUF files you already have: a folder with every shard of the size "
@@ -1748,10 +1818,11 @@ def main() -> int:
     if not a.model:
         for i, m in enumerate(names, 1):
             d = MODELS[m]
-            say(f"  {i}) {m:10s} {d['bits']}, {d['about']}: download ~{d['download_gb']} GB, ~{experts_gib(m):.0f} "
+            say(f"  {i}) {m:10s} {d['bits']}, {d['about']}: download ~{d['download_gb']:.0f} GB, ~{experts_gib(m):.0f} "
                 f"GiB of experts in RAM ({fit_text(m, ram)})" + ("   (recommended)" if m == rec else ""))
-    model = a.model or names[int(ask("Which size?", [str(i) for i in range(1, len(names) + 1)],
+    given = a.model or names[int(ask("Which size?", [str(i) for i in range(1, len(names) + 1)],
                                      str(names.index(rec) + 1), a.yes)) - 1]
+    model = size_name(given)                           # IQ4_XS, the 4-bit's earlier name: UD-IQ4_XS
     d = MODELS[model]
     fit = model_fit(model, ram)
     if fit == "no":
@@ -1793,12 +1864,21 @@ def main() -> int:
     models_root = Path(a.models_dir)
     plan = []                                          # (listed file, where it goes) for step 5
     found_model = None if a.gguf_dir else find_model(model, [models_root, *[r / "models" for r in roots]])
-    if a.gguf_dir:
-        quant, shards = gguf_dir_model(Path(a.gguf_dir).expanduser(), model)
-        ok(f"model files: {shards[0].parent} ({quant}, {len(shards)} file{'s' if len(shards) > 1 else ''})")
-    elif found_model:
-        quant, shards = found_model
-        ok(f"model files: {shards[0].parent} (already downloaded)")
+    if a.gguf_dir or found_model:
+        if a.gguf_dir:
+            quant, shards = gguf_dir_model(Path(a.gguf_dir).expanduser(), model)
+            ok(f"model files: {shards[0].parent} ({quant}, {len(shards)} file{'s' if len(shards) > 1 else ''})")
+        else:
+            quant, shards = found_model
+            ok(f"model files: {shards[0].parent} (already downloaded)")
+        if quant not in size_names(model):
+            # the fallback's files (an install made as IQ4_XS took UD-Q4_K_XL): judged by their own size, as below
+            # before a download
+            total = sum(s.stat().st_size for s in shards if s.is_file()) / 1e9
+            park = fallback_park(model, quant, total, ram, park, a, f"the {d['bits']} model's files on this PC are ")
+            if not a.gguf_dir:
+                say(f"  (setup takes the files it finds: to download its {model} files instead, move "
+                    f"{shards[0].parent} away and run it again)")
     else:
         say(f"  Listing the model's files on {hf_endpoint()} ({REPO}) ...")
         pick = pick_shards(repo_files(), model)
@@ -1815,22 +1895,8 @@ def main() -> int:
         on_disk = sum(p.stat().st_size for s in shards for p in (s, s.with_name(s.name + ".part")) if p.is_file()) / 1e9
         ok(f"{quant}: {len(files)} file{'s' if len(files) > 1 else ''}, {total:.0f} GB")
         if quant != model:
-            # its experts, taken as the same share of its files as the size's own: what it leaves of the RAM (GiB)
-            experts = total * d["experts_gb"] / d["download_gb"] * 1e9 / GIB
-            warn(f"the repository has no {model} files: the {d['bits']} model is its {quant} ({total:.0f} GB, about "
-                 f"{experts:.0f} GiB of experts in RAM: "
-                 + (f"~{ram - experts:.0f} GiB of RAM left beside them)" if ram >= experts else
-                    f"more than this PC's {ram:.0f} GiB)"))
-            if fit != "no" and ram - experts < RAM_LEFT_MIN_GIB:
-                confirm_risk(f"{quant}'s experts do not fit beside Linux and the server in this PC's {ram:.0f} GiB of "
-                             "RAM: the OS would page them from the disk, so it would be very slow, or not start at all",
-                             bool(a.model), a.yes,
-                             f"{quant} needs about {experts + RAM_LEFT_MIN_GIB:.0f} GiB of RAM; this PC has "
-                             f"{ram:.0f} GiB",
-                             f"choose {names[0]}, or --model {model} --yes to install it anyway", "  Install it anyway?")
-            elif ram - experts < RAM_LEFT_GIB and a.park_mib is None and park != PARK_MIB_TIGHT:
-                park = PARK_MIB_TIGHT
-                warn(f"parked conversations get {PARK_MIB_TIGHT} MiB instead of {PARK_MIB} (--park-mib {PARK_MIB_TIGHT})")
+            park = fallback_park(model, quant, total, ram, park, a,
+                                 f"the repository has no {model} files: the {d['bits']} model is its ")
         need = max(total - on_disk, 0) + 1
         if free_gb(folder) < need:
             fail(f"not enough free disk space in {folder}: need ~{need:.0f} GB" +
@@ -1862,7 +1928,7 @@ def main() -> int:
 
     # ---- 6. the run config and the start script
     step(6, "writing the start script")
-    tag = model_tag(model)
+    tag = config_tag(model, given)                     # an install made as IQ4_XS keeps its names
     cfg_path = ROOT / f"strata-{tag}.json"
     cfg = {"exe": str(exe), "args": engine_args(shards[0], ctx, park, data / f"{tag}.profile"), "cwd": str(ROOT),
            "log": str(ROOT / f"strata-{tag}.log"), "lib_dirs": installed_build().get("lib_dirs") or [],

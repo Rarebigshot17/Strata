@@ -6,8 +6,9 @@ for, have 46 GB together. Strata makes the model fit by **sharing the work acros
 kitchen: the things you use all the time stay on the counter, and the rest waits in the pantry. Back to the
 [README](../README.md).
 
-Nothing has run on a GPU or on the real model yet. The sizes on this page are calculated from the model's shapes,
-and there are no measured speeds; [How it is checked](#how-it-is-checked) says what has run.
+The real model has not run yet, and there are no measured speeds; on napster-ai's cards the engine has run small
+random test models. The sizes on this page come from the real files or are calculated or derived, and say which;
+[How it is checked](#how-it-is-checked) says what has run.
 
 ## Who does what
 
@@ -33,10 +34,10 @@ The same in technical terms:
   server's end of the pipe closing) and loads them at the next start, so the cache starts full. Every ordinary stop
   of the server (Ctrl+C, closing its terminal, SIGTERM) ends the engine with `QUIT`; an engine that is killed ends
   without saving them ([TROUBLESHOOTING.md](TROUBLESHOOTING.md) has the details). Setup puts one in the run config.
-- **RAM:** every routed expert stays in the GGUF file, mapped into memory. At 3-bit that is about 117 GB, at 4-bit
-  about 162 GB (calculated from the model's shapes). The CPU computes the experts the cache doesn't hold, in place,
-  while the GPU computes the shared expert. Before the server says it is ready, the engine reads the experts once
-  so they are in RAM rather than on disk (`--no-warm` skips this).
+- **RAM:** every routed expert stays in the GGUF file, mapped into memory. At 3-bit that is 109.9 GB (counted in the
+  real file), at 4-bit about 146 GB (derived from its download, not measured). The CPU computes the experts the cache
+  doesn't hold, in place, while the GPU computes the shared expert. Before the server says it is ready, the engine
+  reads the experts once so they are in RAM rather than on disk (`--no-warm` skips this).
 - **Reading a prompt:** the prompt is read in chunks of 256 tokens (`--prefill-chunk`). Each expert that a chunk
   uses runs once on the GPU for all of the chunk's tokens. It comes from the expert cache when it is there.
   Otherwise it streams in from RAM through two buffers, so one expert copies in while the previous one computes.
@@ -67,30 +68,38 @@ instead:
   from that point on. The engine then restarts from the checkpoint and reads the reply and the new message, not the
   whole conversation. A regenerated reply restarts there too.
 - **Memory.** `--park-mib` caps the RAM that parked conversations and checkpoints use: 8192 MiB by default, 4096
-  when setup finds less than 40 GiB of RAM left beside the experts (the 4-bit model on 192 GB). The conversation used
-  least recently goes first. Parking lives in the engine's RAM, so a restart of the engine starts with none.
+  when setup finds less than 40 GiB of RAM left beside the experts (the 3-bit model on 128 GB, the 4-bit one on
+  160 GB). The conversation used least recently goes first. Parking lives in the engine's RAM, so a restart of the
+  engine starts with none.
 
 None of this changes the answers: on the CPU engine, `tools/glm53_park_check.py` checks each resumed reply against
 a fresh engine's, token for token.
 
 ## How it is checked
 
-What has run, all without a GPU:
+What has run without a GPU:
 
 - **The CPU reference** (`strata-glm-ref`) runs the whole model on the CPU, one token at a time, with ggml's own
   dot products. On small random GLM-5.3-Flash models it matches llama.cpp to float rounding
-  (`tools/glm53_selftest.sh`, which needs no GPU and no download).
+  (`tools/glm53_selftest.sh`, which needs no GPU and no download; on napster-ai too: every model passes, KL 0).
 - **Conversation parking** on the CPU engine: `tools/glm53_park_check.py` compares every resumed reply with a fresh
   engine's.
 - **The server end to end** on the CPU engine with a small random model (`tools/glm53_server_check.sh`), about 750
   Python tests of the server (`python3 -m unittest discover -s serve -t . -p "test_*.py"`), setup's and the tools'
   tests (`tools/test_*.py`) and the engine's C++ tests (`ctest`).
 
-What is written and waits for napster-ai:
+What has run on napster-ai's three cards (2026-10-20), on the same small random models:
 
-- **The GPU engine** (`strata-glm`) is to be checked against the CPU reference layer by layer (`--check-cpu`,
-  `tools/glm53_gpu_check.sh`), and on the real model its logits are to be compared with llama.cpp's
-  (`tools/glm53_compare.py`).
+- **The GPU engine** (`strata-glm`) against the CPU reference layer by layer (`--check-cpu`) and against llama.cpp
+  (`tools/glm53_gpu_check.sh`): its decode matched both (40 of 40 against the CPU reference, KL 0 against
+  llama.cpp), on one card and with the layers split over the three. The check of its prompt path failed on a bug in
+  the check, which is fixed; it has not run again yet.
+- **Conversation parking** on the GPU engine, with the layers split over the three cards: passed.
+
+What waits for more RAM on napster-ai:
+
+- **The real model:** its logits compared with llama.cpp's (`tools/glm53_compare.py`), then its speed, load time
+  and memory.
 - The steps, and what each one has shown so far: [GLM53_PORT.md](GLM53_PORT.md).
 
 ## Credits

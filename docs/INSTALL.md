@@ -4,14 +4,17 @@ Everything about installing, starting, updating and configuring Strata: GLM-5.3-
 system RAM. The short version is in the [README](../README.md#install). An AI coding assistant can do all of this for
 you with [AI_SETUP.md](AI_SETUP.md).
 
-> **Nothing has run on a GPU or on the real model yet.** There are no measured speeds, load times or memory figures.
-> The sizes on this page are calculated from the model's shapes, and setup's own figures come from `setup.py`. What
-> has been checked: the CPU reference against llama.cpp on small random GLM models (`tools/glm53_selftest.sh`),
-> conversation parking (`tools/glm53_park_check.py`), the server end to end on the CPU engine
+> **The real model has not run yet.** There are no measured speeds, load times or memory figures. The sizes on this
+> page come from the repository's listing and the real 3-bit file, or are derived or calculated, and each says which;
+> setup's own figures come from `setup.py`. What has run on napster-ai (2026-10-20): the builds; on small random GLM
+> models, the CPU reference against llama.cpp (`tools/glm53_selftest.sh`), the GPU engine on its three RTX 30 cards
+> against both (`tools/glm53_gpu_check.sh`: its decode matched; the prompt path's check failed on a bug in the check,
+> fixed since, not yet rerun) and conversation parking on the GPU engine (`tools/glm53_park_check.py`); and the
+> inspector and the template probe on the real file. Checked without a GPU: the server end to end on the CPU engine
 > (`tools/glm53_server_check.sh`), the Python tests, the engine's C++ unit tests (`ctest`) and setup's own tests
-> (`tools/test_setup_*.py`, which mock the GPUs, the downloads and the build). Setup itself, the systemd unit and the
-> Docker image below have not been run on a real machine yet. The steps still to run on a real machine are in
-> [GLM53_PORT.md](GLM53_PORT.md).
+> (`tools/test_setup_*.py`, which mock the GPUs, the downloads and the build). A full install with setup, the
+> systemd unit and the Docker image below have not been run on a real machine yet. The steps still to run on a real
+> machine are in [GLM53_PORT.md](GLM53_PORT.md).
 
 > **On this page:** [What you need](#what-you-need) · [Install with ./setup.sh](#install-with-setupsh) ·
 > [Setup's options](#setups-options) · [Where files go](#where-files-go) · [The build](#the-build) ·
@@ -27,9 +30,9 @@ you with [AI_SETUP.md](AI_SETUP.md).
 | **OS** | Linux on x86-64. Setup stops on any other operating system. On Ubuntu 22.04 and 24.04 setup can install the CUDA toolkit itself; on other distributions you install it. |
 | **GPU** | One or more NVIDIA cards of compute capability 7.5 or newer (RTX 20, 30, 40, 50 series). Setup leaves out a card it cannot use and says why. It has no minimum VRAM: how much VRAM the layers besides the experts take on the real model is not measured yet. |
 | **Driver** | NVIDIA 580 or newer when the engine is built with CUDA 13 (the toolkit setup installs when none is there); 525 or newer when setup builds it with a CUDA 12 toolkit you have installed (CUDA 12's minor version compatibility; with a driver older than 580 setup takes that toolkit, also beside a CUDA 13 one). Setup stops on an older one and says which it needs (Ubuntu: `sudo ubuntu-drivers install`, then restart). |
-| **RAM** | Every routed expert stays in RAM: about 117 GB (109 GiB) for the 3-bit size, about 162 GB (151 GiB) for the 4-bit (see the table below). |
+| **RAM** | Every routed expert stays in RAM: 109.9 GB (102.4 GiB) for the 3-bit size, about 146 GB (136 GiB) for the 4-bit (see the table below). |
 | **CPU** | AVX2. Setup warns on a CPU without it but goes on: the experts the GPUs do not hold are computed on the CPU. |
-| **Disk** | About 120 GB (3-bit) or 170 GB (4-bit) free for the model files. Setup checks this before it downloads. The CUDA toolkit, when setup installs it, takes more (setup says about 8-10 GB with the compiler). |
+| **Disk** | 120.4 GB (3-bit) or 156.8 GB (4-bit) free for the model files. Setup checks this before it downloads. The CUDA toolkit, when setup installs it, takes more (setup says about 8-10 GB with the compiler). |
 | **Python** | 3.10 or newer with `venv`. `./setup.sh` installs it with apt, dnf or pacman when it is missing (asks for your sudo password). |
 | **Network** | huggingface.co (the model; or a mirror, `HF_ENDPOINT`), github.com (llama.cpp's source at a pinned commit), PyPI (the Python packages), and developer.download.nvidia.com when setup installs CUDA. |
 
@@ -38,22 +41,26 @@ Setup lists the repository's files when it runs and takes the shards of the size
 
 | Size | `--model` | Download | Experts in RAM | A good fit from | Tight (warned) from |
 | --- | --- | --- | --- | --- | --- |
-| 3-bit | `UD-IQ3_XXS` | ~120 GB | ~117 GB (109 GiB) | 149 GiB of RAM | 121 GiB |
-| 4-bit | `IQ4_XS` (`UD-Q4_K_XL` when the repository has no IQ4_XS) | ~170 GB | ~162 GB (151 GiB) | 191 GiB | 163 GiB |
+| 3-bit | `UD-IQ3_XXS` | 120.4 GB | 109.9 GB (102.4 GiB) | about 142 GiB of RAM | about 114 GiB |
+| 4-bit | `UD-IQ4_XS` (`UD-Q4_K_XL` when the repository has no UD-IQ4_XS) | 156.8 GB | ~146 GB (136 GiB), derived | about 176 GiB | about 148 GiB |
 
-These figures are calculated from the model's shapes and written into `setup.py`; they are not measured. The
-downloads and the disk are in GB (10^9 bytes); the RAM is in GiB (2^30 bytes), as Linux reports it, and setup
-compares the experts with it in GiB. A good fit leaves 40 GiB or more beside the experts, for Linux, the server and
-parked conversations. Below 12 GiB left, the OS would read experts from the disk, so setup stops unless you insist
-(`--model NAME --yes`). Setup reads the RAM from `/proc/meminfo` (the number `free -g` prints), which is a little
-less than the memory installed. Setup's tests take 188 GiB there for a 192 GB PC; setup then prints about 79 GiB
-left beside the 3-bit experts (recommended) and about 37 GiB beside the 4-bit ones (tight: parked conversations get
-4096 MiB instead of 8192). When the 4-bit size falls back to UD-Q4_K_XL, setup works out that file's experts from
-its download size and says what it leaves.
+Where these figures come from (they are written into `setup.py`): the downloads are the repository's listing, read on
+napster-ai on 2026-10-20. The 3-bit experts are what `tools/glm53_inspect.py` counted in the real 3-bit file there,
+for the 45 layers the engine runs; beside them the file holds 7.7 GB of other tensors (they go to the GPUs) and the
+MTP layer's 2.8 GB, which the engine does not load. The 4-bit experts are not measured: they are derived as its
+download less those 7.7 and 2.8 GB. The RAM columns are calculated from these. The downloads and the disk are in GB (10^9 bytes); the RAM is in GiB (2^30 bytes), as Linux
+reports it, and setup compares the experts with it in GiB. A good fit leaves 40 GiB or more beside the experts, for
+Linux, the server and parked conversations. Below 12 GiB left, the OS would read experts from the disk, so setup
+stops unless you insist (`--model NAME --yes`). Setup reads the RAM from `/proc/meminfo` (the number `free -g`
+prints), which is a little less than the memory installed. Setup's tests take 188 GiB there for a 192 GB PC; setup
+then prints about 86 GiB left beside the 3-bit experts and about 52 GiB beside the 4-bit ones, and recommends the
+4-bit. On a 160 GB PC (about 157 GiB) the 4-bit is tight (about 21 GiB left: parked conversations get 4096 MiB
+instead of 8192), so setup recommends the 3-bit there. When the 4-bit size falls back to UD-Q4_K_XL (199.7 GB), setup
+works out that file's experts from its download size and says what it leaves.
 
 The disk matters most at the first start after a reboot: the engine reads every expert from the disk before it says it
-is ready. 117 GB at 550 MB/s (the top speed of a SATA SSD) is about 3.5 minutes, 162 GB about 5 minutes. That is
-calculated, not measured.
+is ready. 109.9 GB at 550 MB/s (the top speed of a SATA SSD) is about 3.3 minutes, 146 GB about 4.4 minutes. That
+is calculated, not measured.
 
 ## Install with ./setup.sh
 
@@ -99,7 +106,7 @@ terminal: when its input ends (a pipe, a script) it stops and says to pass `--ye
 
 | Question | Choices | Default |
 | --- | --- | --- |
-| **Which size?** | 1) `UD-IQ3_XXS` 3-bit, 2) `IQ4_XS` 4-bit. Each line gives the download, the RAM its experts take and what that leaves on this PC. Not asked with `--model`. | The biggest size that fits well; the 3-bit when none does. |
+| **Which size?** | 1) `UD-IQ3_XXS` 3-bit, 2) `UD-IQ4_XS` 4-bit. Each line gives the download, the RAM its experts take and what that leaves on this PC. Not asked with `--model`. | The biggest size that fits well; the 3-bit when none does. |
 | **Context?** | 1) 32K, 2) 128K, 3) 256K, 4) 512K, 5) 1M tokens. Each line says the VRAM its attention cache takes ([Choosing the context](#choosing-the-context)). Not asked with `--context`. | 128K when the chosen GPUs have 16 GB of VRAM or more in all, else 32K. |
 | **Install them now?** | Asked only when the C++ compiler or the CUDA toolkit is missing. `y` installs them with `sudo apt-get`: `build-essential` on any system with apt, the CUDA toolkit on Ubuntu 22.04 / 24.04 only. Without apt, or for CUDA on another distribution, setup stops and says what to install. | `y` |
 | **Install it anyway?** | Asked only when the size you chose leaves less than 12 GiB of RAM beside its experts. | `n` |
@@ -145,9 +152,10 @@ when it is idle (the profile is written), at its next output line during a reque
 `./setup.sh --help` (or `python3 setup.py --help`) prints them. This is that list, as setup.py gives it:
 
 ```
-  --model {UD-IQ3_XXS,IQ4_XS}
-                        UD-IQ3_XXS = 3-bit (~120 GB download, ~109 GiB of experts in RAM), IQ4_XS = 4-bit (~170 GB,
-                        ~151 GiB; UD-Q4_K_XL when the repository has no IQ4_XS). Default: the one this PC's RAM fits
+  --model {UD-IQ3_XXS,UD-IQ4_XS}
+                        UD-IQ3_XXS = 3-bit (~120 GB download, ~102 GiB of experts in RAM), UD-IQ4_XS = 4-bit (~157 GB,
+                        ~136 GiB, derived; UD-Q4_K_XL when the repository has no UD-IQ4_XS; IQ4_XS, its earlier name,
+                        is taken too). Default: the one this PC's RAM fits
   --context N           the longest conversation in tokens (up to 1048576); each token takes 12.4 KB of VRAM (1.7 GB
                         at 131072, calculated)
   --park-mib N          RAM in MiB for parked conversations and checkpoints (default 8192, 4096 where little RAM is
@@ -164,7 +172,7 @@ when it is idle (the profile is written), at its next output line during a reque
   --no-browser          do not open the chat page in the browser when the model is ready (for a harness or an app that
                         uses the API; remembered for this model, also in run-<model>.sh)
   --browser             open the chat page again when the model is ready (the default; undoes --no-browser)
-  --data-dir DATA_DIR   where the model files go (120-170 GB): default Strata-GLM-data next to this folder, remembered
+  --data-dir DATA_DIR   where the model files go (120-157 GB): default Strata-GLM-data next to this folder, remembered
                         for every Strata folder on this PC
   --models-dir MODELS_DIR
                         where the GGUF files go (default: <data folder>/models)
@@ -241,7 +249,14 @@ In the Strata folder (the one with `setup.py`):
 | `strata-glm-<size>.log` | The engine's log: its own output (stderr), and one line from the server at each start with the command it ran. New starts are appended. |
 | `strata-glm-<size>.shared-settings.json` | The web app's Chat settings when you share them with other apps. Written by the server. |
 
-`<size>` is the size in lower case: `ud-iq3_xxs` or `iq4_xs`.
+`<size>` is the size in lower case: `ud-iq3_xxs` or `ud-iq4_xs`. Setup called the 4-bit size `IQ4_XS` until the
+repository's listing showed its files are `UD-IQ4_XS`, and it still takes that name (`--model IQ4_XS`, the Docker
+image's `MODEL=IQ4_XS`): a 4-bit install made or set up under it keeps `iq4_xs` in these names, and setup run again
+writes over them, not new files beside them. Its model files are found where it put them. Downloaded, those are the
+199.7 GB `UD-Q4_K_XL` files, the fallback: the repository has no plain `IQ4_XS` ones (its listing, 2026-10-20). Setup
+says what they leave of the RAM, as before a download (about 14 GiB on 192 GB: tight, so parked conversations get 4096
+MiB, calculated from the derived 4-bit figure). To take the smaller `UD-IQ4_XS` files instead, move
+`models/glm-ud-q4_k_xl` out of the data folder and run `./setup.sh --setup` again.
 
 In the data folder, `Strata-GLM-data` next to the Strata folder (or where `--data-dir` put it):
 
@@ -485,11 +500,12 @@ Which order and split are fastest is not measured yet.
 
 The owner's PC: Linux, Xeon E5-2699 v4 (AVX2), 192 GB of DDR4 (planned; 91 GiB for now), an RTX 3090 Ti (24 GB), an
 RTX 3080 Ti (12 GB) and an RTX 3080 (10 GB), all compute capability 8.6, and a SATA SSD. What setup does there, from
-its code and its tests (it has not been run there yet):
+its code and its tests (a full install has not run there yet):
 
-- **Size:** with 192 GB the 3-bit `UD-IQ3_XXS` is recommended (about 79 GiB of RAM left beside its experts, if
-  `/proc/meminfo` says 188 GiB as the tests assume). The 4-bit is tight (about 37 GiB left) and gets
-  `--park-mib 4096`. With the 91 GiB it has for now neither size fits: setup says so and asks before it installs.
+- **Size:** with 192 GB the 4-bit `UD-IQ4_XS` is recommended (about 52 GiB of RAM left beside its experts, if
+  `/proc/meminfo` says 188 GiB as the tests assume, and if the derived 146 GB of experts holds). The 3-bit leaves
+  about 86 GiB. With the 91 GiB it has for now neither size fits: the 3-bit needs about 114 GiB. Setup says so and
+  asks before it installs.
 - **Build:** all three cards can run the engine, so setup uses all three and builds for `86` only.
 - **Context:** the three cards have 46 GB of VRAM in all, so setup recommends 128K. 512K takes 6.6 GB and 1M 13.3 GB
   of it (calculated); neither is more than half, so setup does not warn.
@@ -601,16 +617,17 @@ docker run -d --name strata --gpus all \
   strata
 ```
 
-- **`/data`** holds the model files (120-170 GB) in `/data/models`, the expert profile and the run config
+- **`/data`** holds the model files (120-157 GB) in `/data/models`, the expert profile and the run config
   (`/data/config/strata-glm-<size>.json`, linked into `/opt/strata`). The engine is part of the image.
 - **Port 8101.** The server listens on `0.0.0.0` inside the container and has no API key unless you set one.
   `-p 127.0.0.1:8101:8101` publishes it to this machine only; to publish it to the network (`-p 8101:8101`, which
   Docker's rules let past ufw), set `-e API_KEY=<secret>` too. Without a key the entrypoint warns at every start.
   `API_KEY` is passed on at every start and saved in the config, so a key added later counts without `REINSTALL`.
-- **The setup choices** are environment variables: `MODEL` (`UD-IQ3_XXS`, the default, or `IQ4_XS`), `CONTEXT`
-  (tokens; empty: setup's pick for the VRAM), `PARK_MIB`, `GPUS` (`"0,2"` or `"all"`) or `GPU` (one card), `HOST`
-  (default `0.0.0.0`), `PORT` (default 8101), `API_KEY`, `GGUF_DIR` (a mounted folder of shards you already have:
-  `-v /models/glm53:/gguf:ro -e GGUF_DIR=/gguf`), `CONFIG` (start with this config file instead).
+- **The setup choices** are environment variables: `MODEL` (`UD-IQ3_XXS`, the default, or `IQ4_XS` for the 4-bit
+  `UD-IQ4_XS` files), `CONTEXT` (tokens; empty: setup's pick for the VRAM), `PARK_MIB`, `GPUS` (`"0,2"` or `"all"`)
+  or `GPU` (one card), `HOST` (default `0.0.0.0`), `PORT` (default 8101), `API_KEY`, `GGUF_DIR` (a mounted folder of
+  shards you already have: `-v /models/glm53:/gguf:ro -e GGUF_DIR=/gguf`), `CONFIG` (start with this config file
+  instead).
 - **The first start** runs setup with these choices, `--no-browser`, `--no-start` and `--yes`, and keeps the config on
   the volume. Later starts go straight to the server. `-e REINSTALL=1` runs setup again, to change the settings of a
   size already set up. Switching `MODEL` to a size already on the volume needs no setup pass.

@@ -7,8 +7,13 @@ web app (`serve/`), and an installer (`setup.py`, started by `./setup.sh`). It i
 [Niko1221/Strata](https://github.com/Niko1221/Strata), which ran Qwen3.8-Flash-Next. The Qwen engine, AMD (HIP),
 the Windows launchers, vision, batching, replicas, MTP drafting, the speed projection and slot save/restore are gone.
 
-**Nothing has run on a GPU or on the real model yet.** Do not write a speed, load time or memory figure as measured.
-A figure calculated from the model's shapes says that it is calculated.
+**The real model has not run yet (it waits for more RAM on napster-ai), so there is no speed, load time or memory
+measurement.** What has run, on napster-ai on 2026-10-20 (RTX 3090 Ti 24 GB + RTX 3080 Ti 12 GB + RTX 3080 10 GB,
+sm_86, driver 580.95.05, CUDA 13.2, gcc 14.2): the builds; the CPU reference against llama.cpp on small random models (all PASS, KL 0); the GPU check on
+the same models (decode matched the CPU reference 40/40 and llama.cpp with KL 0, on one card and split over the
+three; conversation parking passed; the prefill check failed on a bug in the check, fixed since, not yet rerun); and
+the inspector and the template probe on the real file. Do not write a speed, load time or memory figure as measured.
+A figure calculated from the model's shapes says that it is calculated; one derived from another says so.
 
 ## Installing Strata for a user
 
@@ -69,8 +74,9 @@ None of these needs a GPU or a model download, except where it says so.
   - `tools/glm53_selftest.sh LLAMA_BUILD_DIR STRATA_BUILD_DIR`: the CPU reference against llama.cpp.
   - `tools/glm53_park_check.py ENGINE -m MODEL.gguf`: conversation parking and checkpoints against fresh runs.
   - `tools/glm53_server_check.sh LLAMA_DIR ENGINE`: `serve/server.py` end to end on the engine.
-  - `tools/glm53_gpu_check.sh LLAMA_BUILD_DIR STRATA_BUILD_DIR`: the GPU engine. **Needs an NVIDIA GPU**; it has
-    not run yet.
+  - `tools/glm53_gpu_check.sh LLAMA_BUILD_DIR STRATA_BUILD_DIR`: the GPU engine. **Needs an NVIDIA GPU.** It ran
+    on napster-ai on 2026-10-20: decode and parking passed; the prefill part failed on a bug in the check, fixed
+    since and not yet rerun.
 - **The server without an engine:** `python3 serve/server.py` starts it with the mock engine (a fixed answer) on
   port 8101. `--engine strata --config strata-glm-<size>.json` runs the real one.
 

@@ -4,7 +4,7 @@ Problems with Strata on GLM-5.3-Flash (Linux, NVIDIA GPUs) and what to do about 
 lines are the messages that setup, the server and the engine print, so you can search this page for the words you
 see. Back to the [README](../README.md#something-went-wrong).
 
-Nothing has run on a GPU or on the real model yet, so this page has no measured times, speeds or memory figures.
+The real model has not run yet, so this page has no measured times, speeds or memory figures.
 Where a fix depends on how long something takes, it says which line of the log to look at instead.
 
 ## Reading the log
@@ -22,7 +22,8 @@ Strata writes to two places:
   such as `strata-glm: <reason>` or `glm gpu kernel <name>: <CUDA error>`. Each start begins with a line
   `[strata] <date> <time> engine started: <command>`.
 
-Commands that help (`<size>` is `ud-iq3_xxs` or `iq4_xs`):
+Commands that help (`<size>` is `ud-iq3_xxs` or `ud-iq4_xs`; `iq4_xs` for a 4-bit install made when setup called
+it `IQ4_XS`):
 
 ```bash
 tail -n 80 strata-glm-<size>.log                         # the end of the engine log
@@ -96,18 +97,19 @@ Run `./setup.sh` again: downloads continue where they stopped. What setup says a
   again.
 
 **"not enough free disk space in <folder>: need ~N GB"**.
-The model files are about 120 GB (3-bit) or 170 GB (4-bit), calculated from the model's shapes; setup prints the
-real total from the repository's listing before it downloads. Put them on a bigger drive: `--models-dir <folder>`,
-or `--data-dir <folder>`, which is remembered for every Strata folder on this PC.
+The model files are 120.4 GB (3-bit) or 156.8 GB (4-bit), as the repository listed them on 2026-10-20; setup prints
+the real total from the listing before it downloads. Put them on a bigger drive: `--models-dir <folder>`, or
+`--data-dir <folder>`, which is remembered for every Strata folder on this PC.
 
 **"<size>'s experts (~N GiB) do not fit beside Linux and the server in this PC's N GiB of RAM"**.
-Every routed expert stays in RAM: about 117 GB (109 GiB) at 3-bit and about 162 GB (151 GiB) at 4-bit (calculated
-from the model's shapes, not measured). Setup subtracts that from the RAM Linux reports, in GiB as `free -g` counts
-it, and prints what is left beside the experts. On a PC with 192 GB installed Linux reports about 188 GiB: that
-leaves about 79 GiB for the 3-bit model and about 37 GiB for the 4-bit one. Below 40 GiB left setup warns and gives
-parked conversations 4096 MiB instead of 8192 (`--park-mib 4096`). Below 12 GiB it asks "Install it anyway?" and
-stops unless you answer `y` (or pass `--model <size> --yes`): the OS would then read experts from the disk while it
-answers. Choose the 3-bit model, or add RAM.
+Every routed expert stays in RAM: 109.9 GB (102.4 GiB) at 3-bit, counted in the real file by
+`tools/glm53_inspect.py`, and about 146 GB (136 GiB) at 4-bit, derived from its download (not measured). Setup
+subtracts that from the RAM Linux reports, in GiB as `free -g` counts it, and prints what is left beside the experts.
+On a PC with 192 GB installed Linux reports about 188 GiB: that leaves about 86 GiB for the 3-bit model and about
+52 GiB for the 4-bit one. Below 40 GiB left setup warns and gives parked conversations 4096 MiB instead of 8192
+(`--park-mib 4096`). Below 12 GiB it asks "Install it anyway?" and stops unless you answer `y` (or pass
+`--model <size> --yes`): the OS would then read experts from the disk while it answers. Choose the 3-bit model, or
+add RAM.
 
 **`./update.sh` says "git pull did not succeed"**.
 A file you changed in the Strata folder stops the pull. `git status` lists them; put your changes aside
@@ -164,11 +166,11 @@ A key in the run config has a value the server cannot use, for example
 described in [the run config](INSTALL.md#the-run-config) and [the settings](DETAILS.md#settings).
 
 **The start takes long: "reading the experts into memory ...", then "warming the experts: X of Y GB (...)"**.
-Before it says it is ready, the engine reads every routed expert once (117 GB at 3-bit, 162 GB at 4-bit,
-calculated), so the first request does not wait for the disk. After a reboot all of it comes from the disk, and
-the PC can be slow meanwhile. The line shows how far it is and its GB/s; the time left is the GB still to read
-divided by that rate. Wait for `ready: http://...`. A start soon after the last one is faster when Linux still has
-the files in its page cache. `--no-warm` in `"args"` skips the warm-up; the first requests then read the experts
+Before it says it is ready, the engine reads every routed expert once (109.9 GB at 3-bit, counted in the file; about
+146 GB at 4-bit, derived), so the first request does not wait for the disk. After a reboot all of it comes from the
+disk, and the PC can be slow meanwhile. The line shows how far it is and its GB/s; the time left is the GB still to
+read divided by that rate. Wait for `ready: http://...`. A start soon after the last one is faster when Linux still
+has the files in its page cache. `--no-warm` in `"args"` skips the warm-up; the first requests then read the experts
 from the disk instead.
 
 **"the engine did not report READY within 900 s"** (with "of its last warm-up progress (N GB read)" once the
