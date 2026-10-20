@@ -21,9 +21,10 @@ within --tie-margin of its own: then the two tokens are about as likely as each 
 difference in probability) and rounding decides which comes first. Measured on seeds 1-100 of glm53_selftest.sh's
 models (strata-glm-ref against llama.cpp's CPU build with an f32 cache, 2026-10-20): every top-1 disagreement had
 both gaps at most 0.0017. With llama.cpp's default f16 cache, which made the indexer select other pools in 5 of
-those seeds, the rows that changed had one gap of 0.08 or more. A tie does not excuse the other limits: those 5
-runs fail the selftest's mean KL limit (by 43 times or more) and its --diff-max 0.01 (their largest logit
-difference is 0.15 or more) with or without ties.
+those seeds, the rows that changed had one gap of 0.08 or more, all but one: seed 26's v2 also swapped a row whose
+gaps were 0.0017 and 0.0007, a tie. A tie does not excuse the other limits: those 5 runs fail the selftest's mean
+KL limit (by 43 times or more) and its --diff-max 0.01 (their largest logit difference is 0.15 or more) with or
+without ties.
 """
 from __future__ import annotations
 
