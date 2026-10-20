@@ -10,11 +10,13 @@ Reports, per position and in total:
   max |logit diff|
 
 Usage:  python tools/glm53_compare.py REF.bin STRATA.bin [--kl-max 0.01] [--top1-min 0.98] [--tie-margin 0.01]
-                                      [--diff-max D] [--rows N]
+                                      [--diff-max D] [--rel-diff-max R] [--rows N]
 
-Exit code 0 when mean KL <= --kl-max, top-1 agreement >= --top1-min and (with --diff-max) max |logit diff| <= D,
-1 otherwise. The defaults are a first guess for two engines running the same quantized file; tighten them once the
-first layers match.
+Exit code 0 when mean KL <= --kl-max, top-1 agreement >= --top1-min, (with --diff-max) max |logit diff| <= D and
+(with --rel-diff-max) the worst row's max |logit diff| over its largest |ref logit| <= R, 1 otherwise. The defaults
+are a first guess for two engines running the same quantized file; tighten them once the first layers match. The
+relative diff is the measure of strata-glm's GPU check (include/strata/glm/check.hpp), and tools/glm53_gpu_check.sh
+holds this comparison to that rule.
 
 A row where the two pick different tokens is a tie, and counts as agreeing, when each engine has the other's token
 within --tie-margin of its own: then the two tokens are about as likely as each other (a logit gap of 0.01 is a 1%
@@ -60,6 +62,8 @@ def main() -> int:
                     help="a top-1 disagreement is a tie when each side has the other's token within this many logits "
                          "of its own (0: no ties)")
     ap.add_argument("--diff-max", type=float, default=None, help="also fail when max |logit diff| is above this")
+    ap.add_argument("--rel-diff-max", type=float, default=None,
+                    help="also fail when a row's max |logit diff| is above this times its largest |ref logit|")
     ap.add_argument("--rows", type=int, default=0, help="compare only the first N rows")
     a = ap.parse_args()
 
@@ -101,13 +105,20 @@ def main() -> int:
     n_tie = int(tie.sum())
     top1 = float((agree | tie).mean())
     ties = f" ({top1 * 100:.2f}% with {n_tie} tie{'s' if n_tie > 1 else ''})" if n_tie else ""
+    # each row's largest difference relative to its largest |ref logit| (NaN for a row with a NaN)
+    worst_rel = float((diff / np.maximum(np.abs(ref.astype(np.float64)).max(axis=1), 1e-30)).max())
+    rel = f"   worst relative diff {worst_rel:.3g}" if a.rel_diff_max is not None else ""
     print(f"\nrows {n}   mean KL {mean_kl:.5f}   max KL {float(np.nanmax(kl)):.5f}   "
-          f"top-1 agreement {float(agree.mean()) * 100:.2f}%{ties}   max |logit diff| {float(diff.max()):.4f}")
+          f"top-1 agreement {float(agree.mean()) * 100:.2f}%{ties}   max |logit diff| {float(diff.max()):.4f}{rel}")
     ok = mean_kl <= a.kl_max and top1 >= a.top1_min and not bad.any()
-    needs = f"mean KL <= {a.kl_max} and top-1 >= {a.top1_min * 100:.0f}%"
+    # --top1-min 0 leaves top-1 agreement out of the rule (glm53_gpu_check.sh), and out of what a FAIL asks for
+    needs = f"mean KL <= {a.kl_max}" + (f" and top-1 >= {a.top1_min * 100:.0f}%" if a.top1_min > 0 else "")
     if a.diff_max is not None:
         ok = ok and float(diff.max()) <= a.diff_max
         needs += f" and max |logit diff| <= {a.diff_max}"
+    if a.rel_diff_max is not None:
+        ok = ok and worst_rel <= a.rel_diff_max
+        needs += f" and worst relative diff <= {a.rel_diff_max}"
     print("PASS" if ok else f"FAIL (needs {needs})")
     return 0 if ok else 1
 

@@ -24,15 +24,31 @@ except ImportError:
     HAVE_NUMPY = False
 
 # logits in the layout glm53_compare.py reads: 40 rows of 8, the same from every engine. FAKE_TIE=1 puts row 5's
-# top two tokens 0.0005 apart, in the other order in llama.cpp's (argument "ref"): a tie glm53_compare.py accepts
+# top two tokens 0.0005 apart, in the other order in llama.cpp's (argument "ref"): a tie glm53_compare.py accepts.
+# FAKE_SPREAD=1 gives the rows the scale of the GPU check's small models (the largest logit 0.32) and the engines
+# other than llama.cpp the CUDA rounding measured on Q4_0 (napster-ai, 2026-10-20): the worst row off by 3.23% of its
+# largest logit, and three rows of 40 whose top two tokens, 0.012 apart (more than the tie margin), swap places
 WRITE_LOGITS = """import os, struct, sys
+spread = os.environ.get("FAKE_SPREAD") == "1"
+ref = sys.argv[2:] == ["ref"]
 with open(sys.argv[1], "wb") as f:
     f.write(struct.pack("<ii", 8, 40))
     for r in range(40):
         row = [float((r * 7 + i * 3) % 11) for i in range(8)]
         if r == 5 and os.environ.get("FAKE_TIE") == "1":
             top = sorted(row)
-            row[row.index(top[-2])] = top[-1] + (0.0005 if sys.argv[2:] == ["ref"] else -0.0005)
+            row[row.index(top[-2])] = top[-1] + (0.0005 if ref else -0.0005)
+        if spread:
+            row = [0.032 * v for v in row]
+            hi = max(row)
+            if r in (3, 17, 29):
+                a, b = row.index(hi), row.index(sorted(row)[-2])
+                row[b] = hi - 0.012
+                if not ref:
+                    row[a] -= 0.0075
+                    row[b] += 0.0075
+            if r == 11 and not ref:
+                row[row.index(min(row))] += 0.0323 * hi
         f.write(struct.pack("<8f", *row))
 """
 
@@ -194,6 +210,33 @@ class Checks(unittest.TestCase):
         for line in self.calls("strata-glm"):
             self.assertIn("CVD=<unset>", line)
         self.assertEqual(out.count("(100.00% with 1 tie)"), len(GPU_MODELS), out)
+
+    def vs_llama(self, out):
+        """{model: its "vs llama.cpp" line} from the GPU check's output."""
+        lines, model = {}, None
+        for ln in out.splitlines():
+            if ln.startswith("== "):
+                model = ln[3:].strip()
+            elif ln.startswith("vs llama.cpp:") or ln.startswith("FAIL vs llama.cpp"):
+                lines[model] = ln
+        return lines
+
+    def test_gpu_check_takes_the_cuda_rounding_on_quantized_weights_only(self):
+        # top-1 37/40 without ties fails glm53_compare.py's defaults (98%); the GPU check holds the comparison to
+        # strata-glm's own rule (check.hpp): KL and the worst relative diff, by the weights' type
+        rc, out = self.run_script("glm53_gpu_check.sh", FAKE_SMI="0, 23900\\n", FAKE_SPREAD="1")
+        lines = self.vs_llama(out)
+        self.assertEqual(sorted(lines), sorted(GPU_MODELS), out)
+        for m in ("q4_0", "q8_0"):
+            self.assertIn("top-1 agreement 92.50%", lines[m])
+            self.assertNotIn("tie", lines[m])
+            self.assertTrue(lines[m].rstrip().endswith("PASS"), lines[m])
+        # float weights differ by 0.0001 on the GPU: the same spread there is a bug
+        for m in ("glm5-next-moe", "v1", "v1-bare"):
+            self.assertIn("FAIL", lines[m])
+            self.assertIn("worst relative diff <= 0.005", lines[m])
+        self.assertNotEqual(rc, 0)
+        self.assertNotIn("Traceback", out)
 
     def test_gpu_check_with_no_visible_card_says_so(self):
         rc, out = self.run_script("glm53_gpu_check.sh", CUDA_VISIBLE_DEVICES="", FAKE_SMI="0, 23900\\n")

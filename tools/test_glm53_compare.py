@@ -129,6 +129,28 @@ class Compare(unittest.TestCase):
         rc, out = self.run_compare(ref, got, *self.TIGHT, "--diff-max", "0.05")
         self.assertEqual(rc, 0, out)
 
+    def test_the_relative_difference_limit(self):
+        # each row's largest |ref logit| is 0.5 here, so 0.02 is 4% of row 12's
+        ref, got = rows40(), rows40()
+        low = min(range(8), key=lambda i: got[12][i])
+        got[12][low] += 0.02
+        rc, out = self.run_compare(ref, got, *self.TIGHT, "--rel-diff-max", "0.05")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("worst relative diff 0.04", out)
+        rc, out = self.run_compare(ref, got, *self.TIGHT, "--rel-diff-max", "0.03")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("worst relative diff <= 0.03", out)
+        # without the option the summary is as before
+        rc, out = self.run_compare(ref, got, *self.TIGHT)
+        self.assertNotIn("relative", out)
+
+    def test_a_nan_fails_the_relative_difference_limit(self):
+        ref, got = rows40(), rows40()
+        got[9][2] = math.nan
+        rc, out = self.run_compare(ref, got, "--kl-max", "1", "--top1-min", "0", "--rel-diff-max", "100")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("NaN", out)
+
     def test_a_row_of_nan_is_neither_a_tie_nor_a_pass(self):
         ref, got = rows40(), rows40()
         got[9] = [math.nan] * 8
