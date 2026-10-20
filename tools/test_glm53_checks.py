@@ -95,7 +95,8 @@ class Checks(unittest.TestCase):
         (self.tmp / "calls.log").write_text("")
 
     def run_script(self, name, **env_extra):
-        env = {k: v for k, v in os.environ.items() if not k.startswith(("CUDA_", "FAKE"))}
+        # nothing from the caller's shell that the scripts read: SEED=N would fix test-llama-archs' seed
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("CUDA_", "FAKE")) and k != "SEED"}
         env.update(FAKE=str(self.tmp), PATH=f"{self.tmp / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}")
         env.update(env_extra)
         r = subprocess.run([BASH, str(self.tmp / "tools" / name), str(self.tmp / "lb"), str(self.tmp / "sb")], env=env,
