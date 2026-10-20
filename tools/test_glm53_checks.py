@@ -1,7 +1,8 @@
 """tools/glm53_selftest.sh and tools/glm53_gpu_check.sh on cards another program fills, without a GPU or llama.cpp: the
 scripts run from a temporary folder beside the real glm53_compare.py, with stubs for llama.cpp's tools, the engines,
 nvidia-smi, glm53_tiny_variant.py and glm53_park_check.py. A stub that needs a GPU dies the way napster-ai's run did
-(2026-10-20) when the cards are full and not hidden from it.
+(2026-10-20) when the cards are full and not hidden from it. Also: the engine's Config default for a key the released
+GGUF lacks is read_config's.
 
     python -m unittest tools.test_glm53_checks
 """
@@ -167,6 +168,21 @@ class Checks(unittest.TestCase):
         self.assertNotIn("Traceback", out)
         self.assertEqual(out.count("FAIL vs llama.cpp: llama-strata-ref wrote no logits"), len(GPU_MODELS), out)
         self.assertIn("CUDA error: out of memory", out)
+
+
+class ConfigDefaults(unittest.TestCase):
+    """A Config made without read_config (a test, a tool) must not disagree with what read_config does for the
+    released GGUF, which lacks attention.indexer.kpool_select_tail."""
+
+    def test_the_struct_default_of_indexer_select_tail_is_read_configs(self):
+        import re
+        hpp = (ROOT / "include/strata/glm/model.hpp").read_text(encoding="utf-8")
+        cpp = (ROOT / "src/glm/model.cpp").read_text(encoding="utf-8")
+        struct = re.search(r"\bbool indexer_select_tail = (true|false);", hpp)
+        read = re.search(r'num_or\("attention\.indexer\.kpool_select_tail", ([01])\)', cpp)
+        self.assertIsNotNone(struct, "model.hpp: bool indexer_select_tail = ...;")
+        self.assertIsNotNone(read, "model.cpp: num_or(\"attention.indexer.kpool_select_tail\", ...)")
+        self.assertEqual(struct.group(1) == "true", read.group(1) == "1")
 
 
 if __name__ == "__main__":
