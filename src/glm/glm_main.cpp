@@ -164,7 +164,10 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (max_tokens > 0 && (long long) ids.size() > max_tokens) ids.resize((size_t) max_tokens);
-        if ((int64_t) ids.size() > opt.max_ctx) opt.max_ctx = (int64_t) ids.size();
+        // the prompt check decodes a few tokens past the prompt on both engines: room for them too
+        const int check_decode = use_prefill && check_cpu ? 4 : 0;
+        const int64_t n_ctx = (int64_t) ids.size() + check_decode;
+        if (n_ctx > opt.max_ctx) opt.max_ctx = n_ctx;
 
         const auto t0 = std::chrono::steady_clock::now();
         strata::glm::Model model(model_path);
@@ -174,7 +177,7 @@ int main(int argc, char** argv) {
         strata::glm::GpuEngine eng(model, opt);
         for (const auto& line : eng.placement()) std::printf("%s\n", line.c_str());
         std::unique_ptr<strata::glm::CpuRef> ref;
-        if (check_cpu) ref = std::make_unique<strata::glm::CpuRef>(model, (int64_t) ids.size(), opt.cpu_threads > 0 ? opt.cpu_threads : (int) std::thread::hardware_concurrency());
+        if (check_cpu) ref = std::make_unique<strata::glm::CpuRef>(model, n_ctx, opt.cpu_threads > 0 ? opt.cpu_threads : (int) std::thread::hardware_concurrency());
         const auto t1 = std::chrono::steady_clock::now();
         std::printf("loaded in %.1f s\n", std::chrono::duration<double>(t1 - t0).count());
 
@@ -213,7 +216,7 @@ int main(int argc, char** argv) {
             double worst = rel_diff(lc, lg);
             int agree = am(lc) == am(lg);
             std::printf("after the prompt: logits relative diff %.3g, top-1 %s\n", worst, agree ? "same" : "DIFFERENT");
-            for (int step = 0; step < 4; ++step) {
+            for (int step = 0; step < check_decode; ++step) {
                 const int32_t next = am(lc);
                 lc = ref->eval(next);
                 lg = eng.eval(next);
@@ -223,9 +226,9 @@ int main(int argc, char** argv) {
                 std::printf("decode %d: logits relative diff %.3g, top-1 %s\n", step, dl,
                             am(lc) == am(lg) ? "same" : "DIFFERENT");
             }
-            const bool pass = worst < 2e-2 && agree >= 4;
-            std::printf("check-prefill: worst logits relative diff %.3g, top-1 agreement %d/5: %s\n", worst, agree,
-                        pass ? "PASS" : "FAIL");
+            const bool pass = worst < 2e-2 && agree >= check_decode;
+            std::printf("check-prefill: worst logits relative diff %.3g, top-1 agreement %d/%d: %s\n", worst, agree,
+                        check_decode + 1, pass ? "PASS" : "FAIL");
             return pass ? 0 : 1;
         }
 
