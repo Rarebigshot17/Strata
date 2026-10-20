@@ -402,7 +402,7 @@ class OverHttp(Server):
         code, r = self.post({"model": "m", "input": "hi", "reasoning": {"effort": "none"}})
         self.assertEqual([o["type"] for o in r["output"]], ["message"])
         self.assertEqual(r["output"][0]["content"][0]["text"], "Hello.")
-        self.assertTrue(self.tok.decode(self.engine.last_prompt).endswith("<|assistant|></think>"))
+        self.assertTrue(self.tok.decode(self.engine.last_prompt).endswith("<|assistant|><think></think>"))
 
     def test_errors_use_the_responses_format(self):
         for body, param in (({"model": "m"}, "input"), ({"model": "m", "input": "x", "previous_response_id": "r"},

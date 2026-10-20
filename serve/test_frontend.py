@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 
 import strata_tokenizer as ST  # noqa: E402
+from serve.server import close_thinking  # noqa: E402
 from serve.frontend import (IMAGE_OMITTED, LITERAL_TAGS, ChatTemplate, TemplateRequestError,  # noqa: E402
                             anthropic_to_messages, budget_effort, effort_kwargs, images_of, literal_tags,
                             mark_think_literals, merge_template_kwargs, openai_to_messages, unmark_think_literals)
@@ -350,9 +351,10 @@ class ThinkingKwargs(unittest.TestCase):
                 ({"type": "auto"}, {"reasoning_effort": "none"}, {"enable_thinking": False})):
             with self.subTest(thinking=thinking, fields=fields):
                 self.assertEqual(openai_to_messages({"messages": msgs, "thinking": thinking, **fields})[2], want)
-        rendered = ChatTemplate(TEMPLATE).render(msgs, **openai_to_messages(
-            {"messages": msgs, "thinking": {"type": "disabled"}})[2])
-        self.assertTrue(rendered.endswith("<|assistant|></think>"), rendered[-40:])
+        # the template always opens the thinking; the server closes it (close_thinking)
+        kwargs = openai_to_messages({"messages": msgs, "thinking": {"type": "disabled"}})[2]
+        rendered = close_thinking(ChatTemplate(TEMPLATE).render(msgs, **kwargs), kwargs)
+        self.assertTrue(rendered.endswith("<|assistant|><think></think>"), rendered[-40:])
 
     def test_every_chat_template_kwarg_reaches_the_template(self):
         msgs = [{"role": "user", "content": "hi"}]

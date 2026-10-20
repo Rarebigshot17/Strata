@@ -28,7 +28,7 @@ from serve.frontend import (CALL_START, ChatTemplate, literal_tags, mark_think_l
 from serve.glm_fixtures import GlmTokenizer, call_text, glm_template, reply_text  # noqa: E402
 from serve.server import (CTX_SLACK, ByteTokenizer, EngineDied, EngineError, EngineNonFinite, Fifo,  # noqa: E402
                           MockEngine, Service,
-                          StrataEngine, api_key_of, engine_args, key_matches, prompt_progress,
+                          StrataEngine, api_key_of, close_thinking, engine_args, key_matches, prompt_progress,
                           prompt_tokens_seen,
                           request_timings, serve)
 from types import SimpleNamespace  # noqa: E402
@@ -375,7 +375,9 @@ class LiteralThinkTags(unittest.TestCase):
         return self.svc.prepare(messages, tools, kw)[0]
 
     def old_ids(self, messages, tools=None, **kw):
-        return self.tok.encode(self.svc.template.render(messages, tools=tools, **kw), parse_special=True)
+        """The prompt as the server writes it without the marks (thinking off closed, see close_thinking)."""
+        return self.tok.encode(close_thinking(self.svc.template.render(messages, tools=tools, **kw), kw),
+                               parse_special=True)
 
     def counts(self, ids):
         return [ids.count(self.tok.encode(t)[0]) for t in self.TAGS]
@@ -387,10 +389,11 @@ class LiteralThinkTags(unittest.TestCase):
         self.assertEqual(ids.count(self.open), 1)                         # the generation prompt's own
         self.assertEqual(ids[-2:], [self.assistant, self.open])
         self.assertIn(text, self.tok.decode(ids))                         # the text is all there, as text
-        # thinking off: the generation prompt's </think> is the one special, the user's tags are text
+        # thinking off: the generation prompt's <think> and the </think> the server closes it with are the specials,
+        # the user's tags are text
         ids = self.ids([{"role": "user", "content": text}], enable_thinking=False)
-        self.assertEqual((ids.count(self.open), ids.count(self.close)), (0, 1))
-        self.assertEqual(ids[-2:], [self.assistant, self.close])
+        self.assertEqual((ids.count(self.open), ids.count(self.close)), (1, 1))
+        self.assertEqual(ids[-3:], [self.assistant, self.open, self.close])
 
     def test_without_a_tag_the_prompt_is_unchanged(self):
         msgs = [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "1+1?"},
@@ -494,7 +497,9 @@ class LiteralControlTokens(unittest.TestCase):
         return self.svc.prepare(messages, tools, kw)[0]
 
     def old_ids(self, messages, tools=None, **kw):
-        return self.tok.encode(self.svc.template.render(messages, tools=tools, **kw), parse_special=True)
+        """The prompt as the server writes it without the marks (thinking off closed, see close_thinking)."""
+        return self.tok.encode(close_thinking(self.svc.template.render(messages, tools=tools, **kw), kw),
+                               parse_special=True)
 
     def counts(self, ids):
         return tuple(ids.count(t) for t in self.specials)
@@ -3421,7 +3426,7 @@ class ThinkingBudget(unittest.TestCase):
         code, b = self.openai(reasoning_budget_tokens=5, reasoning_effort="none")
         self.assertEqual(code, 200, b)
         self.assertEqual(len(self.engine.prompts), 1)
-        self.assertTrue(self.tok.decode(self.engine.prompts[0]).endswith("<|assistant|></think>"))  # thinking off
+        self.assertTrue(self.tok.decode(self.engine.prompts[0]).endswith("<|assistant|><think></think>"))  # off
         self.assertEqual(b["choices"][0]["message"]["content"], ThinkingEngine.ANSWER)
 
     def test_no_room_left_to_answer(self):
@@ -3584,7 +3589,8 @@ class ForcedToolChoice(unittest.TestCase):
                     self.assertEqual(len(self.engine.prompts), 1)
                     opening = CALL_START + ("search" if choice == self.NAMED else "")
                     # the generation prompt with the thinking closed, then the opening
-                    self.assertTrue(self.tok.decode(self.engine.prompts[0]).endswith("<|assistant|></think>" + opening))
+                    self.assertTrue(self.tok.decode(self.engine.prompts[0]).endswith(
+                        "<|assistant|><think></think>" + opening))
 
     def test_the_budget_wrap_up_opens_the_call(self):
         from serve.server import REASONING_WRAP_UP
@@ -3654,6 +3660,143 @@ class ForcedToolChoice(unittest.TestCase):
                     self.assertEqual(stop, want)
                     offered = "search the web" in self.tok.decode(self.engine.prompts[0])
                     self.assertEqual(offered, choice["type"] != "none")
+
+
+class ThinkingOff(unittest.TestCase):
+    """GLM-5.3-Flash's template has no enable_thinking switch: its generation prompt is always <|assistant|><think>.
+    A request that turns thinking off - reasoning_effort "none", Z.ai's or Anthropic's thinking disabled, an Anthropic
+    request that does not ask for thinking under "anthropic_thinking": "on_request" (#278), Responses' effort "none",
+    chat_template_kwargs enable_thinking false - gets its thinking closed by the server: the prompt ends
+    <|assistant|><think></think> (</think> as its special token, as the template writes a past turn without
+    reasoning), the reply is all answer, a forced call's opening follows the </think>, and the checkpoint stays before
+    the generation prompt.  A template that honours enable_thinking itself (GLM-4.7-Flash's) is left as it renders."""
+    OPENAI_TOOLS = ForcedToolChoice.TOOLS
+    ANTHROPIC_TOOLS = [{"name": "search", "description": "search the web",
+                        "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}}},
+                       {"name": "done", "input_schema": {"type": "object", "properties": {}}}]
+    RESPONSES_TOOLS = [{"type": "function", **t["function"]} for t in ForcedToolChoice.TOOLS]
+
+    def setUp(self):
+        self.tok = GlmTokenizer()
+        self.engine = CallingEngine(self.tok)
+        self.checkpoints = []
+        generate = self.engine.generate
+
+        def recorded(ids, max_new, sampling, cancel, checkpoint=None, end_ids=None, drawn=0):
+            self.checkpoints.append(checkpoint)
+            yield from generate(ids, max_new, sampling, cancel, checkpoint, end_ids)
+        self.engine.generate = recorded
+        self.svc = Service(self.engine, self.tok, glm_template())
+        self.httpd = serve(self.svc, port=0)
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        self.close = self.tok.encode("</think>")[0]
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+    def post(self, path, body):
+        req = urllib.request.Request(self.base + path, data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with contextlib.redirect_stdout(io.StringIO()), urllib.request.urlopen(req, timeout=30) as r:
+            self.assertEqual(r.status, 200)
+            return json.loads(r.read())
+
+    def answer(self, api, extra, tools=False):
+        """-> (the engine's prompts as text, the reply's (reasoning, text, [(call name, arguments)]))."""
+        self.engine.prompts, self.checkpoints[:] = [], []
+        msgs = [{"role": "user", "content": "2+2?"}]
+        if api == "openai":
+            b = self.post("/v1/chat/completions", {"model": "m", "messages": msgs, "max_tokens": 400, **extra,
+                                                   **({"tools": self.OPENAI_TOOLS} if tools else {})})
+            m = b["choices"][0]["message"]
+            got = (m.get("reasoning_content") or "", m.get("content") or "",
+                   [(c["function"]["name"], json.loads(c["function"]["arguments"])) for c in m.get("tool_calls") or []])
+        elif api == "anthropic":
+            b = self.post("/v1/messages", {"model": "m", "messages": msgs, "max_tokens": 400, **extra,
+                                           **({"tools": self.ANTHROPIC_TOOLS} if tools else {})})
+            blocks = b["content"]
+            got = ("".join(x["thinking"] for x in blocks if x["type"] == "thinking"),
+                   "".join(x["text"] for x in blocks if x["type"] == "text"),
+                   [(x["name"], x["input"]) for x in blocks if x["type"] == "tool_use"])
+        else:
+            b = self.post("/v1/responses", {"model": "m", "input": "2+2?", "max_output_tokens": 400, **extra,
+                                            **({"tools": self.RESPONSES_TOOLS} if tools else {})})
+            out = b["output"]
+            got = ("".join(c["text"] for o in out if o["type"] == "reasoning" for c in o.get("content") or []),
+                   "".join(c["text"] for o in out if o["type"] == "message" for c in o["content"]),
+                   [(o["name"], json.loads(o["arguments"])) for o in out if o["type"] == "function_call"])
+        return [self.tok.decode(p) for p in self.engine.prompts], got
+
+    OFF = (("openai", {"reasoning_effort": "none"}), ("openai", {"thinking": {"type": "disabled"}}),
+           ("openai", {"chat_template_kwargs": {"enable_thinking": False}}),
+           ("anthropic", {"thinking": {"type": "disabled"}}), ("responses", {"reasoning": {"effort": "none"}}))
+
+    def test_every_api_answers_at_once(self):
+        for api, extra in self.OFF:
+            with self.subTest(api=api, extra=extra):
+                prompts, got = self.answer(api, extra)
+                self.assertEqual(len(prompts), 1)
+                self.assertTrue(prompts[0].endswith("<|user|>2+2?<|assistant|><think></think>"), prompts[0][-60:])
+                self.assertTrue(prompts[0].startswith("[gMASK]<sop><|system|>Reasoning Effort: Max"))
+                self.assertEqual(self.engine.prompts[0][-1], self.close)          # </think> as its special token
+                # the checkpoint: before the generation prompt's three tokens
+                self.assertEqual(self.checkpoints, [len(self.engine.prompts[0]) - 3])
+                self.assertEqual(got, ("", CallingEngine.ANSWER, []))
+
+    def test_anthropic_on_request(self):
+        # #278: "anthropic_thinking": "on_request" - an Anthropic request that does not ask for thinking has none
+        self.svc.anthropic_think_unasked = False
+        prompts, got = self.answer("anthropic", {})
+        self.assertTrue(prompts[0].endswith("<|assistant|><think></think>"))
+        self.assertEqual(got, ("", CallingEngine.ANSWER, []))
+        prompts, got = self.answer("anthropic", {"thinking": {"type": "enabled", "budget_tokens": 4096}})
+        self.assertTrue(prompts[0].endswith("<|assistant|><think>"))
+        self.assertEqual(got, (CallingEngine.THOUGHT, CallingEngine.ANSWER, []))
+
+    def test_thinking_on_is_left_open(self):
+        for api, extra in (("openai", {}), ("openai", {"reasoning_effort": "high"}), ("anthropic", {}),
+                           ("responses", {"reasoning": {"effort": "low"}})):
+            with self.subTest(api=api, extra=extra):
+                prompts, got = self.answer(api, extra)
+                self.assertTrue(prompts[0].endswith("<|user|>2+2?<|assistant|><think>"))
+                self.assertEqual(self.checkpoints, [len(self.engine.prompts[0]) - 2])
+                self.assertEqual(got, (CallingEngine.THOUGHT, CallingEngine.ANSWER, []))
+
+    def test_a_forced_call_follows_the_closed_thinking(self):
+        for api, extra in (("openai", {"reasoning_effort": "none", "tool_choice": "required"}),
+                           ("openai", {"reasoning_effort": "none", "tool_choice": ForcedToolChoice.NAMED}),
+                           ("anthropic", {"thinking": {"type": "disabled"}, "tool_choice": {"type": "any"}}),
+                           ("responses", {"reasoning": {"effort": "none"}, "tool_choice": "required"})):
+            with self.subTest(api=api, extra=extra):
+                prompts, got = self.answer(api, extra, tools=True)
+                opening = CALL_START + ("search" if extra["tool_choice"] == ForcedToolChoice.NAMED else "")
+                self.assertEqual(len(prompts), 1)
+                self.assertTrue(prompts[0].endswith("<|assistant|><think></think>" + opening), prompts[0][-60:])
+                self.assertEqual(self.checkpoints, [len(self.engine.prompts[0]) - 3 - len(self.tok.encode(opening))])
+                self.assertEqual(got, ("", "", [("search", {"q": "2+2"})]))
+
+    def test_a_template_with_its_own_switch_is_left_as_it_renders(self):
+        # GLM-4.7-Flash's template closes the thinking itself when enable_thinking is false (<|assistant|></think>)
+        self.svc.template = ChatTemplate(ROOT / "serve" / "fixtures" / "glm47_flash.jinja")
+        prompts, got = self.answer("openai", {"reasoning_effort": "none"})
+        self.assertTrue(prompts[0].endswith("<|user|>2+2?<|assistant|></think>"), prompts[0][-60:])
+        self.assertEqual(self.checkpoints, [len(self.engine.prompts[0]) - 2])
+        self.assertEqual(got, ("", CallingEngine.ANSWER, []))
+        prompts, _ = self.answer("openai", {})
+        self.assertTrue(prompts[0].endswith("<|user|>2+2?<|assistant|><think>"))
+
+    def test_the_template_still_gets_enable_thinking(self):
+        seen = []
+        render = self.svc.template.render
+
+        def recording(messages, tools=None, add_generation_prompt=True, **kw):
+            seen.append(kw.get("enable_thinking"))
+            return render(messages, tools=tools, add_generation_prompt=add_generation_prompt, **kw)
+        self.svc.template = SimpleNamespace(render=recording, caps=self.svc.template.caps,
+                                            source=self.svc.template.source)
+        self.answer("openai", {"reasoning_effort": "none"})
+        self.assertEqual(set(seen), {False})
 
 
 class StatusHandover(unittest.TestCase):

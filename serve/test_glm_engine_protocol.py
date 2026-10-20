@@ -278,9 +278,9 @@ class CheckpointTests(unittest.TestCase):
     def test_thinking_off_and_a_forced_call(self):
         ids, thinking, _ = self.svc.prepare(self.messages, None, {"enable_thinking": False}, force="<tool_call>get")
         cp = self.svc.checkpoint.at
-        self.assertFalse(thinking)                       # ... ends with <|assistant|></think>
+        self.assertFalse(thinking)                       # ... ends with <|assistant|><think></think>
         self.assertEqual(ids[:cp], self.conversation_ids({"enable_thinking": False}))
-        self.assertEqual(self.tok.decode(ids[cp:]), "<|assistant|></think><tool_call>get")
+        self.assertEqual(self.tok.decode(ids[cp:]), "<|assistant|><think></think><tool_call>get")
 
     def test_the_run_sends_it_once(self):
         ids, thinking, max_new = self.svc.prepare(self.messages, None, {})

@@ -52,9 +52,9 @@ sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script as well as a module
 from gguf_reader import GGUFFile  # noqa: E402
 from strata_tokenizer import Tokenizer  # noqa: E402
-from serve.frontend import (CALL_END, ORDINARY_LT, OUTPUT_TAGS, THINK_END, ChatTemplate, Event,  # noqa: E402
-                            OutputParser, anthropic_to_messages, forced_call, literal_tags, mark_think_literals,
-                            openai_to_messages, tool_choice_of, unmark_think_literals)
+from serve.frontend import (CALL_END, ORDINARY_LT, OUTPUT_TAGS, THINK_END, THINK_START, ChatTemplate,  # noqa: E402
+                            Event, OutputParser, anthropic_to_messages, forced_call, literal_tags,
+                            mark_think_literals, openai_to_messages, tool_choice_of, unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 from serve import runconfig  # noqa: E402
 from serve.runconfig import env_on  # noqa: E402
@@ -1411,6 +1411,19 @@ def anthropic_budget(req: dict) -> dict:
     return {**req, "reasoning_budget_tokens": n}
 
 
+def close_thinking(rendered: str, kwargs: dict) -> str:
+    """The rendered prompt, with its thinking closed when the request turns thinking off (enable_thinking false: a
+    reasoning_effort "none", Anthropic's thinking disabled, anthropic_thinking "on_request", ...) and the template still
+    opened it.  GLM-5.3-Flash's template has no enable_thinking switch: its generation prompt is always
+    <|assistant|><think>.  The server writes the </think> itself, as the template writes a past turn without reasoning
+    (<think></think>), and the model answers at once.  A template that honours enable_thinking itself (GLM-4.7-Flash's
+    ends with <|assistant|></think>) is left as it renders."""
+    if kwargs.get("enable_thinking") is not False:
+        return rendered
+    head = rendered.rstrip()
+    return head + THINK_END if head.endswith(THINK_START) else rendered
+
+
 class StopMatcher:
     """Cuts the answer's text at the first stop string.  Text that could still be the start of a stop string is held
     back (only that tail, never more), so a stop string split across tokens or chunks is still found and never sent."""
@@ -2089,9 +2102,10 @@ class Service:
         """-> (ids, the rendered prompt as rendered - literal texts still marked -, the marked messages and tools).
         #537: a <think> / </think> written inside a message's text is encoded as the text it is, not as the model's
         reasoning markers (the template's own are), and so is every other special token's text (<|user|>,
-        <|observation|>, <tool_call>, ...): only the special tokens the template writes are special tokens."""
+        <|observation|>, <tool_call>, ...): only the special tokens the template writes are special tokens.  Thinking
+        off closes the thinking the template opened (close_thinking): the </think> is a special token too."""
         marked, marked_tools, changed = mark_think_literals(messages, tools, self.literals)
-        rendered = self.template.render(marked, tools=marked_tools, **kwargs)
+        rendered = close_thinking(self.template.render(marked, tools=marked_tools, **kwargs), kwargs)
         if not changed:
             return self.tok.encode(rendered, parse_special=True), rendered, marked, marked_tools
         prompt, plain = unmark_think_literals(rendered, self.literals)
@@ -2103,9 +2117,11 @@ class Service:
 
     def checkpoint_at(self, marked, marked_tools, kwargs, rendered, ids) -> int | None:
         """Where the engine should checkpoint this prompt (cp=): before the generation prompt (<|assistant|><think>).
-        The next turn renders this one's reply again after that point - without its reasoning, once a user message
-        follows - so the engine's state after the reply cannot be continued, but a checkpoint there can: without it
-        every new user turn would read the whole conversation again.  The conversation is rendered once more without
+        The next turn renders this one's reply again after that point.  GLM-5.3-Flash's template writes it as the model
+        did, reasoning and all (clear_thinking is false by default), and the engine goes on from the reply's end; when
+        the next turn writes it otherwise (clear_thinking true, a client that drops the reasoning or changes the
+        answer), the engine's state after the reply cannot be continued, but a checkpoint there can: without it every
+        new user turn would read the whole conversation again.  The conversation is rendered once more without
         the generation prompt (the same marked messages), and only what follows it is tokenized again: it begins
         with a special token, so the tokens before it are the conversation's.  None when the prompt does not end that
         way.  A wrong guess costs nothing but the checkpoint's use: the engine saves the state of whatever prefix it
@@ -2155,10 +2171,10 @@ class Service:
     def prepare(self, messages, tools, kwargs, max_new=None, force=None):
         """-> (ids, thinking, max_new). An unset or non-positive max_new (some clients send -1) means "unlimited":
         the rest of the context.  `thinking`: the prompt ends by opening the model's thinking (the template's
-        generation prompt <|assistant|><think>; thinking off ends it with </think>).  `force` (forced_call): without
-        thinking the reply starts with it, so it ends the prompt; with thinking, Service.run writes it once the
-        thinking is over.  The prompt's checkpoint (checkpoint_at) waits in self.checkpoint for the run() that
-        follows on this thread."""
+        generation prompt <|assistant|><think>; thinking off ends it with <think></think>, see close_thinking).
+        `force` (forced_call): without thinking the reply starts with it, so it ends the prompt; with thinking,
+        Service.run writes it once the thinking is over.  The prompt's checkpoint (checkpoint_at) waits in
+        self.checkpoint for the run() that follows on this thread."""
         refuse_images(messages)
         ids, rendered, marked, marked_tools = self._encode(text_tool_results(messages), tools, kwargs)
         self.checkpoint.at = self.checkpoint_at(marked, marked_tools, kwargs, rendered, ids)
