@@ -186,13 +186,13 @@ Every word a request sends lands on a level, or turns thinking off. Any other wo
 - **Earlier turns keep their thinking.** GLM-5.3-Flash's template keeps the thinking of every earlier turn in the
   prompt: its `clear_thinking` is false unless a request says otherwise. So when a client sends the reply back as it
   got it, the next turn's prompt starts with this turn's prompt and its reply as the model wrote it, and the engine
-  goes on from the end of the reply: it reads only the new messages. The cost is context. Every turn's thinking stays in it, so a long agent session fills the
-  context sooner: 50 turns that think 2,000 tokens each carry 100,000 tokens of thinking (calculated). To drop it,
-  send `"chat_template_kwargs": {"clear_thinking": true}` with each request. The thinking of the turns before the
-  last user message is then left out (they are written `<think></think>`), and the turns after it keep theirs. The
-  prompt stays shorter, but each new user message changes the earlier turns, and the engine reads the conversation
-  again from the first turn that lost its thinking. A client that does not send the thinking back gets its turns
-  written `<think></think>` too.
+  goes on from the end of the reply: it reads only the new messages. The cost is context. Every turn's thinking stays
+  in it, so a long agent session fills the context sooner: 50 turns that think 2,000 tokens each carry 100,000 tokens
+  of thinking (calculated). To drop it, send `"chat_template_kwargs": {"clear_thinking": true}` with each request. The
+  thinking of the turns before the last user message is then left out (they are written `<think></think>`), and the
+  turns after it keep theirs. The prompt stays shorter, but each new user message changes the earlier turns, and the
+  engine reads the conversation again from the first turn that lost its thinking. A client that does not send the
+  thinking back gets its turns written `<think></think>` too.
 
 **The reasoning budget.** `"reasoning_budget_tokens": N` in a request (chat, Anthropic or Responses), Anthropic's
 `thinking.budget_tokens`, the shared settings' or the run config's caps the thinking at N tokens, in that order: a
