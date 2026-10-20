@@ -71,15 +71,17 @@ BUILD_DIR = ROOT / "build"
 # listing showed its files are UD-IQ4_XS, with no plain IQ4_XS.  The sizes are decimal GB (10^9 bytes), as the Hub
 # and the disks count them; the RAM is counted in GiB (2^30 bytes), as Linux reports it, so the experts are compared
 # with it in GiB (experts_gib).  Where they come from: both downloads from the repository's listing, the 3-bit's
-# experts from tools/glm53_inspect.py on its file (napster-ai, 2026-10-20; that inspector counted the MTP layer's
-# experts too, which the engine does not load, so it keeps a little less in RAM).  The 4-bit's experts are not
-# measured: derived as its download less what the 3-bit file holds beside its experts (NON_EXPERT_GB), about 149 GB.
-NON_EXPERT_GB = 7.9      # the real UD-IQ3_XXS file beside its routed experts (the same inspector run)
+# experts from tools/glm53_inspect.py on its file (napster-ai, 2026-10-20): those of the 45 layers the engine runs,
+# the ones it keeps in RAM and its warm-up reads, not the MTP layer's (blk.45), which it does not load.  The 4-bit's
+# experts are not measured: derived as its download less what the 3-bit file holds beside them (NON_EXPERT_GB and
+# MTP_GB), about 146 GB.
+NON_EXPERT_GB = 7.7      # the real UD-IQ3_XXS file's tensors beside the routed experts, on the GPU (the same run)
+MTP_GB = 2.8             # its MTP layer, not loaded (the same run)
 MODELS = {
     "UD-IQ3_XXS": {"bits": "3-bit", "about": "for a PC with 128 GB of RAM or more",
-                   "download_gb": 120.4, "experts_gb": 112.5},
+                   "download_gb": 120.4, "experts_gb": 109.9},
     "UD-IQ4_XS": {"bits": "4-bit", "about": "better answers, but its experts need about 34 GiB more RAM",
-                  "download_gb": 156.8, "experts_gb": 156.8 - NON_EXPERT_GB, "fallback": ("UD-Q4_K_XL",),
+                  "download_gb": 156.8, "experts_gb": 156.8 - NON_EXPERT_GB - MTP_GB, "fallback": ("UD-Q4_K_XL",),
                   "was": ("IQ4_XS",)},
 }
 GIB = 2**30
@@ -355,7 +357,7 @@ def size_name(name) -> str | None:
 
 
 def experts_gib(model: str) -> float:
-    """The size's experts in GiB, the unit of the RAM: 105 at 3-bit, 139 at 4-bit (that one derived, see MODELS)."""
+    """The size's experts in GiB, the unit of the RAM: 102 at 3-bit, 136 at 4-bit (that one derived, see MODELS)."""
     return MODELS[model]["experts_gb"] * 1e9 / GIB
 
 
@@ -371,8 +373,8 @@ def model_fit(model: str, ram: float) -> str:
 
 
 def recommended_model(ram: float) -> str:
-    """The best size that fits well (192 GB installed, 188 GiB reported: the 4-bit, ~49 GiB left beside its experts;
-    160 GB, ~157 GiB: the 3-bit, as the 4-bit would leave ~18 GiB); the smallest when none does."""
+    """The best size that fits well (192 GB installed, 188 GiB reported: the 4-bit, ~52 GiB left beside its experts;
+    160 GB, ~157 GiB: the 3-bit, as the 4-bit would leave ~21 GiB); the smallest when none does."""
     return next((m for m in reversed(list(MODELS)) if model_fit(m, ram) == "fits"), next(iter(MODELS)))
 
 
@@ -1682,7 +1684,7 @@ def main() -> int:
                     metavar="{" + ",".join(MODELS) + "}",
                     help=f"{q3} = 3-bit (~{MODELS[q3]['download_gb']:.0f} GB download, ~{experts_gib(q3):.0f} GiB of "
                          f"experts in RAM), {q4} = 4-bit (~{MODELS[q4]['download_gb']:.0f} GB, "
-                         f"~{experts_gib(q4):.0f} GiB, estimated; UD-Q4_K_XL when the repository has no {q4}; IQ4_XS, "
+                         f"~{experts_gib(q4):.0f} GiB, derived; UD-Q4_K_XL when the repository has no {q4}; IQ4_XS, "
                          "its earlier name, is taken too). Default: the one this PC's RAM fits")
     ap.add_argument("--context", type=int, metavar="N",
                     help=f"the longest conversation in tokens (up to {MAX_CONTEXT}); each token takes "

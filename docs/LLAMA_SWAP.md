@@ -6,8 +6,8 @@ one a request names and stops the others to free the GPUs. Strata can be one of 
 Nothing on this page has been run with the GLM engine yet. The entry below and the traps come from Strata's server
 code; the traps were first found by the upstream project (Niko1221/Strata) with its Qwen engine behind llama-swap.
 
-GLM-5.3-Flash needs every GPU it was set up with and, by setup.py's figures, 112.5 GB (3-bit, counted in the real
-file) or about 149 GB (4-bit, derived from its download) of RAM for its experts. So Strata cannot stay loaded beside
+GLM-5.3-Flash needs every GPU it was set up with and, by setup.py's figures, 109.9 GB (3-bit, counted in the real
+file) or about 146 GB (4-bit, derived from its download) of RAM for its experts. So Strata cannot stay loaded beside
 another large model: put the others in a llama-swap group that does not run together with Strata, or let swapping
 stop it.
 
@@ -62,7 +62,7 @@ warming the experts: <read> of <total> GB (<seconds> s, <rate> GB/s)
 ```
 
 After a reboot the warm-up reads the experts from disk. No start on the real model has been timed yet. For scale
-only: a SATA III link carries at most 0.6 GB/s, so reading 112.5 GB takes at least about 3.1 minutes and 149 GB about
+only: a SATA III link carries at most 0.6 GB/s, so reading 109.9 GB takes at least about 3.1 minutes and 146 GB about
 4.1 minutes (calculated; a real drive is slower). When the files are still in the page cache from an earlier run, the
 warm-up reads them from RAM instead.
 

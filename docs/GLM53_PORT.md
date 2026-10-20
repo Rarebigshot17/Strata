@@ -52,16 +52,17 @@ below.
 
 The routed experts are about 304B parameters (288 experts x 3 matrices x 4096 x 2048 x 42 MoE layers). The sizes
 below come from napster-ai on 2026-10-20: the downloads from the repository's listing, the 3-bit experts from
-`tools/glm53_inspect.py` on the 3-bit file (112.5 GB, everything else 7.9 GB). That inspector counted the MTP layer's
-experts (`blk.45`) too, which the engine does not load, so the engine keeps a little less in RAM; the inspector now
-counts them apart. The 4-bit experts are not measured: they are derived as its download less the 3-bit file's 7.9 GB
-beside the experts, which takes the 4-bit file's other tensors as the same size as the 3-bit's (if they are bigger,
-its experts are smaller). The RAM left is calculated from these.
+`tools/glm53_inspect.py` on the 3-bit file: 109.9 GB of routed experts in the 45 layers the engine runs, 7.7 GB of
+everything else (on the GPUs), and 2.8 GB for the MTP layer (`blk.45`), which the engine does not load. (The
+inspector's first run counted 112.5 GB of experts and 7.9 GB of the rest, with the MTP layer in them.) The 4-bit
+experts are not measured: they are derived as its download less the 3-bit file's 7.7 GB and 2.8 GB, which takes the
+4-bit file's other tensors and MTP layer as the same size as the 3-bit's (if they are bigger, its experts are
+smaller). The RAM left is calculated from these.
 
 | Option | Files | Download | Experts in RAM | RAM left beside them on 192 GB (188 GiB reported) |
 |---|---|---|---|---|
-| 3-bit | UD-IQ3_XXS, 4 files | 120.4 GB (listing) | 112.5 GB = 104.8 GiB (inspector) | about 83 GiB |
-| 4-bit | UD-IQ4_XS, 5 files; UD-Q4_K_XL (6 files, 199.7 GB) when the repository has no UD-IQ4_XS | 156.8 GB (listing) | about 149 GB = 139 GiB (derived) | about 49 GiB |
+| 3-bit | UD-IQ3_XXS, 4 files | 120.4 GB (listing) | 109.9 GB = 102.4 GiB (inspector) | about 86 GiB |
+| 4-bit | UD-IQ4_XS, 5 files; UD-Q4_K_XL (6 files, 199.7 GB) when the repository has no UD-IQ4_XS | 156.8 GB (listing) | about 146 GB = 136 GiB (derived) | about 52 GiB |
 
 The plan had calculated about 117 GB for the 3-bit experts (IQ3_XXS, 3.06 bits, for every one) and about 162 GB for
 the 4-bit ones (IQ4_XS, 4.25 bits); the 3-bit file mixes IQ2_S, IQ3_S, IQ4_XS and Q3_K ("The real file" below), and
@@ -71,13 +72,13 @@ which types the 4-bit file holds is not read yet. The repository has no plain IQ
 taken from the RAM Linux reports (`/proc/meminfo`), which is a few GiB under the installed 192 GB: setup's tests
 take 188 GiB. With less than 40 GiB left it calls a size tight and gives parked conversations 4096 MiB instead of
 8192 (`--park-mib`); below 12 GiB it asks before it installs. With 192 GB it therefore recommends the 4-bit model
-(about 49 GiB left), and keeps the 3-bit one when you choose it (about 83 GiB left). The 4-bit's margin over the
+(about 52 GiB left), and keeps the 3-bit one when you choose it (about 86 GiB left). The 4-bit's margin over the
 40 GiB rests on the derived figure. With 160 GB (about 157 GiB) it would recommend the 3-bit: the 4-bit would leave
-about 18 GiB. For UD-Q4_K_XL setup takes the experts as the same share of its files as for UD-IQ4_XS.
+about 21 GiB. For UD-Q4_K_XL setup takes the experts as the same share of its files as for UD-IQ4_XS.
 
 For now napster-ai has 91 GiB of RAM (at the first run, 2026-10-20); 192 GB is planned. Neither size fits on 91 GiB:
-setup wants at least 12 GiB left beside the experts, so about 117 GiB of RAM for the 3-bit size (145 GiB to call it a
-fit) and about 151 GiB for the 4-bit size (179 GiB). On 91 GiB setup says the experts do not fit and asks before it
+setup wants at least 12 GiB left beside the experts, so about 114 GiB of RAM for the 3-bit size (142 GiB to call it a
+fit) and about 148 GiB for the 4-bit size (176 GiB). On 91 GiB setup says the experts do not fit and asks before it
 installs. The steps that run the real model (6-8) need the RAM in place: with less RAM than the experts, Linux reads
 them from the disk while the model runs, which is very slow or does not start at all. They also need the Qwen service
 stopped, as step 4 does, since it holds most of the VRAM and RAM while it runs. Step 5's download and inspector need
@@ -172,9 +173,9 @@ from what the plan took in these:
 - `block_count` is 46 with `nextn_predict_layers` 1: `blk.45` is the MTP layer. The engine runs the 45 layers before
   it and does not load it, so its Q2_K experts, the only Q2_K tensors in the file, need no kernel.
 - The routed experts of the 45 layers are not IQ3_XXS throughout, as the plan took them: they are IQ2_S (gate and
-  up) and IQ3_S (down), with IQ4_XS and Q3_K too. The GPU kernels take each. The inspector counted 112.5 GB of
-  experts (the MTP layer's included) and 7.9 GB of everything else, the 120.4 GB the repository lists for the file;
-  the plan had calculated about 117 GB of experts ("Memory on napster-ai").
+  up) and IQ3_S (down), with IQ4_XS and Q3_K too. The GPU kernels take each. The inspector counted 109.9 GB of
+  them, 7.7 GB of everything else and 2.8 GB for the MTP layer: the 120.4 GB the repository lists for the file. The
+  plan had calculated about 117 GB of experts ("Memory on napster-ai").
 
 ## What to run on napster-ai
 
@@ -251,8 +252,8 @@ again); steps 6-8 have not run yet. Run them from the Strata folder.
    The inspector flags an expert type the GPU kernels cannot read only where a layer the engine runs uses it; the
    MTP layer (the last block, `blk.45` in the 3-bit file) is listed apart, since Strata does not load it. The 3-bit
    file's experts are IQ2_S, IQ3_S, IQ4_XS and Q3_K (its inspector output on napster-ai), and the kernels take each;
-   its Q2_K tensors are only in the MTP layer. On 192 GB (188 GiB reported) the 4-bit file leaves about 49 GiB of
-   RAM beside its experts and the 3-bit file about 83 GiB (calculated from the figures in "Memory on napster-ai"; the
+   its Q2_K tensors are only in the MTP layer. On 192 GB (188 GiB reported) the 4-bit file leaves about 52 GiB of
+   RAM beside its experts and the 3-bit file about 86 GiB (calculated from the figures in "Memory on napster-ai"; the
    4-bit's are derived). Steps 6-8 need the RAM in place and the Qwen service stopped ("Memory on napster-ai").
 
 6. **Reference logits from llama.cpp** on the real model. `--n-cpu-moe` keeps that many layers' experts on the

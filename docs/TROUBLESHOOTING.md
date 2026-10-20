@@ -102,11 +102,11 @@ the real total from the listing before it downloads. Put them on a bigger drive:
 `--data-dir <folder>`, which is remembered for every Strata folder on this PC.
 
 **"<size>'s experts (~N GiB) do not fit beside Linux and the server in this PC's N GiB of RAM"**.
-Every routed expert stays in RAM: 112.5 GB (104.8 GiB) at 3-bit, counted in the real file by
-`tools/glm53_inspect.py`, and about 149 GB (139 GiB) at 4-bit, derived from its download (not measured). Setup
+Every routed expert stays in RAM: 109.9 GB (102.4 GiB) at 3-bit, counted in the real file by
+`tools/glm53_inspect.py`, and about 146 GB (136 GiB) at 4-bit, derived from its download (not measured). Setup
 subtracts that from the RAM Linux reports, in GiB as `free -g` counts it, and prints what is left beside the experts.
-On a PC with 192 GB installed Linux reports about 188 GiB: that leaves about 83 GiB for the 3-bit model and about
-49 GiB for the 4-bit one. Below 40 GiB left setup warns and gives parked conversations 4096 MiB instead of 8192
+On a PC with 192 GB installed Linux reports about 188 GiB: that leaves about 86 GiB for the 3-bit model and about
+52 GiB for the 4-bit one. Below 40 GiB left setup warns and gives parked conversations 4096 MiB instead of 8192
 (`--park-mib 4096`). Below 12 GiB it asks "Install it anyway?" and stops unless you answer `y` (or pass
 `--model <size> --yes`): the OS would then read experts from the disk while it answers. Choose the 3-bit model, or
 add RAM.
@@ -166,8 +166,8 @@ A key in the run config has a value the server cannot use, for example
 described in [the run config](INSTALL.md#the-run-config) and [the settings](DETAILS.md#settings).
 
 **The start takes long: "reading the experts into memory ...", then "warming the experts: X of Y GB (...)"**.
-Before it says it is ready, the engine reads every routed expert once (112.5 GB at 3-bit, counted in the file; about
-149 GB at 4-bit, derived), so the first request does not wait for the disk. After a reboot all of it comes from the
+Before it says it is ready, the engine reads every routed expert once (109.9 GB at 3-bit, counted in the file; about
+146 GB at 4-bit, derived), so the first request does not wait for the disk. After a reboot all of it comes from the
 disk, and the PC can be slow meanwhile. The line shows how far it is and its GB/s; the time left is the GB still to
 read divided by that rate. Wait for `ready: http://...`. A start soon after the last one is faster when Linux still
 has the files in its page cache. `--no-warm` in `"args"` skips the warm-up; the first requests then read the experts

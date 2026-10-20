@@ -18,7 +18,7 @@ its design, its server and its web app, replaces the engine, and runs GLM-5.3-Fl
 | | |
 | --- | --- |
 | **Graphics cards** | **NVIDIA**, compute capability 7.5 or newer (GeForce RTX 20 series and newer). One card or several: the model's layers are split over them. Driver **580** or newer for the CUDA 13 toolkit setup installs; 525 or newer when it builds with a CUDA 12 toolkit you have. Setup stops with an older one. |
-| **RAM** | Every expert of the model stays in RAM: 112.5 GB (104.8 GiB) at 3-bit, counted in the real file; about 149 GB (139 GiB) at 4-bit, derived from its download ([Which size](#which-size-should-i-pick)). Setup counts RAM in GiB, as Linux reports it (`free -g`). It wants at least 12 GiB left beside the experts for Linux and the server, and calls a size a good fit when 40 GiB are left. So Linux must report about **117 GiB** at the least for the 3-bit size (a PC with 128 GB installed reports about 125) and about **151 GiB** for the 4-bit size (192 GB installed: about 188). |
+| **RAM** | Every expert of the model stays in RAM: 109.9 GB (102.4 GiB) at 3-bit, counted in the real file; about 146 GB (136 GiB) at 4-bit, derived from its download ([Which size](#which-size-should-i-pick)). Setup counts RAM in GiB, as Linux reports it (`free -g`). It wants at least 12 GiB left beside the experts for Linux and the server, and calls a size a good fit when 40 GiB are left. So Linux must report about **114 GiB** at the least for the 3-bit size (a PC with 128 GB installed reports about 125) and about **148 GiB** for the 4-bit size (192 GB installed: about 188). |
 | **Disk** | 120.4 GB free for the 3-bit download, 156.8 GB for the 4-bit one (the repository's listing), and about 10 GB more when setup installs the CUDA toolkit. An SSD helps: the first start after a reboot reads every expert from it. |
 | **System** | **Linux** only: setup stops on any other system. A CPU with **AVX2**: without it setup warns, because the experts the cards do not hold run on the CPU. |
 
@@ -82,8 +82,8 @@ every step that is already done:
 
 **How long this takes is not measured yet.** The download depends on your connection: at 100 MB/s, 120 GB takes about
 20 minutes (calculated). Before the server says it is ready, the engine reads every expert into RAM once (the
-warm-up; it prints its progress). From a SATA SSD, at most about 550 MB/s, the 3-bit's 112.5 GB take at least about
-3.4 minutes (calculated). Setup prints its own estimates for the compile and the toolkit install. None of them is
+warm-up; it prints its progress). From a SATA SSD, at most about 550 MB/s, the 3-bit's 109.9 GB take at least about
+3.3 minutes (calculated). Setup prints its own estimates for the compile and the toolkit install. None of them is
 measured on this version.
 
 **Next time**, run `./setup.sh` again (or the start script). It starts right away and downloads nothing twice.
@@ -100,13 +100,13 @@ The 4-bit size is closer to the full model. How much better its answers are is n
 
 | Size | Setup's name | Download | Experts in RAM |
 | --- | --- | ---: | ---: |
-| **3-bit** | `UD-IQ3_XXS` | 120.4 GB | 112.5 GB (104.8 GiB) |
-| **4-bit** | `UD-IQ4_XS` (`UD-Q4_K_XL` when the repository has no UD-IQ4_XS) | 156.8 GB | about 149 GB (139 GiB), derived |
+| **3-bit** | `UD-IQ3_XXS` | 120.4 GB | 109.9 GB (102.4 GiB) |
+| **4-bit** | `UD-IQ4_XS` (`UD-Q4_K_XL` when the repository has no UD-IQ4_XS) | 156.8 GB | about 146 GB (136 GiB), derived |
 
 These are setup's own figures. The downloads are the repository's listing (2026-10-20). The 3-bit experts are what
-`tools/glm53_inspect.py` counted in the real file on napster-ai; that count takes in the MTP layer's experts too,
-which the engine does not load, so it keeps a little less in RAM. The 4-bit experts are not measured: they are its
-download less the 7.9 GB the 3-bit file holds beside its experts. Setup reads the real file sizes from the
+`tools/glm53_inspect.py` counted in the real file on napster-ai for the 45 layers the engine runs. The file holds
+7.7 GB of other tensors (on the GPUs) and 2.8 GB for the MTP layer, which the engine does not load. The 4-bit
+experts are not measured: they are its download less those 7.7 and 2.8 GB. Setup reads the real file sizes from the
 repository before it downloads. When it takes `UD-Q4_K_XL` (199.7 GB) instead of `UD-IQ4_XS`, it works out that
 file's experts as the same share of its size and says what that leaves.
 
@@ -116,10 +116,10 @@ What is left beside the experts holds Linux, the server, your other programs and
 | Your RAM (Linux reports) | 3-bit: RAM left | 4-bit: RAM left | Setup recommends |
 | --- | --- | --- | --- |
 | 96 GB (about 94 GiB) | does not fit | does not fit | neither fits: 3-bit is the default answer, and setup asks before it installs it |
-| 128 GB (about 125 GiB) | about 20 GiB: tight | does not fit | 3-bit, with less RAM for parked conversations |
-| 160 GB (about 157 GiB) | about 52 GiB: fits | about 18 GiB: tight | 3-bit |
-| **192 GB** (about 188 GiB) | about 83 GiB: fits | about 49 GiB: fits | **4-bit** |
-| 256 GB (about 251 GiB) | about 146 GiB: fits | about 112 GiB: fits | 4-bit |
+| 128 GB (about 125 GiB) | about 23 GiB: tight | does not fit | 3-bit, with less RAM for parked conversations |
+| 160 GB (about 157 GiB) | about 55 GiB: fits | about 21 GiB: tight | 3-bit |
+| **192 GB** (about 188 GiB) | about 86 GiB: fits | about 52 GiB: fits | **4-bit** |
+| 256 GB (about 251 GiB) | about 149 GiB: fits | about 115 GiB: fits | 4-bit |
 
 - **Fits:** 40 GiB or more left.
 - **Tight:** 12 to 40 GiB left. Setup warns and gives parked conversations 4096 MiB instead of 8192

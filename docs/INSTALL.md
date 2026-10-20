@@ -30,7 +30,7 @@ you with [AI_SETUP.md](AI_SETUP.md).
 | **OS** | Linux on x86-64. Setup stops on any other operating system. On Ubuntu 22.04 and 24.04 setup can install the CUDA toolkit itself; on other distributions you install it. |
 | **GPU** | One or more NVIDIA cards of compute capability 7.5 or newer (RTX 20, 30, 40, 50 series). Setup leaves out a card it cannot use and says why. It has no minimum VRAM: how much VRAM the layers besides the experts take on the real model is not measured yet. |
 | **Driver** | NVIDIA 580 or newer when the engine is built with CUDA 13 (the toolkit setup installs when none is there); 525 or newer when setup builds it with a CUDA 12 toolkit you have installed (CUDA 12's minor version compatibility; with a driver older than 580 setup takes that toolkit, also beside a CUDA 13 one). Setup stops on an older one and says which it needs (Ubuntu: `sudo ubuntu-drivers install`, then restart). |
-| **RAM** | Every routed expert stays in RAM: 112.5 GB (104.8 GiB) for the 3-bit size, about 149 GB (139 GiB) for the 4-bit (see the table below). |
+| **RAM** | Every routed expert stays in RAM: 109.9 GB (102.4 GiB) for the 3-bit size, about 146 GB (136 GiB) for the 4-bit (see the table below). |
 | **CPU** | AVX2. Setup warns on a CPU without it but goes on: the experts the GPUs do not hold are computed on the CPU. |
 | **Disk** | 120.4 GB (3-bit) or 156.8 GB (4-bit) free for the model files. Setup checks this before it downloads. The CUDA toolkit, when setup installs it, takes more (setup says about 8-10 GB with the compiler). |
 | **Python** | 3.10 or newer with `venv`. `./setup.sh` installs it with apt, dnf or pacman when it is missing (asks for your sudo password). |
@@ -41,25 +41,25 @@ Setup lists the repository's files when it runs and takes the shards of the size
 
 | Size | `--model` | Download | Experts in RAM | A good fit from | Tight (warned) from |
 | --- | --- | --- | --- | --- | --- |
-| 3-bit | `UD-IQ3_XXS` | 120.4 GB | 112.5 GB (104.8 GiB) | 145 GiB of RAM | 117 GiB |
-| 4-bit | `UD-IQ4_XS` (`UD-Q4_K_XL` when the repository has no UD-IQ4_XS) | 156.8 GB | ~149 GB (139 GiB), derived | 179 GiB | 151 GiB |
+| 3-bit | `UD-IQ3_XXS` | 120.4 GB | 109.9 GB (102.4 GiB) | about 142 GiB of RAM | about 114 GiB |
+| 4-bit | `UD-IQ4_XS` (`UD-Q4_K_XL` when the repository has no UD-IQ4_XS) | 156.8 GB | ~146 GB (136 GiB), derived | about 176 GiB | about 148 GiB |
 
 Where these figures come from (they are written into `setup.py`): the downloads are the repository's listing, read on
-napster-ai on 2026-10-20. The 3-bit experts are what `tools/glm53_inspect.py` counted in the real 3-bit file there;
-that count takes in the MTP layer's experts too, which the engine does not load. The 4-bit experts are not measured:
-they are derived as its download less the 7.9 GB the 3-bit file holds beside its experts. The RAM columns are
-calculated from these. The downloads and the disk are in GB (10^9 bytes); the RAM is in GiB (2^30 bytes), as Linux
+napster-ai on 2026-10-20. The 3-bit experts are what `tools/glm53_inspect.py` counted in the real 3-bit file there,
+for the 45 layers the engine runs; beside them the file holds 7.7 GB of other tensors (they go to the GPUs) and the
+MTP layer's 2.8 GB, which the engine does not load. The 4-bit experts are not measured: they are derived as its
+download less those 7.7 and 2.8 GB. The RAM columns are calculated from these. The downloads and the disk are in GB (10^9 bytes); the RAM is in GiB (2^30 bytes), as Linux
 reports it, and setup compares the experts with it in GiB. A good fit leaves 40 GiB or more beside the experts, for
 Linux, the server and parked conversations. Below 12 GiB left, the OS would read experts from the disk, so setup
 stops unless you insist (`--model NAME --yes`). Setup reads the RAM from `/proc/meminfo` (the number `free -g`
 prints), which is a little less than the memory installed. Setup's tests take 188 GiB there for a 192 GB PC; setup
-then prints about 83 GiB left beside the 3-bit experts and about 49 GiB beside the 4-bit ones, and recommends the
-4-bit. On a 160 GB PC (about 157 GiB) the 4-bit is tight (about 18 GiB left: parked conversations get 4096 MiB
+then prints about 86 GiB left beside the 3-bit experts and about 52 GiB beside the 4-bit ones, and recommends the
+4-bit. On a 160 GB PC (about 157 GiB) the 4-bit is tight (about 21 GiB left: parked conversations get 4096 MiB
 instead of 8192), so setup recommends the 3-bit there. When the 4-bit size falls back to UD-Q4_K_XL (199.7 GB), setup
 works out that file's experts from its download size and says what it leaves.
 
 The disk matters most at the first start after a reboot: the engine reads every expert from the disk before it says it
-is ready. 112.5 GB at 550 MB/s (the top speed of a SATA SSD) is about 3.4 minutes, 149 GB about 4.5 minutes. That
+is ready. 109.9 GB at 550 MB/s (the top speed of a SATA SSD) is about 3.3 minutes, 146 GB about 4.4 minutes. That
 is calculated, not measured.
 
 ## Install with ./setup.sh
@@ -153,9 +153,9 @@ when it is idle (the profile is written), at its next output line during a reque
 
 ```
   --model {UD-IQ3_XXS,UD-IQ4_XS}
-                        UD-IQ3_XXS = 3-bit (~120 GB download, ~105 GiB of experts in RAM), UD-IQ4_XS = 4-bit (~157 GB,
-                        ~139 GiB, estimated; UD-Q4_K_XL when the repository has no UD-IQ4_XS; IQ4_XS, its earlier
-                        name, is taken too). Default: the one this PC's RAM fits
+                        UD-IQ3_XXS = 3-bit (~120 GB download, ~102 GiB of experts in RAM), UD-IQ4_XS = 4-bit (~157 GB,
+                        ~136 GiB, derived; UD-Q4_K_XL when the repository has no UD-IQ4_XS; IQ4_XS, its earlier name,
+                        is taken too). Default: the one this PC's RAM fits
   --context N           the longest conversation in tokens (up to 1048576); each token takes 12.4 KB of VRAM (1.7 GB
                         at 131072, calculated)
   --park-mib N          RAM in MiB for parked conversations and checkpoints (default 8192, 4096 where little RAM is
@@ -498,9 +498,9 @@ The owner's PC: Linux, Xeon E5-2699 v4 (AVX2), 192 GB of DDR4 (planned; 91 GiB f
 RTX 3080 Ti (12 GB) and an RTX 3080 (10 GB), all compute capability 8.6, and a SATA SSD. What setup does there, from
 its code and its tests (a full install has not run there yet):
 
-- **Size:** with 192 GB the 4-bit `UD-IQ4_XS` is recommended (about 49 GiB of RAM left beside its experts, if
-  `/proc/meminfo` says 188 GiB as the tests assume, and if the derived 149 GB of experts holds). The 3-bit leaves
-  about 83 GiB. With the 91 GiB it has for now neither size fits: the 3-bit needs about 117 GiB. Setup says so and
+- **Size:** with 192 GB the 4-bit `UD-IQ4_XS` is recommended (about 52 GiB of RAM left beside its experts, if
+  `/proc/meminfo` says 188 GiB as the tests assume, and if the derived 146 GB of experts holds). The 3-bit leaves
+  about 86 GiB. With the 91 GiB it has for now neither size fits: the 3-bit needs about 114 GiB. Setup says so and
   asks before it installs.
 - **Build:** all three cards can run the engine, so setup uses all three and builds for `86` only.
 - **Context:** the three cards have 46 GB of VRAM in all, so setup recommends 128K. 512K takes 6.6 GB and 1M 13.3 GB

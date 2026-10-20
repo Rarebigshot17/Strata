@@ -77,16 +77,16 @@ If the PC does not meet these, tell the user which part is missing and stop. Det
 ## 3. Pick the size and the context
 
 Every routed expert stays in RAM. Setup compares the RAM `/proc/meminfo` reports (the `total` of `free -g`, in GiB)
-with what each size's experts take in GiB (from `setup.py`: about 105 GiB at 3-bit, counted in the real file; about
-139 GiB at 4-bit, derived from its download, not measured):
+with what each size's experts take in GiB (from `setup.py`: about 102 GiB at 3-bit, counted in the real file; about
+136 GiB at 4-bit, derived from its download, not measured):
 
 | RAM (`free -g`) | Size | Why |
 | --- | --- | --- |
-| 179 GiB or more | `--model UD-IQ4_XS` (4-bit) | Its ~139 GiB of experts leave 40 GiB or more. Setup recommends it. A PC with 192 GB installed (about 188 GiB) is here. |
-| 151-178 GiB | `--model UD-IQ3_XXS` (3-bit) | Recommended. The 4-bit would leave under 40 GiB: setup allows it with a warning and gives parked conversations 4096 MiB. |
-| 145-150 GiB | `--model UD-IQ3_XXS` | Recommended; the 4-bit does not fit. |
-| 117-144 GiB | `--model UD-IQ3_XXS` | Tight: setup warns and gives parked conversations 4096 MiB. Tell the user to close other big programs while it runs. |
-| under 117 GiB | none | Neither size fits. Tell the user. Setup can be forced (`--model UD-IQ3_XXS --yes`), but the OS would then read experts from the disk: very slow, or no start at all. |
+| 177 GiB or more | `--model UD-IQ4_XS` (4-bit) | Its ~136 GiB of experts leave 40 GiB or more. Setup recommends it. A PC with 192 GB installed (about 188 GiB) is here. |
+| 149-176 GiB | `--model UD-IQ3_XXS` (3-bit) | Recommended. The 4-bit would leave under 40 GiB: setup allows it with a warning and gives parked conversations 4096 MiB. |
+| 143-148 GiB | `--model UD-IQ3_XXS` | Recommended; the 4-bit does not fit. |
+| 115-142 GiB | `--model UD-IQ3_XXS` | Tight: setup warns and gives parked conversations 4096 MiB. Tell the user to close other big programs while it runs. |
+| under 115 GiB | none | Neither size fits. Tell the user. Setup can be forced (`--model UD-IQ3_XXS --yes`), but the OS would then read experts from the disk: very slow, or no start at all. |
 
 When the repository has no UD-IQ4_XS files, the 4-bit size takes UD-Q4_K_XL instead; setup says so and works out
 what it leaves of the RAM.
@@ -155,8 +155,8 @@ The script name is the one setup printed (`run-glm-ud-iq4_xs.sh` for the 4-bit; 
 install made when setup called it `IQ4_XS`). For a server that starts with the PC, use the systemd unit in
 [INSTALL.md](INSTALL.md#running-it-as-a-service) instead, with the user's consent (it needs sudo).
 
-The port opens only when the engine is ready. Before that, the engine reads every routed expert into memory: 112.5 GB
-(3-bit) or about 149 GB (4-bit). At 550 MB/s, the top speed of a SATA SSD, that is about 3.4 or 4.5 minutes
+The port opens only when the engine is ready. Before that, the engine reads every routed expert into memory: 109.9 GB
+(3-bit) or about 146 GB (4-bit). At 550 MB/s, the top speed of a SATA SSD, that is about 3.3 or 4.4 minutes
 (calculated, not measured). `strata-server.out` shows the progress (`[strata] reading the experts into memory ...`,
 then `warming the experts: X of Y GB` about every 20 seconds). The server gives up when the engine has not said it
 is ready within 900 seconds; each step the engine reports (the layers on each GPU, the expert cache, the warm-up's

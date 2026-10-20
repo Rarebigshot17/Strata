@@ -12,7 +12,7 @@ Status legend: [ ] to do, [x] done (with the commit), [~] partly.
 
 | Kept | Removed | Added |
 |---|---|---|
-| OpenAI chat, Anthropic Messages, Responses, MCP, structured output, the web app and Monitor, /metrics and Prometheus, lazy load / unload / idle unload, API keys, CORS, host checks, shared settings, stop strings, reasoning budget, same-token stop (#606), loop detection (stop mode), non-finite retry (#879) | The Qwen engine and every Qwen-only feature: batch slots (BGEN...), vision (GENI, strata-vision), replicas (one engine needs all three GPUs and 112.5-149 GB of RAM for its experts: the 3-bit file's count, the 4-bit's derived), the VRAM command, slot save/restore (SAVE/RESTORE: the route answers 501), MTP drafts, the speed projection (cvec), effort_end (`--tail-role-token`), focused recovery (Qwen's effort sentence), `pin=`/`ckpt=`/`strata_tune` keys, the top_k <= 64 cap; HIP/AMD everywhere; the Windows launchers (the GLM engine is POSIX-only); the prebuilt-engine download; `tools/strata_mcp.py` and `docs/MCP_SERVER.md` | `cp=<n>` checkpoints from the server (multi-turn chat no longer re-reads the conversation); `end=<ids>` (a reply's later passes end where the server goes on from them); `logit_bias` in the GLM sampler; `/v1/completions`; OpenAI's `stream_options.include_usage`; requests served in arrival order; GLM's tokenizer and chat template read from the GGUF; the expert warm-up before READY |
+| OpenAI chat, Anthropic Messages, Responses, MCP, structured output, the web app and Monitor, /metrics and Prometheus, lazy load / unload / idle unload, API keys, CORS, host checks, shared settings, stop strings, reasoning budget, same-token stop (#606), loop detection (stop mode), non-finite retry (#879) | The Qwen engine and every Qwen-only feature: batch slots (BGEN...), vision (GENI, strata-vision), replicas (one engine needs all three GPUs and 110-146 GB of RAM for its experts: the 3-bit file's count, the 4-bit's derived), the VRAM command, slot save/restore (SAVE/RESTORE: the route answers 501), MTP drafts, the speed projection (cvec), effort_end (`--tail-role-token`), focused recovery (Qwen's effort sentence), `pin=`/`ckpt=`/`strata_tune` keys, the top_k <= 64 cap; HIP/AMD everywhere; the Windows launchers (the GLM engine is POSIX-only); the prebuilt-engine download; `tools/strata_mcp.py` and `docs/MCP_SERVER.md` | `cp=<n>` checkpoints from the server (multi-turn chat no longer re-reads the conversation); `end=<ids>` (a reply's later passes end where the server goes on from them); `logit_bias` in the GLM sampler; `/v1/completions`; OpenAI's `stream_options.include_usage`; requests served in arrival order; GLM's tokenizer and chat template read from the GGUF; the expert warm-up before READY |
 
 Defaults: port **8101** everywhere (Open WebUI 3000, Portainer 8000 and the UPS dashboard 8080 are taken on
 napster-ai). Model name: the run config's `"model_name"` (setup writes `glm-5.3-flash`), else the GGUF's
@@ -106,7 +106,7 @@ Done: A1-A3 in f8efa24, A4 in 29056d3 (ctest, the selftest, the park and server 
 - [x] A2 Serve loop: INFO keys above (integer `park_mib`, `logit_bias=1`, version, expert cache figures);
   `ERR internal:` for engine failures; `HB` heartbeats gated on progress; DONE hits/lookups from decode only.
 - [x] A3 Expert warm-up before READY (reads the routed experts into the page cache, with progress on stderr;
-  `--no-warm` skips it): the first request after a start no longer faults 112.5-149 GB in from disk (the 3-bit
+  `--no-warm` skips it): the first request after a start no longer faults 110-146 GB in from disk (the 3-bit
   file's experts as the inspector counted them, the 4-bit's derived) while the server's silence watchdog runs.
 - [x] A4 CMake: GLM-only (ggml, `strata_glm`, a 3-file `strata_glm_kernels`, `strata_glm_gpu`, the two
   executables). Delete the Qwen engine tree, HIP, the Qwen `tests/`, the C++ benches, `ref/`, Qwen `data/`. The
@@ -189,6 +189,6 @@ The real model has not run yet; the server is tested on the CPU engine with smal
   `WARNING` line that names the missing tags).
 - Whether GLM writes tool calls inside its thinking.
 - The start on napster-ai's SATA SSD: how long the mapping and the layer upload take before the first warm-up line
-  (the start watchdog allows 900 s without progress), and how long the warm-up of 112.5-149 GB takes.
-- The 4-bit model's RAM: about 49 GiB left beside its experts on 192 GB, shared by Linux, the server, Open WebUI and
+  (the start watchdog allows 900 s without progress), and how long the warm-up of 110-146 GB takes.
+- The 4-bit model's RAM: about 52 GiB left beside its experts on 192 GB, shared by Linux, the server, Open WebUI and
   the parked conversations (8192 MiB). Its experts are derived from its download, not counted in its file.
