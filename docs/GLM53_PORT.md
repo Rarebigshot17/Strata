@@ -126,21 +126,29 @@ Two things found while writing the reference, both checked against llama.cpp's c
 
 ## What to run on napster-ai
 
-Each step prints a few lines to paste back. Steps 1-4 need no model download. None of these steps has been run
-yet. Run them from the Strata folder.
+Each step prints a few lines to paste back. Steps 1-4 need no model download. Steps 0-4 and step 5's inspector first
+ran on napster-ai on 2026-10-20; steps 6-8 have not run yet. Run them from the Strata folder.
 
 0. **The checkout, the PC check and the tools the steps use.** `./setup.sh --check` checks the GPUs, the driver, the
    RAM, the CPU and the disk, and makes the `.venv` (it asks for sudo when Python's venv is missing); it stops before
    it installs anything else, so the Python packages the checks need (numpy, pyyaml, tqdm, regex, and cmake 3.24+)
-   come from `requirements.txt`. Steps 1 and 2 compile CUDA code: `nvcc` (a CUDA toolkit, 12.0 or newer) must be on
-   `PATH`; when there is none, [INSTALL.md](INSTALL.md) ("The toolkit") installs one.
+   come from `requirements.txt`. Steps 1 and 2 compile CUDA code with CMake, which takes the `nvcc` that `CUDACXX`
+   names, else the first one on `PATH` (a CUDA toolkit, 12.0 or newer). When `/usr/local/cuda` exists, the lines
+   below point both at it: an older system nvcc can come first on `PATH` and fail CMake's CUDA compiler check with
+   a newer gcc. On napster-ai Ubuntu's `/usr/bin/nvcc` (CUDA 12.2) did that with gcc 14; `/usr/local/cuda` is 13.2.
+   Without `/usr/local/cuda` the nvcc on `PATH` is used; when there is none, [INSTALL.md](INSTALL.md) ("The
+   toolkit") installs one. A build folder keeps the compiler CMake found first: after changing it, delete
+   `~/llama.cpp/build` and `build` before steps 1 and 2. Setup (step 8) picks the newest toolkit itself.
 
    ```bash
    git clone -b glm53-flash https://github.com/Rarebigshot17/Strata ~/Strata && cd ~/Strata
    ./setup.sh --check
    .venv/bin/python -m pip install -r requirements.txt
    source .venv/bin/activate
-   nvcc --version || export PATH=/usr/local/cuda/bin:$PATH
+   if [ -x /usr/local/cuda/bin/nvcc ]; then
+       export CUDACXX=/usr/local/cuda/bin/nvcc PATH=/usr/local/cuda/bin:$PATH
+   fi
+   nvcc --version
    ```
 
 1. **Build llama.cpp** (CUDA, pinned commit) with the reference tool and the small-model generator:
@@ -156,17 +164,21 @@ yet. Run them from the Strata folder.
    cmake --build build -j"$(nproc)" --target strata-glm strata-glm-ref
    ```
 
-3. **CPU reference vs llama.cpp** on small random models (paste the four PASS/FAIL lines):
+3. **CPU reference vs llama.cpp** on small random models (paste the four PASS/FAIL lines). It needs no GPU: the
+   script hides the GPUs from llama.cpp's CUDA build, so it runs while another program fills them:
 
    ```bash
    PYTHONPATH=~/llama.cpp/gguf-py tools/glm53_selftest.sh ~/llama.cpp/build build
    ```
 
 4. **GPU engine vs the CPU reference and llama.cpp** on the same small models, then conversation parking with the
-   layers split over all three cards (paste the whole output):
+   layers split over all three cards (paste the whole output). It needs the GPUs free: stop any other program that
+   holds them first (`nvidia-smi` lists them). On napster-ai that is the Qwen service, started again afterwards:
 
    ```bash
+   sudo systemctl stop strata-iq3s.service
    PYTHONPATH=~/llama.cpp/gguf-py tools/glm53_gpu_check.sh ~/llama.cpp/build build
+   sudo systemctl start strata-iq3s.service
    ```
 
 5. **The real model.** Pick the 3-bit or the 4-bit GGUF (see "Memory on napster-ai"; Unsloth re-uploaded them on
