@@ -27,7 +27,7 @@ API key (`--api-key`). The server's port is 8101.
 | --- | --- |
 | `src/glm/`, `include/strata/glm/` | The engine. `glm_main.cpp` is `strata-glm` (CUDA: `engine*.cu`, `gpu_*.cu`, `expert_cache.cu`); `ref_main.cpp` and `cpu_ref.cpp` are `strata-glm-ref`, the whole model on the CPU. `serve_loop.cpp` speaks the engine protocol (parking, checkpoints); `sampler.cpp` samples. |
 | `src/kernels/`, `include/strata/kernels/`, `include/strata/artifact/` | The quantized GEMV kernels and the GGUF reader the engine shares. |
-| `tests/glm/` | The engine's C++ unit tests (sampler, serve loop): no GPU, no model file. |
+| `tests/glm/` | The engine's C++ unit tests (sampler, serve loop, the GPU checks' pass rule): no GPU, no model file. |
 | `serve/` | The server: `server.py` (HTTP, the engine driver, the queue), `frontend.py` (chat template, output parser for thinking and tool calls), `responses.py`, `mcp.py`, `structured.py`, `runconfig.py`, `prometheus.py`, `web/` (the web app), and the tests `test_*.py`. |
 | `setup.py`, `setup.sh`, `update.sh` | The installer, its launcher and the updater. |
 | `tools/` | The GLM checks (`glm53_*`), the tests of setup and of the tools (`test_*.py`), `strata_bench.py` (`./bench.sh`), and helpers. |

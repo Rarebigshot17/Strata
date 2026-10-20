@@ -6,7 +6,9 @@
 //
 // --out writes the --dump-logits layout (tools/glm53_compare.py); with --prefill it holds one row, the logits after
 // the prompt. --check-cpu also runs the CPU reference on the same tokens and compares, per position, the residual
-// streams after every layer and the logits: the first layer where they part is where a kernel is wrong.
+// streams after every layer and the logits: the first layer where they part is where a kernel is wrong. Whether
+// the logits pass is check.hpp's rule, with the limits for the model's weights (quantized or float).
+#include "strata/glm/check.hpp"
 #include "strata/glm/cpu_ref.hpp"
 #include "strata/glm/engine.hpp"
 #include "strata/glm/serve_loop.hpp"
@@ -48,14 +50,13 @@ std::vector<T> parse_list(const std::string& s) {
     return out;
 }
 
-/// max |a - b| relative to max |a|
-double rel_diff(const std::vector<float>& a, const std::vector<float>& b) {
-    double num = 0, den = 1e-30;
-    for (size_t i = 0; i < a.size(); ++i) {
-        num = std::max(num, (double) std::fabs(a[i] - b[i]));
-        den = std::max(den, (double) std::fabs(a[i]));
-    }
-    return num / den;
+/// Whether some weight matrix of the model is of a type other than F32 and F16: check.hpp's limits differ.
+bool quantized_weights(const strata::glm::Model& m) {
+    const auto& g = m.gguf();
+    for (size_t s = 0; s < g.size(); ++s)
+        for (const auto& t : g.shard(s).tensors())
+            if (t.shape.size() >= 2 && t.shape[1] > 1 && !strata::glm::float_weight_type(t.type)) return true;
+    return false;
 }
 
 struct GpuEvaluator : strata::glm::Evaluator {
@@ -209,30 +210,30 @@ int main(int argc, char** argv) {
                 return 0;
             }
             const auto am = [](const std::vector<float>& v) { return (int32_t) (std::max_element(v.begin(), v.end()) - v.begin()); };
+            const strata::glm::CheckLimits lim = strata::glm::check_limits(quantized_weights(model));
+            strata::glm::LogitCheck chk;
             std::vector<float> lc;
             for (int32_t id : ids) lc = ref->eval(id);
-            double worst = rel_diff(lc, lg);
-            int agree = am(lc) == am(lg);
-            std::printf("after the prompt: logits relative diff %.3g, top-1 %s\n", worst, agree ? "same" : "DIFFERENT");
+            double dl = chk.add(lc, lg);
+            std::printf("after the prompt: logits relative diff %.3g, KL %.3g, top-1 %s\n", dl,
+                        strata::glm::kl_div(lc, lg), am(lc) == am(lg) ? "same" : "DIFFERENT");
             for (int step = 0; step < check_decode; ++step) {
                 const int32_t next = am(lc);
                 lc = ref->eval(next);
                 lg = eng.eval(next);
-                const double dl = rel_diff(lc, lg);
-                worst = std::max(worst, dl);
-                agree += am(lc) == am(lg);
-                std::printf("decode %d: logits relative diff %.3g, top-1 %s\n", step, dl,
-                            am(lc) == am(lg) ? "same" : "DIFFERENT");
+                dl = chk.add(lc, lg);
+                std::printf("decode %d: logits relative diff %.3g, KL %.3g, top-1 %s\n", step, dl,
+                            strata::glm::kl_div(lc, lg), am(lc) == am(lg) ? "same" : "DIFFERENT");
             }
-            const bool pass = worst < 2e-2 && agree >= check_decode;
-            std::printf("check-prefill: worst logits relative diff %.3g, top-1 agreement %d/%d: %s\n", worst, agree,
-                        check_decode + 1, pass ? "PASS" : "FAIL");
+            const bool pass = chk.pass(lim);
+            std::printf("check-prefill: %s: %s\n", chk.summary(lim).c_str(), pass ? "PASS" : "FAIL");
             return pass ? 0 : 1;
         }
 
         strata::glm::Trace tg, tc;
-        double worst_logit = 0, worst_layer = 0;
-        int top1_agree = 0;
+        const strata::glm::CheckLimits lim = strata::glm::check_limits(quantized_weights(model));
+        strata::glm::LogitCheck chk;
+        double worst_layer = 0;
         double gpu_s = 0;
         for (size_t i = 0; i < ids.size(); ++i) {
             const auto a = std::chrono::steady_clock::now();
@@ -241,12 +242,10 @@ int main(int argc, char** argv) {
             if (out) std::fwrite(lg.data(), sizeof(float), lg.size(), out);
             if (check_cpu) {
                 const std::vector<float>& lc = ref->eval(ids[i], &tc);
-                const double dl = rel_diff(lc, lg);
-                worst_logit = std::max(worst_logit, dl);
+                const double dl = chk.add(lc, lg);
                 const auto am = [](const std::vector<float>& v) { return std::max_element(v.begin(), v.end()) - v.begin(); };
-                top1_agree += am(lc) == am(lg);
                 for (size_t l = 0; l < tc.layer_out.size(); ++l) {
-                    const double d = rel_diff(tc.layer_out[l], tg.layer_out[l]);
+                    const double d = strata::glm::rel_diff(tc.layer_out[l], tg.layer_out[l]);
                     worst_layer = std::max(worst_layer, d);
                     if (d > 1e-2) {
                         std::printf("position %zu: layer %zu residual differs by %.3g (relative)%s\n", i, l, d,
@@ -255,8 +254,8 @@ int main(int argc, char** argv) {
                     }
                 }
                 if (i < 4 || (i + 1) % 16 == 0)
-                    std::printf("position %zu: logits relative diff %.3g, top-1 %s\n", i, dl,
-                                am(lc) == am(lg) ? "same" : "DIFFERENT");
+                    std::printf("position %zu: logits relative diff %.3g, KL %.3g, top-1 %s\n", i, dl,
+                                strata::glm::kl_div(lc, lg), am(lc) == am(lg) ? "same" : "DIFFERENT");
             } else if ((i + 1) % 16 == 0 || i + 1 == ids.size()) {
                 std::printf("position %zu/%zu\n", i + 1, ids.size());
             }
@@ -267,9 +266,9 @@ int main(int argc, char** argv) {
                     (double) ids.size() / gpu_s, 100.0 * eng.cache_hit_rate());
         eng.save_profile();
         if (check_cpu) {
-            const bool pass = worst_logit < 2e-2 && top1_agree >= (int) (0.98 * (double) ids.size());
-            std::printf("check-cpu: worst logits relative diff %.3g, worst layer diff %.3g, top-1 agreement %d/%zu: %s\n",
-                        worst_logit, worst_layer, top1_agree, ids.size(), pass ? "PASS" : "FAIL");
+            const bool pass = chk.pass(lim);
+            std::printf("check-cpu: %s; worst layer diff %.3g: %s\n", chk.summary(lim).c_str(), worst_layer,
+                        pass ? "PASS" : "FAIL");
             return pass ? 0 : 1;
         }
     } catch (const std::exception& e) {
