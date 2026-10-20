@@ -2292,7 +2292,8 @@ class EffortLevels(unittest.TestCase):
     """GLM-5.3-Flash's template has three thinking levels, low < high < max: it writes "Reasoning Effort: Low", "High"
     or "Max" as the prompt's first turn (reasoning_effort "low" or "high"; any other value, or none, is Max, its
     default).  Every effort a request, the shared Chat settings or the run config gives lands on one of them, or
-    turns thinking off (the server closes the thinking; the line says Max, the template's default)."""
+    turns thinking off (the server closes the thinking; the line says the level the Chat settings or the run config
+    name, else Max, the template's default: ThinkingOff)."""
 
     MSGS = [{"role": "user", "content": "hi"}]
     OFF, LOW, HIGH, MAX = ("Max", False), ("Low", True), ("High", True), ("Max", True)
