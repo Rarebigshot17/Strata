@@ -18,8 +18,9 @@ to fit and sent again. A length the server's context cannot hold is skipped.
 
 --decode-tokens N adds one more turn after each length's last depth: the conversation so far (the text, the question,
 the model's answer) and a request for a summary, N tokens long, to measure decoding with the whole text in the
-context. It should find that conversation in the server's cache; when the cache gave back less than 90% of the
-prompt, the rest of the run leaves this turn out (it would read the whole text again).
+context; --decode-turns K makes that K turns, each asking to continue the last (decoding as the VRAM expert cache
+adapts to the new text). Each should find the conversation in the server's cache; when the cache gave back less than
+90% of the prompt, the rest of the run leaves these turns out (they would read the whole text again).
 """
 from __future__ import annotations
 
@@ -41,6 +42,7 @@ WORDS = ["amber", "falcon", "quartz", "willow", "copper", "harbor", "saffron", "
 CHARS_PER_TOKEN = 3.2
 QUESTION = "\n\nWhat is the secret code word mentioned in the text above? Reply with the code word only."
 SUMMARY = "Now summarize the text above in about 400 words."
+MORE = "Continue the summary."
 TOO_LONG = re.compile(r"exceeds the context window: prompt \((\d+) tokens\)")
 
 
@@ -112,6 +114,7 @@ def main() -> int:
     ap.add_argument("--depths", default="10,50,90", help="where the code word sits, percent of the text")
     ap.add_argument("--answer-tokens", type=int, default=300, help="the longest answer to the question")
     ap.add_argument("--decode-tokens", type=int, default=0, help="a summary turn of this many tokens after each length")
+    ap.add_argument("--decode-turns", type=int, default=1, help="how many summary turns, each continuing the last")
     ap.add_argument("--timeout", type=float, default=6 * 3600, help="seconds to wait for one answer")
     ap.add_argument("--out", help="also write the results as JSON")
     a = ap.parse_args()
@@ -173,20 +176,25 @@ def main() -> int:
             rows.append({"length": L, "depth": d, **s, "seconds": round(secs, 1), "found": ok, "finish": finish,
                          "word": word, "answer": answer.strip()[:600], "reasoning": reasoning.strip()[:600]})
             if decode_turn and k == len(depths) - 1:
-                messages += [{"role": "assistant", "content": answer}, {"role": "user", "content": SUMMARY}]
-                try:
-                    out2, secs2 = ask(a.url, a.api_key, messages, a.decode_tokens, a.timeout)
-                except OSError as e:
-                    print(f"{L:>5} summary turn: request failed ({e})", flush=True)
-                    rows.append({"length": L, "turn": "summary", "error": str(e)})
-                    continue
-                s2 = speeds(out2)
-                print(f"{L:>5} summary turn: {s2['prompt_tokens'] or 0:,} prompt tokens, {s2['cached'] or 0:,} from "
-                      f"the cache, {rate(s2)}, {secs2:.0f} s", flush=True)
-                rows.append({"length": L, "turn": "summary", **s2, "seconds": round(secs2, 1)})
-                if not s2["prompt_tokens"] or (s2["cached"] or 0) < 0.9 * s2["prompt_tokens"]:
-                    decode_turn = False
-                    print("      the cache did not hold the conversation: no more summary turns", flush=True)
+                messages.append({"role": "assistant", "content": answer})
+                for turn in range(1, a.decode_turns + 1):
+                    messages.append({"role": "user", "content": SUMMARY if turn == 1 else MORE})
+                    try:
+                        out2, secs2 = ask(a.url, a.api_key, messages, a.decode_tokens, a.timeout)
+                    except OSError as e:
+                        print(f"{L:>5} summary turn {turn}: request failed ({e})", flush=True)
+                        rows.append({"length": L, "turn": turn, "error": str(e)})
+                        break
+                    s2 = speeds(out2)
+                    print(f"{L:>5} summary turn {turn}: {s2['prompt_tokens'] or 0:,} prompt tokens, "
+                          f"{s2['cached'] or 0:,} from the cache, {rate(s2)}, {secs2:.0f} s", flush=True)
+                    rows.append({"length": L, "turn": turn, **s2, "seconds": round(secs2, 1)})
+                    if not s2["prompt_tokens"] or (s2["cached"] or 0) < 0.9 * s2["prompt_tokens"]:
+                        decode_turn = False
+                        print("      the cache did not hold the conversation: no more summary turns", flush=True)
+                        break
+                    reply = out2["choices"][0]["message"].get("content") or ""
+                    messages.append({"role": "assistant", "content": reply})
     done = [r for r in rows if "found" in r]
     print(f"{found} of {len(done)} found")
     if a.out:
