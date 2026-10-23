@@ -33,7 +33,8 @@ void quant_act(const Tensor& t, const float* x, int64_t n, std::vector<uint8_t>&
 
 CpuExperts::CpuExperts(const Model& model, ThreadPool& pool) : m_(model), pool_(pool) { ggml_cpu_init(); }
 
-void CpuExperts::run(int64_t il, const float* x, const int32_t* ids, const float* weights, int k, float* out) {
+void CpuExperts::run(int64_t il, const float* x, const int32_t* ids, const float* weights, int k, float* out,
+                     const std::function<void()>& side) {
     const Config& c = m_.config();
     const LayerWeights& w = m_.layer(il);
     const int64_t E = c.n_embd, F = c.n_ff_exp[(size_t) il];
@@ -69,7 +70,7 @@ void CpuExperts::run(int64_t il, const float* x, const int32_t* ids, const float
             (up ? dot_u : dot_g)((int) E, &sum, 0, wr, 0, (up ? xq_u_ : xq_g_).data(), 0, 1);
             (up ? u_ : g_)[(size_t) rr] = sum;
         }
-    });
+    }, side);
     // the clamped SwiGLU, then each expert's activation in the down matrix's format, in pieces of 256 values (a
     // whole number of blocks of every activation format, each block quantized on its own as in a whole-row call)
     const ggml_type hat = td->vec_dot_type;

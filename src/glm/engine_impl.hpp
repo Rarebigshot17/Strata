@@ -89,6 +89,7 @@ struct DevCtx {
           *yr = nullptr, *yexp = nullptr, *ygpu = nullptr, *out_logits = nullptr;
     int32_t* ids = nullptr;
     void* q8 = nullptr;
+    void* q8x = nullptr;   ///< xn quantized once for every cached expert's gate and up
     size_t bytes = 0;
     // ---- prompt chunks (engine_prefill.cu): T tokens at once
     int T = 0;

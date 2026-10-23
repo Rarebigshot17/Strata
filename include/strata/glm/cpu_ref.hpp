@@ -35,6 +35,10 @@ public:
     /// The same with chunks of `grain` items (the last one shorter), or [0, n) at once on one thread or when
     /// n <= grain.
     void parallel_for(int64_t n, int64_t grain, const std::function<void(int64_t, int64_t)>& fn);
+    /// The same, and the calling thread runs `side` first, while the other threads start on the chunks (the engine
+    /// launches its GPU work there). An exception from `side` is rethrown once the job is done.
+    void parallel_for(int64_t n, int64_t grain, const std::function<void(int64_t, int64_t)>& fn,
+                      const std::function<void()>& side);
     /// The CPU cores (not hardware threads) Linux reports, or the hardware threads where it does not say.
     static int physical_cores();
 

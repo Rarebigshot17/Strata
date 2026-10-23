@@ -146,6 +146,7 @@ GpuEngine::GpuEngine(const Model& model, const EngineOptions& opt) : impl_(new I
         d.yexp = dalloc<float>((size_t) E, b);
         d.ygpu = dalloc<float>((size_t) E, b);
         d.q8 = dalloc<uint8_t>(gpu::q8_scratch_bytes(max_in), b);
+        d.q8x = dalloc<uint8_t>(gpu::q8_scratch_bytes(E), b);
         if ((int) di == I.out_ctx) d.out_logits = dalloc<float>((size_t) c.n_vocab, b);
     }
 
@@ -611,33 +612,47 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
             I.cache->record(il, I.h_ids, KU);
             // the cached experts on the GPU, in routing order; the rest go to the CPU
             const int64_t F = c.n_ff_exp[(size_t) il];
-            ok(cudaMemsetAsync(d.ygpu, 0, (size_t) E * sizeof(float), d.stream), "memset");
             I.miss_ids.clear();
             I.miss_w.clear();
             for (int j = 0; j < KU; ++j) {
-                const int slot = I.cache->slot(il, I.h_ids[j]);
-                if (slot < 0) {
-                    I.miss_ids.push_back(I.h_ids[j]);
-                    I.miss_w.push_back(I.h_w[j]);
-                    continue;
+                if (I.cache->slot(il, I.h_ids[j]) >= 0) continue;
+                I.miss_ids.push_back(I.h_ids[j]);
+                I.miss_w.push_back(I.h_w[j]);
+            }
+            // the GPU's share: launched by this thread while the other CPU threads start on the missed experts
+            const auto launch_gpu = [&] {
+                ok(cudaMemsetAsync(d.ygpu, 0, (size_t) E * sizeof(float), d.stream), "memset");
+                bool xq = false;   // xn quantized into q8x, once for the layer's cached experts
+                for (int j = 0; j < KU; ++j) {
+                    const int slot = I.cache->slot(il, I.h_ids[j]);
+                    if (slot < 0) continue;
+                    DevMatrix G, U, Dn;
+                    I.cache->matrices(il, slot, G, U, Dn);
+                    if (gpu::quantizes_alike(G, U)) {
+                        if (!xq) gpu::quantize_for(G, d.xn, d.q8x, s);
+                        xq = true;
+                        gpu::gemv_pre(G, d.xn, d.q8x, d.fg, s);
+                        gpu::gemv_pre(U, d.xn, d.q8x, d.fu, s);
+                    } else {
+                        gpu::gemv2(G, U, d.xn, d.fg, d.fu, d.q8, s);
+                    }
+                    gpu::swiglu(d.fg, d.fu, d.fact, (int) F, c.clamp_exp[(size_t) il], s);
+                    gpu::gemv(Dn, d.fact, d.yexp, d.q8, s);
+                    gpu::axpy(d.ygpu, d.yexp, I.h_w[j], (int) E, s);
                 }
-                DevMatrix G, U, Dn;
-                I.cache->matrices(il, slot, G, U, Dn);
-                gpu::gemv2(G, U, d.xn, d.fg, d.fu, d.q8, s);
-                gpu::swiglu(d.fg, d.fu, d.fact, (int) F, c.clamp_exp[(size_t) il], s);
-                gpu::gemv(Dn, d.fact, d.yexp, d.q8, s);
-                gpu::axpy(d.ygpu, d.yexp, I.h_w[j], (int) E, s);
-            }
-            // the shared expert on the GPU while the CPU computes the routed ones
-            if (c.n_expert_shared > 0) {
-                const int64_t FS = c.n_ff_exp[(size_t) il] * c.n_expert_shared;
-                gpu::gemv2(l.gate_shexp, l.up_shexp, d.xn, d.fg, d.fu, d.q8, s);
-                gpu::swiglu(d.fg, d.fu, d.fact, (int) FS, c.clamp_shexp[(size_t) il], s);
-                gpu::gemv(l.down_shexp, d.fact, d.ysh, d.q8, s);
-            }
+                // the shared expert
+                if (c.n_expert_shared > 0) {
+                    const int64_t FS = c.n_ff_exp[(size_t) il] * c.n_expert_shared;
+                    gpu::gemv2(l.gate_shexp, l.up_shexp, d.xn, d.fg, d.fu, d.q8, s);
+                    gpu::swiglu(d.fg, d.fu, d.fact, (int) FS, c.clamp_shexp[(size_t) il], s);
+                    gpu::gemv(l.down_shexp, d.fact, d.ysh, d.q8, s);
+                }
+            };
+            if (I.miss_ids.empty()) launch_gpu();
             if (!I.miss_ids.empty()) {
                 const auto t_c = tclock::now();
-                I.experts->run(il, I.h_x, I.miss_ids.data(), I.miss_w.data(), (int) I.miss_ids.size(), I.h_yr);
+                I.experts->run(il, I.h_x, I.miss_ids.data(), I.miss_w.data(), (int) I.miss_ids.size(), I.h_yr,
+                               launch_gpu);
                 if (I.timing) I.t_cpu += sec(t_c);
                 ok(cudaMemcpyAsync(d.y, I.h_yr, (size_t) E * sizeof(float), cudaMemcpyHostToDevice, d.stream),
                    "experts");

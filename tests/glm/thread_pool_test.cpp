@@ -1,11 +1,13 @@
 // tests/glm/thread_pool_test.cpp - ThreadPool (src/glm/cpu_ref.cpp): every index of every job is visited exactly
-// once, in chunks of the asked size (or all at once on one thread), over many jobs in a row (the spinning workers) and after the workers have gone
-// to sleep; physical_cores() is a sane number.
+// once, in chunks of the asked size (or all at once on one thread), over many jobs in a row (the spinning workers)
+// and after the workers have gone to sleep; a side task runs once and its exception comes back after the job;
+// physical_cores() is a sane number.
 #include "strata/glm/cpu_ref.hpp"
 
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 using namespace strata::glm;
@@ -41,6 +43,33 @@ int main() {
         pool.parallel_for(64, [&](int64_t b, int64_t e) { sum += e - b; });
         if (sum.load() != 5001 * 64) {
             std::printf("FAIL threads %d: %lld items over 5001 jobs of 64\n", threads, (long long) sum.load());
+            ++bad;
+        }
+    }
+    // `side` runs once on the caller beside the job; an exception from it comes back after the job is done
+    for (int threads : {1, 8}) {
+        ThreadPool pool(threads);
+        std::vector<std::atomic<int>> seen(10000);
+        int sides = 0;
+        pool.parallel_for((int64_t) seen.size(), 16,
+                          [&](int64_t b, int64_t e) { for (int64_t i = b; i < e; ++i) ++seen[(size_t) i]; },
+                          [&] { ++sides; });
+        int miss = 0;
+        for (auto& s : seen) miss += s.load() != 1;
+        bool thrown = false;
+        std::vector<std::atomic<int>> seen2(10000);
+        try {
+            pool.parallel_for((int64_t) seen2.size(), 16,
+                              [&](int64_t b, int64_t e) { for (int64_t i = b; i < e; ++i) ++seen2[(size_t) i]; },
+                              [&] { throw std::runtime_error("side"); });
+        } catch (const std::runtime_error&) {
+            thrown = true;
+        }
+        int miss2 = 0;
+        for (auto& s : seen2) miss2 += s.load() != 1;
+        if (sides != 1 || miss || !thrown || miss2) {
+            std::printf("FAIL side, threads %d: ran %d times, %d + %d indices not visited once, rethrown %d\n", threads,
+                        sides, miss, miss2, (int) thrown);
             ++bad;
         }
     }

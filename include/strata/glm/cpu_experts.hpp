@@ -19,7 +19,9 @@ public:
     CpuExperts(const Model& model, ThreadPool& pool);
 
     /// out (n_embd) = sum over the k experts `ids` of weights[i] * expert(x). x is the FFN-normed activation.
-    void run(int64_t il, const float* x, const int32_t* ids, const float* weights, int k, float* out);
+    /// `side` runs on the calling thread while the others start on the experts (ThreadPool::parallel_for).
+    void run(int64_t il, const float* x, const int32_t* ids, const float* weights, int k, float* out,
+             const std::function<void()>& side = nullptr);
 
 private:
     const Model& m_;

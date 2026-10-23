@@ -16,6 +16,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <mutex>
 #include <numeric>
 #include <stdexcept>
@@ -107,10 +108,23 @@ void ThreadPool::parallel_for(int64_t n, const std::function<void(int64_t, int64
 }
 
 void ThreadPool::parallel_for(int64_t n, int64_t grain, const std::function<void(int64_t, int64_t)>& fn) {
-    if (n <= 0) return;
+    parallel_for(n, grain, fn, nullptr);
+}
+
+void ThreadPool::parallel_for(int64_t n, int64_t grain, const std::function<void(int64_t, int64_t)>& fn,
+                              const std::function<void()>& side) {
     grain = std::max<int64_t>(1, grain);
-    if (n_ == 1 || n <= grain) {
-        fn(0, n);
+    if (n <= 0 || n_ == 1 || n <= grain) {
+        std::exception_ptr err;
+        if (side) {
+            try {
+                side();
+            } catch (...) {
+                err = std::current_exception();
+            }
+        }
+        if (n > 0) fn(0, n);
+        if (err) std::rethrow_exception(err);
         return;
     }
     Impl& I = *impl_;
@@ -124,8 +138,17 @@ void ThreadPool::parallel_for(int64_t n, int64_t grain, const std::function<void
         std::lock_guard<std::mutex> lk(I.mu);
         I.cv.notify_all();
     }
+    std::exception_ptr err;
+    if (side) {
+        try {
+            side();
+        } catch (...) {
+            err = std::current_exception();
+        }
+    }
     I.work();
     while (I.busy.load(std::memory_order_acquire) != 0) cpu_relax();
+    if (err) std::rethrow_exception(err);
 }
 
 int ThreadPool::physical_cores() {

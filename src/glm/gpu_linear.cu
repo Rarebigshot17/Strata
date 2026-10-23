@@ -133,6 +133,26 @@ void gemv2(const DevMatrix& a, const DevMatrix& b, const float* x, float* ya, fl
     gemv(b, x, yb, q8, stream);
 }
 
+void quantize_for(const DevMatrix& m, const float* x, void* q8, void* stream) {
+    if (m.path == DevMatrix::Mmvq) strata::kernels::native_quantize_q8_1(x, q8, (int) m.n_in, 1, stream);
+    else if (m.path == DevMatrix::IqMmvq) strata::kernels::quantize_q8_1_rows(x, 1, m.n_in, q8, stream);
+}
+
+void gemv_pre(const DevMatrix& m, const float* x, const void* q8, float* y, void* stream) {
+    switch (m.path) {
+        case DevMatrix::Mmvq:
+            strata::kernels::native_mmvq(m.type, m.w, q8, y, (int) m.n_in, (int) m.n_out, 1, stream);
+            break;
+        case DevMatrix::IqMmvq:
+            strata::kernels::iq_mmvq(m.type, m.w, q8, y, (int) m.n_in, (int) m.n_out, 1, stream);
+            break;
+        default: gemv(m, x, y, nullptr, stream); return;   // the float paths quantize nothing
+    }
+    cuda_ok(cudaGetLastError(), "gemv_pre");
+}
+
+bool quantizes_alike(const DevMatrix& a, const DevMatrix& b) { return a.path == b.path && a.n_in == b.n_in; }
+
 void gemv_heads(const DevMatrix& m, int n_heads, const float* x, float* y, void* q8, void* stream) {
     const int64_t rows = m.n_out / n_heads;
     if (m.path == DevMatrix::Mmvq && rows * n_heads == m.n_out) {
