@@ -8,12 +8,16 @@
 
 Per card: the time its kernels ran (overlapping kernels counted once), the time its copies from RAM, to RAM and
 between cards ran, how much of the copying from RAM overlapped its kernels, and the rate of that copying. Then how
-long 0, 1, 2 or 3 cards were computing at once, the prompt chunks (the engine's NVTX ranges "chunk POS+T") and the
-kernels that took the most time on each card. Standard library only.
+long 0, 1, 2 or 3 cards were computing at once, the prompt chunks (the engine's NVTX ranges "chunk POS+T"), each
+card's kernel time by the part of the engine that launched it (the innermost NVTX range open on the launching thread,
+found through the launch call's correlation id: a layer's attention half, its routed experts, another card's experts
+on a helper thread, the rest of its FFN half) and the kernels that took the most time on each card. Standard library
+only.
 """
 from __future__ import annotations
 
 import argparse
+import bisect
 import re
 import sqlite3
 import sys
@@ -70,6 +74,66 @@ def name_of(v, ids: dict[int, str]) -> str:
     if isinstance(v, int):
         return ids.get(v, str(v))
     return str(v)
+
+
+PHASES = ("attention half", "routed experts, its own layer", "routed experts, another card's layer",
+          "FFN half, the rest", "other")
+
+
+def phase_of(name: str | None, main_thread: bool) -> str:
+    """The part of the engine a kernel belongs to, from the innermost NVTX range open where it was launched."""
+    if name is None:
+        return "other" if main_thread else "routed experts, another card's layer"
+    if re.fullmatch(r"L\d+ (MLA|KDA)", name):
+        return "attention half"
+    if name.startswith("routed experts: queue"):
+        return "routed experts, its own layer"
+    if re.fullmatch(r"L\d+ FFN", name) or name.startswith("routing:"):
+        return "FFN half, the rest"
+    return "other"
+
+
+def kernel_phases(db: sqlite3.Connection, ids: dict[int, str]) -> dict[int, dict[str, list[tuple[int, int]]]] | None:
+    """Per card, its kernels' intervals by phase_of; None when the profile lacks the tables it needs."""
+    need = {"CUPTI_ACTIVITY_KIND_KERNEL": {"correlationId"},
+            "CUPTI_ACTIVITY_KIND_RUNTIME": {"correlationId", "globalTid"}, "NVTX_EVENTS": {"globalTid"}}
+    for t, cols in need.items():
+        if not has_table(db, t) or not cols <= columns(db, t):
+            return None
+    launch = {int(c): (int(tid), int(st)) for c, tid, st in
+              db.execute("SELECT correlationId, globalTid, start FROM CUPTI_ACTIVITY_KIND_RUNTIME")}
+    ncols = columns(db, "NVTX_EVENTS")
+    txt = "COALESCE(text, (SELECT value FROM StringIds WHERE id = textId))" if "textId" in ncols else "text"
+    ranges: dict[int, list[tuple[int, int, str]]] = defaultdict(list)
+    for st, en, t, tid in db.execute(f"SELECT start, end, {txt}, globalTid FROM NVTX_EVENTS WHERE end IS NOT NULL"):
+        if t is not None and tid is not None:
+            ranges[int(tid)].append((int(st), int(en), str(t)))
+    starts = {}
+    for tid in ranges:
+        ranges[tid].sort(key=lambda r: (r[0], -r[1]))   # of ranges that start together, the outer one first
+        starts[tid] = [r[0] for r in ranges[tid]]
+    # the thread that runs the chunks is the main one; others launching kernels are the helpers'
+    main_tids = {tid for tid, rs in ranges.items() if any(r[2].startswith("chunk ") for r in rs)}
+
+    def innermost(tid: int, t: int) -> str | None:
+        rs = ranges.get(tid)
+        if not rs:
+            return None
+        j = bisect.bisect_right(starts[tid], t) - 1
+        for _ in range(4000):                           # the latest-started range still open at t
+            if j < 0:
+                return None
+            if rs[j][1] >= t:
+                return rs[j][2]
+            j -= 1
+        return None
+
+    out: dict[int, dict[str, list[tuple[int, int]]]] = defaultdict(lambda: defaultdict(list))
+    for s, e, dev, corr in db.execute("SELECT start, end, deviceId, correlationId FROM CUPTI_ACTIVITY_KIND_KERNEL"):
+        tid, at = launch.get(int(corr), (None, None))
+        name = innermost(tid, at) if tid is not None else None
+        out[dev][phase_of(name, tid in main_tids)].append((s, e))
+    return out
 
 
 def main() -> int:
@@ -183,6 +247,15 @@ def main() -> int:
             print("\nhost time in the engine's other ranges:")
             for t, v in sorted(waits.items(), key=lambda x: -x[1]):
                 print(f"  {t:<40} {v / 1e9:8.3f} s")
+
+    ph = kernel_phases(db, ids)
+    if ph is not None:
+        print("\nkernel time by the part of the engine that launched it (seconds; overlapping kernels once):")
+        print("  " + " " * 38 + "".join(f"  CUDA {d:<5}" for d in devices))
+        for name in PHASES:
+            row = [total(merge(ph[d].get(name, []))) / 1e9 for d in devices]
+            if any(row):
+                print(f"  {name:<38}" + "".join(f"  {v:9.3f}" for v in row))
 
     for d in devices:
         print(f"\nCUDA device {d}: the kernels that took the most time")

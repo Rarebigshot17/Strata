@@ -20,18 +20,26 @@ def make_profile(path: str) -> None:
     db = sqlite3.connect(path)
     db.execute("CREATE TABLE StringIds (id INTEGER PRIMARY KEY, value TEXT)")
     db.executemany("INSERT INTO StringIds VALUES (?, ?)", [(1, "gemm_a"), (2, "softmax"), (3, "chunk 0+1024")])
-    db.execute("CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (start INT, end INT, deviceId INT, shortName INT)")
+    db.execute("CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (start INT, end INT, deviceId INT, shortName INT, "
+               "correlationId INT)")
     # card 0: kernels 0-2 s and 1-3 s (overlapping: 3 s busy), card 1: 4-5 s
-    db.executemany("INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (?, ?, ?, ?)",
-                   [(0, 2 * S, 0, 1), (1 * S, 3 * S, 0, 2), (4 * S, 5 * S, 1, 1)])
+    db.executemany("INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (?, ?, ?, ?, ?)",
+                   [(0, 2 * S, 0, 1, 11), (1 * S, 3 * S, 0, 2, 12), (4 * S, 5 * S, 1, 1, 13)])
+    # their launches: the first in a layer's attention half on the main thread (tid 1), the second in its routed
+    # experts, the third from a helper thread (tid 2, no ranges)
+    db.execute("CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME (start INT, end INT, globalTid INT, correlationId INT)")
+    db.executemany("INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (?, ?, ?, ?)",
+                   [(1, 2, 1, 11), (int(5.5 * S), int(5.5 * S) + 1, 1, 12), (4 * S, 4 * S + 1, 2, 13)])
     db.execute("CREATE TABLE CUPTI_ACTIVITY_KIND_MEMCPY (start INT, end INT, deviceId INT, copyKind INT, bytes INT)")
     # card 0 copies 10 GB from RAM over 2-6 s (1 s of it under its kernels); card 1 sends 1 GB to RAM over 9-10 s
     db.executemany("INSERT INTO CUPTI_ACTIVITY_KIND_MEMCPY VALUES (?, ?, ?, ?, ?)",
                    [(2 * S, 6 * S, 0, 1, 10 * 10**9), (9 * S, 10 * S, 1, 2, 10**9)])
-    db.execute("CREATE TABLE NVTX_EVENTS (start INT, end INT, text TEXT, textId INT)")
-    db.executemany("INSERT INTO NVTX_EVENTS VALUES (?, ?, ?, ?)",
-                   [(0, 10 * S, None, 3), (5 * S, 6 * S, "routing: wait for the GPU", None),
-                    (9 * S, 9 * S, "chunk end: wait for every card", None)])
+    db.execute("CREATE TABLE NVTX_EVENTS (start INT, end INT, text TEXT, textId INT, globalTid INT)")
+    db.executemany("INSERT INTO NVTX_EVENTS VALUES (?, ?, ?, ?, ?)",
+                   [(0, 10 * S, None, 3, 1), (0, 4 * S, "L3 MLA", None, 1),
+                    (5 * S, 6 * S, "L3 FFN", None, 1), (5 * S, 6 * S - 1, "routed experts: queue", None, 1),
+                    (5 * S, 5 * S + 2, "routing: wait for the GPU", None, 1),
+                    (9 * S, 9 * S, "chunk end: wait for every card", None, 1)])
     # nsys numbers GPUs by PCI order (TARGET_INFO_GPU.id); the activity's deviceId is the CUDA number (cudaId)
     db.execute("CREATE TABLE TARGET_INFO_GPU (id INT, name TEXT)")
     db.executemany("INSERT INTO TARGET_INFO_GPU VALUES (?, ?)", [(0, "RTX 3080"), (1, "RTX 3090 Ti")])
@@ -74,6 +82,17 @@ class NsysBusyTest(unittest.TestCase):
         self.assertIn("102.4 tokens/s", text)
         self.assertIn("routing: wait for the GPU", text)
         self.assertIn("gemm_a", text)
+        # by phase: card 0's 0-2 s kernel in the attention half, its 1-3 s one in its routed experts (the routing
+        # range ended before that launch), card 1's from the helper thread
+        self.assertRegex(text, r"attention half +2\.000 +0\.000\n")
+        self.assertRegex(text, r"routed experts, its own layer +2\.000 +0\.000\n")
+        self.assertRegex(text, r"routed experts, another card's layer +0\.000 +1\.000\n")
+
+    def test_phase_of(self):
+        self.assertEqual(nsys_busy.phase_of("L12 KDA", True), "attention half")
+        self.assertEqual(nsys_busy.phase_of("L12 FFN", True), "FFN half, the rest")
+        self.assertEqual(nsys_busy.phase_of(None, False), "routed experts, another card's layer")
+        self.assertEqual(nsys_busy.phase_of(None, True), "other")
 
 
 if __name__ == "__main__":
