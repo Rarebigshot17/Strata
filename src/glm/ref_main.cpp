@@ -69,7 +69,7 @@ int usage() {
 
 int main(int argc, char** argv) {
     std::string model_path, ids_path, out_path, layers_path;
-    int threads = (int) std::thread::hardware_concurrency();
+    int threads = strata::glm::ThreadPool::physical_cores();
     long long max_tokens = 0, ctx = 4096;
     bool serve = false;
     std::vector<int32_t> eos;

@@ -24,7 +24,7 @@ struct EngineOptions {
     int64_t max_ctx = 32768;
     std::vector<int> devices;        ///< CUDA device ids, in layer order; empty = every visible device
     std::vector<double> split;       ///< share of the layers per device; empty = by free memory
-    int cpu_threads = 0;             ///< 0 = all hardware threads
+    int cpu_threads = 0;             ///< 0 = one per CPU core (ThreadPool::physical_cores)
     bool verbose = true;
     int prefill_chunk = 256;         ///< prompt tokens read at once (0: one at a time)
     ExpertCacheOptions cache;

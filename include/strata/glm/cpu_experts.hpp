@@ -25,7 +25,8 @@ private:
     const Model& m_;
     ThreadPool& pool_;
     std::vector<uint8_t> xq_g_, xq_u_, hq_;
-    std::vector<float> g_, u_, d_;
+    std::vector<float> g_, u_;
+    std::vector<Tensor> gate_, up_, down_;   ///< the selected experts' matrices
 };
 
 }  // namespace strata::glm

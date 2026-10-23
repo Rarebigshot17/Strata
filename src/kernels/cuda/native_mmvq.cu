@@ -779,14 +779,39 @@ __device__ __forceinline__ float small_q8_dot(const IQ4NLBlock* __restrict__ w,
 // QI=4 for Q4_0/Q5_0/IQ4_NL and QI=8 for Q8_0. With VDR=2 this preserves
 // the pinned 64/32-block iteration and 2048/1024-element small-K thresholds.
 template<typename Weight, int Qi, bool SmallK>
+__device__ __forceinline__ void small_mmvq_rows(const Weight* __restrict__ w,
+                                                const Q81Block* __restrict__ x,
+                                                float* __restrict__ y, int n_in, int n_out, int row0);
+
+template<typename Weight, int Qi, bool SmallK>
 __launch_bounds__(WARPS * WARP, 1)
 __global__ void native_small_mmvq_kernel(const Weight* __restrict__ w,
                                          const Q81Block* __restrict__ x,
                                          float* __restrict__ y, int n_in, int n_out) {
     constexpr int ROWS = SmallK ? WARPS : 1;
+    small_mmvq_rows<Weight, Qi, SmallK>(w, x, y, n_in, n_out, ROWS * int(blockIdx.x));
+}
+
+// native_mmvq_heads: n_out rows in heads of rows_per_head, head h reading its own activation (n_in / 32 blocks
+// each, one after another). The rows of a block are in one head (rows_per_head % WARPS == 0 when SmallK), and each
+// runs small_mmvq_rows as native_small_mmvq_kernel does, so every head is bitwise a call of its own.
+template<typename Weight, int Qi, bool SmallK>
+__launch_bounds__(WARPS * WARP, 1)
+__global__ void native_small_mmvq_heads_kernel(const Weight* __restrict__ w,
+                                               const Q81Block* __restrict__ x,
+                                               float* __restrict__ y, int n_in, int n_out, int rows_per_head) {
+    constexpr int ROWS = SmallK ? WARPS : 1;
+    const int row0 = ROWS * int(blockIdx.x);
+    small_mmvq_rows<Weight, Qi, SmallK>(w, x + std::size_t(row0 / rows_per_head) * (n_in / 32), y, n_in, n_out, row0);
+}
+
+template<typename Weight, int Qi, bool SmallK>
+__device__ __forceinline__ void small_mmvq_rows(const Weight* __restrict__ w,
+                                                const Q81Block* __restrict__ x,
+                                                float* __restrict__ y, int n_in, int n_out, int row0) {
+    constexpr int ROWS = SmallK ? WARPS : 1;
     constexpr int BLOCKS_PER_ITER = 2 * WARPS * WARP / Qi;
     const int tid = WARP * int(threadIdx.y) + int(threadIdx.x);
-    const int row0 = ROWS * int(blockIdx.x);
     const int blocks_per_row = n_in / 32;
     float tmp[ROWS] = {};
     for (int kbx = tid / (Qi / 2); kbx < blocks_per_row; kbx += BLOCKS_PER_ITER) {
@@ -1668,6 +1693,34 @@ void small_mmvq(const void* weights, const void* x_q8_1, float* y,
 }
 
 template<typename Weight, int Qi>
+bool small_mmvq_heads(const void* weights, const void* x_q8_1, float* y, int n_in, int rows_per_head, int n_heads,
+                      void* stream) {
+    const bool small_k = n_in / 32 < 2 * WARPS * WARP / Qi;
+    if (n_in <= 0 || n_in % 32 != 0 || rows_per_head <= 0 || n_heads <= 0 ||
+        (small_k && rows_per_head % WARPS != 0) || (long long) rows_per_head * n_heads > INT32_MAX) {
+        return false;
+    }
+    validate_pointer(weights);
+    validate_pointer(x_q8_1);
+    validate_pointer(y);
+    validate_stream(stream);
+    const auto* w = static_cast<const Weight*>(weights);
+    const auto* x = static_cast<const Q81Block*>(x_q8_1);
+    const auto s = static_cast<cudaStream_t>(stream);
+    const int n_out = rows_per_head * n_heads;
+    const dim3 threads(WARP, WARPS);
+    if (small_k) {
+        native_small_mmvq_heads_kernel<Weight, Qi, true><<<unsigned(n_out / WARPS), threads, 0, s>>>(
+            w, x, y, n_in, n_out, rows_per_head);
+    } else {
+        native_small_mmvq_heads_kernel<Weight, Qi, false><<<unsigned(n_out), threads, 0, s>>>(
+            w, x, y, n_in, n_out, rows_per_head);
+    }
+    launch_check();
+    return true;
+}
+
+template<typename Weight, int Qi>
 void small_f32(const void* weights, const float* x, void* scratch_q8_1,
                float* y, int n_in, int n_out, int ncols, void* stream) {
     validate_shape(n_in, ncols, 32);
@@ -2512,6 +2565,17 @@ void native_mmvq(int ggml_type, const void* weights, const void* x_q8_1, float* 
     case 16: case 17: case 18: case 21: case 22: case 29:
         iq_mmvq(ggml_type, weights, x_q8_1, y, n_in, n_out, ncols, stream); break;
     default: throw std::invalid_argument("unsupported native MMVQ GGML type");
+    }
+}
+
+bool native_mmvq_heads(int ggml_type, const void* weights, const void* x_q8_1, float* y, int n_in, int rows_per_head,
+                       int n_heads, void* stream) {
+    switch (ggml_type) {
+    case 2: return small_mmvq_heads<Q40Block, 4>(weights, x_q8_1, y, n_in, rows_per_head, n_heads, stream);
+    case 6: return small_mmvq_heads<Q50Block, 4>(weights, x_q8_1, y, n_in, rows_per_head, n_heads, stream);
+    case 8: return small_mmvq_heads<Q80Block, 8>(weights, x_q8_1, y, n_in, rows_per_head, n_heads, stream);
+    case 20: return small_mmvq_heads<IQ4NLBlock, 4>(weights, x_q8_1, y, n_in, rows_per_head, n_heads, stream);
+    default: return false;
     }
 }
 

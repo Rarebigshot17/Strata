@@ -377,7 +377,7 @@ server adds `--serve`, `--split` from the config's `split` key, and `--eos-ids` 
 | `--max-swaps N` | Experts copied into the VRAM cache per token, all layers together. | 8 |
 | `--no-expert-cache` | No VRAM expert cache. | Off |
 | `--prefill-chunk N` | Prompt tokens read at once. 0 = one at a time. | 256 |
-| `--threads N` (`-t N`) | CPU threads for the experts computed on the CPU. The warm-up uses at most 16 of them (8 when this is 0). | 0 = all hardware threads |
+| `--threads N` (`-t N`) | CPU threads for the experts computed on the CPU. The warm-up uses at most 16 of them (8 when this is 0). | 0 = one per CPU core (measured on napster-ai, Xeon E5-2699 v4, UD-IQ3_XXS, 205 tokens one at a time: 22 threads 10.0 tokens/s, all 44 hardware threads 6.8) |
 | `--devices 0,1,2` | CUDA device numbers, in layer order. Use `gpu` instead: it sets which cards CUDA shows the engine and in which order, and these numbers would count among those. | Every visible device |
 | `--split w,w,w` | Each device's share of the layers. The config's `split` key gives the same. | Each card's free VRAM at start |
 | `--no-warm` | Skip reading the experts into the page cache before the engine says it is ready. The first prompts then read them from the disk. | Off |

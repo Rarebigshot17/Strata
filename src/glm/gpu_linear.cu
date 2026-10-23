@@ -133,6 +133,19 @@ void gemv2(const DevMatrix& a, const DevMatrix& b, const float* x, float* ya, fl
     gemv(b, x, yb, q8, stream);
 }
 
+void gemv_heads(const DevMatrix& m, int n_heads, const float* x, float* y, void* q8, void* stream) {
+    const int64_t rows = m.n_out / n_heads;
+    if (m.path == DevMatrix::Mmvq && rows * n_heads == m.n_out) {
+        // q8_1 blocks are quantized one by one, so all heads at once are the bytes of each head on its own
+        strata::kernels::native_quantize_q8_1(x, q8, (int) (n_heads * m.n_in), 1, stream);
+        if (strata::kernels::native_mmvq_heads(m.type, m.w, q8, y, (int) m.n_in, (int) rows, n_heads, stream)) {
+            cuda_ok(cudaGetLastError(), "gemv_heads");
+            return;
+        }
+    }
+    for (int h = 0; h < n_heads; ++h) gemv(m.rows(h * rows, rows), x + h * m.n_in, y + h * rows, q8, stream);
+}
+
 float* upload_f32(const Tensor& t, size_t* bytes_out) {
     std::vector<float> host((size_t) t.elements());
     if (t.type == GGML_TYPE_F32) {

@@ -39,6 +39,10 @@ size_t q8_scratch_bytes(int64_t n_in);
 void gemv(const DevMatrix& m, const float* x, float* y, void* q8, void* stream);
 /// The same activation through two matrices of the same n_in and type (quantized once).
 void gemv2(const DevMatrix& a, const DevMatrix& b, const float* x, float* ya, float* yb, void* q8, void* stream);
+/// `m` holds `n_heads` matrices of m.n_out / n_heads rows one after another; head h: y + h * rows = W_h (x + h *
+/// m.n_in). The same values as gemv on m.rows(h * rows, rows) for each head, in one quantization and one launch
+/// where the type has the kernel (native_mmvq_heads). `q8` is scratch from q8_scratch_bytes(n_heads * m.n_in).
+void gemv_heads(const DevMatrix& m, int n_heads, const float* x, float* y, void* q8, void* stream);
 
 /// A small tensor (a norm weight, a bias) to the device as f32.
 float* upload_f32(const Tensor& t, size_t* bytes_out = nullptr);

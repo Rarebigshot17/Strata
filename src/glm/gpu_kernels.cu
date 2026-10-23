@@ -133,9 +133,67 @@ __global__ void k_sigmoid(float* x, int n) {
 // ---------------------------------------------------------------- mHC
 
 // One thread does it all: hc is 4, and the order of the Sinkhorn sums is then exactly cpu_ref's.
+// k_hc_weights for a compile-time hc: comb in registers, written once at the end (the general version below reads
+// and writes it in global memory, 45 us a call on an RTX 3090 Ti for hc = 4). The same operations in the same order.
+template <int HC>
+__device__ __forceinline__ void hc_weights_regs(const float* mixes, const float* scale, const float* base, float* pc,
+                                                int iters, float eps) {
+    float comb[HC * HC];
+#pragma unroll
+    for (int h = 0; h < HC; ++h) {
+        pc[h] = sigmoidf_(mixes[h] * scale[0] + base[h]) + eps;
+        pc[HC + h] = 2.0f * sigmoidf_(mixes[HC + h] * scale[1] + base[HC + h]);
+    }
+#pragma unroll
+    for (int k = 0; k < HC * HC; ++k) comb[k] = mixes[2 * HC + k] * scale[2] + base[2 * HC + k];
+#pragma unroll
+    for (int src = 0; src < HC; ++src) {
+        float* row = comb + src * HC;
+        float mx = row[0];
+#pragma unroll
+        for (int d = 1; d < HC; ++d) mx = fmaxf(mx, row[d]);
+        float sum = 0.0f;
+#pragma unroll
+        for (int d = 0; d < HC; ++d) {
+            row[d] = expf(row[d] - mx);
+            sum += row[d];
+        }
+#pragma unroll
+        for (int d = 0; d < HC; ++d) row[d] = row[d] / sum + eps;
+    }
+    for (int it = 0; it < (iters > 1 ? iters : 1); ++it) {
+        if (it > 0) {
+#pragma unroll
+            for (int src = 0; src < HC; ++src) {
+                float s = 0.0f;
+#pragma unroll
+                for (int d = 0; d < HC; ++d) s += comb[src * HC + d];
+                s += eps;
+#pragma unroll
+                for (int d = 0; d < HC; ++d) comb[src * HC + d] /= s;
+            }
+        }
+#pragma unroll
+        for (int d = 0; d < HC; ++d) {
+            float s = 0.0f;
+#pragma unroll
+            for (int src = 0; src < HC; ++src) s += comb[src * HC + d];
+            s += eps;
+#pragma unroll
+            for (int src = 0; src < HC; ++src) comb[src * HC + d] /= s;
+        }
+    }
+#pragma unroll
+    for (int k = 0; k < HC * HC; ++k) pc[2 * HC + k] = comb[k];
+}
+
 __global__ void k_hc_weights(const float* mixes, const float* scale, const float* base, float* pc, int hc, int iters,
                              float eps) {
     if (threadIdx.x != 0) return;
+    if (hc == 4) {
+        hc_weights_regs<4>(mixes, scale, base, pc, iters, eps);
+        return;
+    }
     float* pre = pc;
     float* post = pc + hc;
     float* comb = pc + 2 * hc;

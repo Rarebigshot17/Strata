@@ -43,49 +43,64 @@ void CpuExperts::run(int64_t il, const float* x, const int32_t* ids, const float
     quant_act(w.up_exps, x, E, xq_u_);
     g_.resize((size_t) (k * F));
     u_.resize((size_t) (k * F));
-    d_.resize((size_t) (k * E));
+    gate_.resize((size_t) k);
+    up_.resize((size_t) k);
+    down_.resize((size_t) k);
+    for (int j = 0; j < k; ++j) {
+        gate_[(size_t) j] = w.gate_exps.slice2(ids[j]);
+        up_[(size_t) j] = w.up_exps.slice2(ids[j]);
+        down_[(size_t) j] = w.down_exps.slice2(ids[j]);
+    }
 
-    // gate and up rows of every selected expert: 2 * k * F dot products
-    pool_.parallel_for(2 * k * F, [&](int64_t b, int64_t e) {
+    // gate and up rows of every selected expert: 2 * k * F dot products, 32 rows a chunk
+    pool_.parallel_for(2 * k * F, 32, [&](int64_t b, int64_t e) {
         for (int64_t r = b; r < e; ++r) {
             const bool up = r >= k * F;
             const int64_t rr = up ? r - k * F : r;
             const int64_t j = rr / F, row = rr % F;
-            const Tensor& t = up ? w.up_exps : w.gate_exps;
-            const uint8_t* wr = t.slice2(ids[j]).row(row);
+            const uint8_t* wr = (up ? up_ : gate_)[(size_t) j].row(row);
             float sum = 0.0f;
             (up ? tu : tg)->vec_dot((int) E, &sum, 0, wr, 0, (up ? xq_u_ : xq_g_).data(), 0, 1);
             (up ? u_ : g_)[(size_t) rr] = sum;
         }
     });
-    // the clamped SwiGLU, then each expert's activation in the down matrix's format
-    for (int64_t i = 0; i < k * F; ++i) {
-        float gi = g_[(size_t) i], ui = u_[(size_t) i];
-        if (limit > 1e-6f) {
-            gi = std::min(gi, limit);
-            ui = std::clamp(ui, -limit, limit);
-        }
-        g_[(size_t) i] = gi / (1.0f + std::exp(-gi)) * ui;
-    }
+    // the clamped SwiGLU, then each expert's activation in the down matrix's format, in pieces of 256 values (a
+    // whole number of blocks of every activation format, each block quantized on its own as in a whole-row call)
     const ggml_type hat = td->vec_dot_type;
     const size_t hrow = ggml_row_size(hat, F);
+    const int64_t piece = F % 256 == 0 && 256 % ggml_blck_size(hat) == 0 ? 256 : F;
+    const int64_t pieces = F / piece;
     hq_.resize(hrow * (size_t) k);
-    for (int j = 0; j < k; ++j) {
-        if (hat == GGML_TYPE_F32) std::memcpy(hq_.data() + hrow * j, g_.data() + j * F, (size_t) F * sizeof(float));
-        else ggml_get_type_traits_cpu(hat)->from_float(g_.data() + j * F, hq_.data() + hrow * j, F);
-    }
-    pool_.parallel_for(k * E, [&](int64_t b, int64_t e) {
-        for (int64_t r = b; r < e; ++r) {
-            const int64_t j = r / E, row = r % E;
-            float sum = 0.0f;
-            td->vec_dot((int) F, &sum, 0, w.down_exps.slice2(ids[j]).row(row), 0, hq_.data() + hrow * j, 0, 1);
-            d_[(size_t) r] = sum;
+    pool_.parallel_for(k * pieces, 1, [&](int64_t b, int64_t e) {
+        for (int64_t q = b; q < e; ++q) {
+            const int64_t j = q / pieces, i0 = (q % pieces) * piece;
+            float* h = g_.data() + j * F + i0;
+            const float* uu = u_.data() + j * F + i0;
+            for (int64_t i = 0; i < piece; ++i) {
+                float gi = h[i], ui = uu[i];
+                if (limit > 1e-6f) {
+                    gi = std::min(gi, limit);
+                    ui = std::clamp(ui, -limit, limit);
+                }
+                h[i] = gi / (1.0f + std::exp(-gi)) * ui;
+            }
+            uint8_t* dst = hq_.data() + hrow * j + ggml_row_size(hat, i0);
+            if (hat == GGML_TYPE_F32) std::memcpy(dst, h, (size_t) piece * sizeof(float));
+            else ggml_get_type_traits_cpu(hat)->from_float(h, dst, piece);
         }
     });
-    // the weighted sum, experts in routing order (cpu_ref's order)
-    std::fill(out, out + E, 0.0f);
-    for (int j = 0; j < k; ++j)
-        for (int64_t i = 0; i < E; ++i) out[i] += weights[j] * d_[(size_t) (j * E + i)];
+    // each output row: its k down rows, summed in routing order (cpu_ref's order), 16 rows a chunk
+    pool_.parallel_for(E, 16, [&](int64_t b, int64_t e) {
+        for (int64_t row = b; row < e; ++row) {
+            float acc = 0.0f;
+            for (int j = 0; j < k; ++j) {
+                float sum = 0.0f;
+                td->vec_dot((int) F, &sum, 0, down_[(size_t) j].row(row), 0, hq_.data() + hrow * j, 0, 1);
+                acc += weights[j] * sum;
+            }
+            out[row] = acc;
+        }
+    });
 }
 
 }  // namespace strata::glm

@@ -129,6 +129,12 @@ bool native_mmvq_supported(int ggml_type) noexcept;
 std::size_t native_mmvq_weight_bytes(int ggml_type, int n_in, int n_out);
 void native_mmvq(int ggml_type, const void* weights, const void* x_q8_1, float* y,
                  int n_in, int n_out, int ncols, void* stream);
+/// n_heads matrices of rows_per_head rows, stored one after another, each times its own activation (head h's q8_1
+/// blocks at h * n_in / 32, its output at y + h * rows_per_head), in ONE launch: every head bitwise a native_mmvq
+/// call of its own (one column). Q4_0, Q5_0, Q8_0 and IQ4_NL; returns false (nothing launched) for other types, or
+/// a shape the kernel does not take (then call native_mmvq per head).
+bool native_mmvq_heads(int ggml_type, const void* weights, const void* x_q8_1, float* y, int n_in, int rows_per_head,
+                       int n_heads, void* stream);
 /// S26 STRATA_LFUSE: native_mmvq(w1 -> y1) and native_mmvq(w2 -> y2), same type / shape / input, in ONE launch,
 /// bitwise the two calls. Returns false (nothing launched) where that is not the case (Q8_0, 2-8 columns only).
 bool native_mmvq_pair(int ggml_type, const void* w1, const void* w2, const void* x_q8_1, float* y1, float* y2,

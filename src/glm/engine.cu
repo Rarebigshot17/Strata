@@ -94,7 +94,7 @@ GpuEngine::GpuEngine(const Model& model, const EngineOptions& opt) : impl_(new I
     I.max_sel = std::min<int64_t>(opt.max_ctx, c.indexer_top_k + P - 1);
     I.max_pools = opt.max_ctx / P + 1;
     const int64_t max_in = std::max({hc * E, maxDI, maxF, maxH * c.head_v_mla, c.q_lora_rank, c.kv_lora_rank,
-                                     c.kda_head_dim, maxH * c.head_k_mla});
+                                     c.kda_head_dim, maxH * c.head_k_mla, maxH * c.kv_lora_rank});
 
     I.ctx.resize(devs.size());
     for (size_t di = 0; di < devs.size(); ++di) {
@@ -241,7 +241,7 @@ GpuEngine::GpuEngine(const Model& model, const EngineOptions& opt) : impl_(new I
     I.cache->warm_start();
 
     // ---- host side: the CPU experts and the pinned exchange buffers
-    const int threads = opt.cpu_threads > 0 ? opt.cpu_threads : (int) std::max(1u, std::thread::hardware_concurrency());
+    const int threads = opt.cpu_threads > 0 ? opt.cpu_threads : ThreadPool::physical_cores();
     I.pool = std::make_unique<ThreadPool>(threads);
     I.experts = std::make_unique<CpuExperts>(model, *I.pool);
     I.h_x = halloc<float>((size_t) E);
@@ -514,8 +514,12 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
             gpu::gemv(l.kv_a, d.xn, d.kv, d.q8, s);
             gpu::rms_norm(d.kv, d.kv, (int) KL, c.rms_eps, l.kv_a_norm, s);
             gpu::store_f16_row(d.kv, l.cache, t, (int) KL, s);
-            for (int64_t h = 0; h < H; ++h)
-                gpu::gemv(l.k_b.rows(h * KL, KL), d.qm + h * HK, d.q_abs + h * KL, d.q8, s);
+            if (l.k_b.n_in == HK && l.k_b.n_out == H * KL) {
+                gpu::gemv_heads(l.k_b, (int) H, d.qm, d.q_abs, d.q8, s);
+            } else {
+                for (int64_t h = 0; h < H; ++h)
+                    gpu::gemv(l.k_b.rows(h * KL, KL), d.qm + h * HK, d.q_abs + h * KL, d.q8, s);
+            }
             gpu::round_f16(d.q_abs, (int) (H * KL), s);
 
             if (c.indexer_full[(size_t) il]) {
@@ -554,8 +558,12 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
             // pageable source: the copy is complete when cudaMemcpyAsync returns, so sel_host may change after
             gpu::mla_attend(d.q_abs, l.cache, d.sel, n_sel, d.scores, d.lat, (int) H, (int) KL,
                             1.0f / std::sqrt((float) HK), s);
-            for (int64_t h = 0; h < H; ++h)
-                gpu::gemv(l.v_b.rows(h * HV, HV), d.lat + h * KL, d.heads + h * HV, d.q8, s);
+            if (l.v_b.n_in == KL && l.v_b.n_out == H * HV) {
+                gpu::gemv_heads(l.v_b, (int) H, d.lat, d.heads, d.q8, s);
+            } else {
+                for (int64_t h = 0; h < H; ++h)
+                    gpu::gemv(l.v_b.rows(h * HV, HV), d.lat + h * KL, d.heads + h * HV, d.q8, s);
+            }
             gpu::gemv(l.wo, d.heads, d.y, d.q8, s);
         }
         gpu::hc_post(d.y, d.R, d.pc, d.R2, (int) hc, (int) E, s);

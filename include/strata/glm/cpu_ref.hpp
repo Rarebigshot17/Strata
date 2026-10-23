@@ -21,7 +21,10 @@ namespace strata::glm {
 
 class CpuExperts;
 
-/// A fixed set of worker threads for `parallel_for`.
+/// A fixed set of worker threads for `parallel_for`. The threads take chunks from a shared counter, so one slow
+/// thread does not hold up the rest, and they spin for a few milliseconds after each job before they sleep: the
+/// engine calls it twice or three times per layer, about every millisecond, and a wake-up through the kernel costs
+/// about as much as the work.
 class ThreadPool {
 public:
     explicit ThreadPool(int n_threads);
@@ -29,6 +32,11 @@ public:
     int size() const { return n_; }
     /// Calls `fn(begin, end)` on disjoint chunks covering [0, n), and returns when all are done.
     void parallel_for(int64_t n, const std::function<void(int64_t, int64_t)>& fn);
+    /// The same with chunks of `grain` items (the last one shorter), or [0, n) at once on one thread or when
+    /// n <= grain.
+    void parallel_for(int64_t n, int64_t grain, const std::function<void(int64_t, int64_t)>& fn);
+    /// The CPU cores (not hardware threads) Linux reports, or the hardware threads where it does not say.
+    static int physical_cores();
 
 private:
     struct Impl;

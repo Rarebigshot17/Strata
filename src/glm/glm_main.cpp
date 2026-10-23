@@ -178,7 +178,7 @@ int main(int argc, char** argv) {
         strata::glm::GpuEngine eng(model, opt);
         for (const auto& line : eng.placement()) std::printf("%s\n", line.c_str());
         std::unique_ptr<strata::glm::CpuRef> ref;
-        if (check_cpu) ref = std::make_unique<strata::glm::CpuRef>(model, n_ctx, opt.cpu_threads > 0 ? opt.cpu_threads : (int) std::thread::hardware_concurrency());
+        if (check_cpu) ref = std::make_unique<strata::glm::CpuRef>(model, n_ctx, opt.cpu_threads > 0 ? opt.cpu_threads : strata::glm::ThreadPool::physical_cores());
         const auto t1 = std::chrono::steady_clock::now();
         std::printf("loaded in %.1f s\n", std::chrono::duration<double>(t1 - t0).count());
 

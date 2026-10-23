@@ -11,81 +11,141 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <numeric>
 #include <stdexcept>
+#include <string>
 #include <thread>
 
 namespace strata::glm {
 
 // ================================ thread pool ================================
 
+namespace {
+
+inline void cpu_relax() {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#else
+    std::this_thread::yield();
+#endif
+}
+
+}  // namespace
+
+// A job is published by bumping `generation` (seq_cst, as are the sleepers' count and their check of it, so a
+// worker either sees the new job before it sleeps or is counted and woken). Every worker takes part in every job,
+// even with nothing left to take, so `busy` reaching 0 means none of them still reads this job's fields.
 struct ThreadPool::Impl {
     std::vector<std::thread> workers;
-    std::mutex mu;
-    std::condition_variable cv_start, cv_done;
     const std::function<void(int64_t, int64_t)>* fn = nullptr;
-    int64_t n = 0;
-    uint64_t generation = 0;
-    int pending = 0;
-    bool stop = false;
+    int64_t n = 0, grain = 1;
+    alignas(64) std::atomic<uint64_t> generation{0};
+    alignas(64) std::atomic<int64_t> next{0};
+    alignas(64) std::atomic<int> busy{0};
+    alignas(64) std::atomic<int> sleepers{0};
+    std::mutex mu;
+    std::condition_variable cv;
+    bool stop = false;   // under mu
+
+    void work() {
+        for (;;) {
+            const int64_t b = next.fetch_add(grain, std::memory_order_relaxed);
+            if (b >= n) return;
+            (*fn)(b, std::min(n, b + grain));
+        }
+    }
 };
 
 ThreadPool::ThreadPool(int n_threads) : impl_(new Impl), n_(std::max(1, n_threads)) {
     for (int t = 1; t < n_; ++t) {
-        impl_->workers.emplace_back([this, t] {
+        impl_->workers.emplace_back([this] {
+            Impl& I = *impl_;
             uint64_t seen = 0;
             for (;;) {
-                const std::function<void(int64_t, int64_t)>* fn;
-                int64_t n;
-                {
-                    std::unique_lock<std::mutex> lk(impl_->mu);
-                    impl_->cv_start.wait(lk, [&] { return impl_->stop || impl_->generation != seen; });
-                    if (impl_->stop) return;
-                    seen = impl_->generation;
-                    fn = impl_->fn;
-                    n = impl_->n;
+                auto t0 = std::chrono::steady_clock::now();
+                for (int spins = 0; I.generation.load(std::memory_order_acquire) == seen;) {
+                    cpu_relax();
+                    if (++spins < 256) continue;
+                    spins = 0;
+                    if (std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(5)) continue;
+                    std::unique_lock<std::mutex> lk(I.mu);
+                    I.sleepers.fetch_add(1);
+                    I.cv.wait(lk, [&] { return I.stop || I.generation.load() != seen; });
+                    I.sleepers.fetch_sub(1);
+                    if (I.stop) return;
+                    t0 = std::chrono::steady_clock::now();
                 }
-                const int64_t chunk = (n + n_ - 1) / n_;
-                const int64_t b = std::min(n, chunk * t), e = std::min(n, b + chunk);
-                if (b < e) (*fn)(b, e);
-                std::lock_guard<std::mutex> lk(impl_->mu);
-                if (--impl_->pending == 0) impl_->cv_done.notify_one();
+                seen = I.generation.load(std::memory_order_acquire);
+                if (I.fn == nullptr) return;   // the destructor's empty job
+                I.work();
+                I.busy.fetch_sub(1, std::memory_order_release);
             }
         });
     }
 }
 
 ThreadPool::~ThreadPool() {
+    Impl& I = *impl_;
     {
-        std::lock_guard<std::mutex> lk(impl_->mu);
-        impl_->stop = true;
+        std::lock_guard<std::mutex> lk(I.mu);
+        I.stop = true;
+        I.fn = nullptr;
+        I.generation.fetch_add(1);
     }
-    impl_->cv_start.notify_all();
-    for (auto& w : impl_->workers) w.join();
+    I.cv.notify_all();
+    for (auto& w : I.workers) w.join();
 }
 
 void ThreadPool::parallel_for(int64_t n, const std::function<void(int64_t, int64_t)>& fn) {
+    parallel_for(n, std::max<int64_t>(1, n / (8 * (int64_t) n_)), fn);
+}
+
+void ThreadPool::parallel_for(int64_t n, int64_t grain, const std::function<void(int64_t, int64_t)>& fn) {
     if (n <= 0) return;
-    if (n_ == 1 || n < 2 * n_) {
+    grain = std::max<int64_t>(1, grain);
+    if (n_ == 1 || n <= grain) {
         fn(0, n);
         return;
     }
-    {
-        std::lock_guard<std::mutex> lk(impl_->mu);
-        impl_->fn = &fn;
-        impl_->n = n;
-        impl_->pending = n_ - 1;
-        ++impl_->generation;
+    Impl& I = *impl_;
+    I.fn = &fn;
+    I.n = n;
+    I.grain = grain;
+    I.next.store(0, std::memory_order_relaxed);
+    I.busy.store(n_ - 1, std::memory_order_relaxed);
+    I.generation.fetch_add(1);
+    if (I.sleepers.load() > 0) {
+        std::lock_guard<std::mutex> lk(I.mu);
+        I.cv.notify_all();
     }
-    impl_->cv_start.notify_all();
-    const int64_t chunk = (n + n_ - 1) / n_;
-    fn(0, std::min(n, chunk));
-    std::unique_lock<std::mutex> lk(impl_->mu);
-    impl_->cv_done.wait(lk, [&] { return impl_->pending == 0; });
+    I.work();
+    while (I.busy.load(std::memory_order_acquire) != 0) cpu_relax();
+}
+
+int ThreadPool::physical_cores() {
+    const int hw = (int) std::max(1u, std::thread::hardware_concurrency());
+    std::vector<std::pair<int, int>> seen;
+    for (int cpu = 0; cpu < hw; ++cpu) {
+        const std::string dir = "/sys/devices/system/cpu/cpu" + std::to_string(cpu) + "/topology/";
+        int pkg = -1, core = -1;
+        if (FILE* f = std::fopen((dir + "physical_package_id").c_str(), "r")) {
+            if (std::fscanf(f, "%d", &pkg) != 1) pkg = -1;
+            std::fclose(f);
+        }
+        if (FILE* f = std::fopen((dir + "core_id").c_str(), "r")) {
+            if (std::fscanf(f, "%d", &core) != 1) core = -1;
+            std::fclose(f);
+        }
+        if (pkg < 0 || core < 0) return hw;
+        if (std::find(seen.begin(), seen.end(), std::make_pair(pkg, core)) == seen.end()) seen.emplace_back(pkg, core);
+    }
+    return seen.empty() ? hw : (int) seen.size();
 }
 
 // ================================ small helpers ================================
