@@ -194,7 +194,8 @@ class Checks(unittest.TestCase):
                      "prefill, latent cache in RAM: check-prefill: top-1 agreement 5/5: PASS",
                      "prefill, experts page-locked: experts in page-locked RAM: 2 of 2 MoE layers, 0.1 GB; "
                      "check-prefill: top-1 agreement 5/5: PASS"):
-            self.assertEqual(len(re.findall("^" + re.escape(line) + "$", out, re.M)), len(GPU_MODELS), line + "\n" + out)
+            found = re.findall("^" + re.escape(line) + "$", out, re.M)
+            self.assertEqual(len(found), len(GPU_MODELS), line + "\n" + out)
         self.assertEqual(out.count("check-prefill:"), 4 * len(GPU_MODELS), out)
         self.assertIn("parking: 6 turns, all PASS", out)
         self.assertNotIn("Traceback", out)
@@ -204,7 +205,8 @@ class Checks(unittest.TestCase):
         # them is the one that says PASS or FAIL, and must not be cut off with them
         rc, out = self.run_script("glm53_gpu_check.sh", FAKE_SMI="0, 23900\\n", FAKE_LAYERS="20")
         self.assertEqual(rc, 0, out)
-        self.assertEqual(len(re.findall("^check-cpu: top-1 agreement 40/40: PASS$", out, re.M)), len(GPU_MODELS), out)
+        decode = re.findall("^check-cpu: top-1 agreement 40/40: PASS$", out, re.M)
+        self.assertEqual(len(decode), len(GPU_MODELS), out)
         self.assertEqual(out.count("residual differs"), 4 * len(GPU_MODELS), out)
         self.assertEqual(out.count("(16 more positions where a layer differs)"), len(GPU_MODELS), out)
 
