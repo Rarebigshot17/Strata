@@ -13,9 +13,34 @@ on this branch.
 Estimated effort when the port was planned: about 5-6 months of engineering. Code is written off the machine and
 tested on napster-ai by hand, so every milestone ends with commands to run and output to paste back.
 
-**The real model has not run yet:** it needs the RAM napster-ai does not have yet ("Memory on napster-ai"). So there
-are no speeds, load times or memory measurements. What has run on napster-ai, on 2026-10-20 (RTX 3090 Ti 24 GB +
-RTX 3080 Ti 12 GB + RTX 3080 10 GB, sm_86, driver 580.95.05, CUDA 13.2, gcc 14.2):
+**The real model has run** on napster-ai, 2026-10-22/23: the 3-bit UD-IQ3_XXS file, on a Xeon E5-2699 v4 (22 cores,
+AVX2) with 184 GiB of RAM (MemTotal; 6 x 32 GB, one of the CPU's four memory channels empty), an RTX 3090 Ti 24 GB,
+an RTX 3080 Ti 12 GB and an RTX 3080 10 GB (sm_86, driver 580.95.05, CUDA 13.2, gcc 14.2), the model on SSDs. One
+run each unless it says otherwise:
+
+- **It answers correctly** through the server (step 8): a greeting with its reasoning apart, "391" for 17 x 23 with
+  thinking off, and a `get_weather` call for "What is the weather in Paris right now?".
+- **It predicts text as well as llama.cpp.** On 1,953 tokens of text (`tools/glm53_ref/text.txt`, the start of the
+  README), the CPU reference and llama.cpp's CPU path give a mean negative log-likelihood of 1.7211 and 1.7238 nats
+  per token: a paired difference of -0.0028, 95% interval -0.0137 to +0.0091 (`tools/glm53_nll.py`). Their logits
+  differ by a mean KL of 0.03 to 0.05, as llama.cpp's own CPU and GPU paths do (0.0375): every product rounds its
+  activations to 8 bits, and a difference of 1e-7 flips that rounding for a few values ("Checking against
+  llama.cpp"). The GPU engine was compared on 205 tokens only: +0.0217 nats per token against llama.cpp's CPU
+  path, 95% interval -0.0156 to +0.0615, so no difference shown and none ruled out below about 0.06.
+- **Decode speed** through the server, at `3fea91f`: 14.3 to 16.7 tokens/s on three fresh chat prompts (56% to 70%
+  of the experts used read from VRAM), 17.0 to 17.7 on the second to fourth of four prompts started from the same
+  expert profile. The same server at `04d51fc`, before the three decode commits: 6.5 tokens/s. Calculated from
+  the measured RAM bandwidth (39.5 GB/s to read, about 27 GB/s through the expert kernels) and about 1 GB of
+  experts read from RAM per token, this machine tops out near 18 to 20 tokens/s.
+- **Start-up** with 131,072 tokens of context: the server was ready about 2 minutes after it started, with most of
+  the shards already in the page cache; the warm-up read 103.6 of the experts' 109.9 GB at 1.67 GB/s. A start
+  straight after a reboot (every expert read from the SSDs) was not timed. The layers went 0-22, 23-34 and 35-44
+  (with the output head) to the three cards, and the expert cache took 31.1 GB (3,422 experts over 42 layers).
+- **Not run yet on the real model:** a context longer than about 2,000 tokens (so the indexer's selection of pools
+  has not been compared), long agent sessions, several clients at once, the prompt path's speed beyond short
+  prompts, the 4-bit file, the systemd unit and the Docker image.
+
+The small-model checks before that (2026-10-20 and 2026-10-22):
 
 - the builds: llama.cpp (step 1) and this branch with CUDA (step 2);
 - the CPU reference against llama.cpp on small random models (step 3): all models PASS, KL 0;
@@ -23,9 +48,9 @@ RTX 3080 Ti 12 GB + RTX 3080 10 GB, sm_86, driver 580.95.05, CUDA 13.2, gcc 14.2
   against the CPU reference and against llama.cpp, and conversation parking passed. Against the CPU reference the
   float models differ by under 1e-4 (relative), q4_0 by 0.016 to 0.027 (limit 0.05, mean KL at most 1.4e-6: the
   CUDA rounding llama.cpp's own GPU shows too, "Checking against llama.cpp") and q8_0 by at most 0.011. The small
-  models' two layers went to the RTX 3090 Ti and the RTX 3080; the RTX 3080 Ti got none. Earlier runs that day
-  found two bugs in the check, both fixed: the prefill check's CPU reference had room for the prompt only (5890fde),
-  and its 2% limit was below the CUDA rounding on q4_0;
+  models' two layers went to the RTX 3090 Ti and the RTX 3080; the RTX 3080 Ti ran them alone in a later run
+  (2026-10-22, every check PASS). Earlier runs found two bugs in the check, both fixed: the prefill check's CPU
+  reference had room for the prompt only (5890fde), and its 2% limit was below the CUDA rounding on q4_0;
 - the inspector and the template probe on the real 3-bit file (step 5).
 
 Before that, without a GPU: conversation parking and the whole server on the CPU engine, and the Python and C++
@@ -121,10 +146,10 @@ Every piece is checked against llama.cpp, which has run GLM-5.3-Flash since its 
 |---|---|---|---|
 | M0 | Remove SYCL; GGUF inspector; llama.cpp reference harness | done | inspector output, reference logits |
 | M1 | CPU reference: config and tensors from the GGUF, mHC, KDA, MLA with the k-pool indexer, MoE with sigmoid routing and SwiGLU clamp | done | `tools/glm53_selftest.sh`: all variants PASS |
-| M2 | CUDA: dense projections, mHC, KDA decode, MLA decode with the indexer, routing; layer split over the GPUs | written; on small random models (napster-ai, 2026-10-20) decode matched the CPU reference and llama.cpp within the CUDA rounding, on one card and with the layers split over two; not yet run on the real model | `tools/glm53_gpu_check.sh`; logits vs llama.cpp |
-| M3 | Experts: all in RAM (the mapped GGUF), VRAM cache of the most used, CPU for the rest; the warm-up that reads them into the page cache before READY | written; run only on small random models in the GPU check (napster-ai, 2026-10-20); not yet on the real model, so no tokens/s | logits unchanged; tokens/s |
-| M4 | Prompt processing: batched projections, chunked KDA, batched MLA (causal below 2,051 tokens of context, each query's own selection past that), experts streamed through VRAM | written; on small random models (napster-ai, 2026-10-20, chunks of 16 tokens) it matched the CPU reference within the CUDA rounding; not yet run on the real model | prompt tokens/s; logits unchanged |
-| M5 | Server: Strata's full server (`serve/server.py`: OpenAI, Anthropic and Responses APIs, the web app, MCP, structured output, metrics) on the GLM engine, with GLM's chat template, tool calls (`<arg_key>`/`<arg_value>`) and thinking on or off | ported and reviewed ([GLM53_SERVER_PORT.md](GLM53_SERVER_PORT.md)); tested on the CPU engine (`tools/glm53_server_check.sh`, the Python tests) | Open WebUI and an agent work end to end (step 8) |
+| M2 | CUDA: dense projections, mHC, KDA decode, MLA decode with the indexer, routing; layer split over the GPUs | run: on small random models (napster-ai, 2026-10-20) decode matched the CPU reference and llama.cpp within the CUDA rounding, on one card and split over two; on the real 3-bit file (2026-10-22/23) split over all three cards, 13.16 tokens/s one token at a time on 205 tokens of text, and it predicts that text as well as llama.cpp's CPU path within 0.06 nats per token (205 tokens, "The real model has run") | `tools/glm53_gpu_check.sh`; logits vs llama.cpp |
+| M3 | Experts: all in RAM (the mapped GGUF), VRAM cache of the most used, CPU for the rest; the warm-up that reads them into the page cache before READY | run on the real 3-bit file (napster-ai, 2026-10-22/23): 31.1 GB of experts in VRAM at 131,072 tokens of context, the cache follows the conversation (`--cache-decay 0.95`, `--max-swaps 32`, copies in the background); 14.3 to 17.7 tokens/s through the server with 56% to 70% of the experts used read from VRAM | logits unchanged; tokens/s |
+| M4 | Prompt processing: batched projections, chunked KDA, batched MLA (causal below 2,051 tokens of context, each query's own selection past that), experts streamed through VRAM | written; on small random models (napster-ai, 2026-10-20, chunks of 16 tokens) it matched the CPU reference within the CUDA rounding; on the real file it read the server's short prompts (up to 163 tokens), its speed beyond that not measured | prompt tokens/s; logits unchanged |
+| M5 | Server: Strata's full server (`serve/server.py`: OpenAI, Anthropic and Responses APIs, the web app, MCP, structured output, metrics) on the GLM engine, with GLM's chat template, tool calls (`<arg_key>`/`<arg_value>`) and thinking on or off | ported and reviewed ([GLM53_SERVER_PORT.md](GLM53_SERVER_PORT.md)); tested on the CPU engine (`tools/glm53_server_check.sh`, the Python tests); on the real file (napster-ai, 2026-10-22) it answered a chat, a question with thinking off and a tool call correctly; Open WebUI and the agents not tried yet | Open WebUI and an agent work end to end (step 8) |
 | M6 | Several clients: conversation parking and checkpoints | written, checked on the CPU engine (`tools/glm53_park_check.py`); batching and MTP drafting dropped | speed for 1, 2 and 4 clients |
 | M7 | Remove the Qwen engine and HIP; docs | done: the Qwen engine, HIP and the Qwen docs are removed; the docs describe GLM-5.3-Flash | |
 
@@ -220,17 +245,32 @@ strata-glm-ref differed by up to 0.015 on Q4_0 (seed 21), 0.014 on Q8_0 and 0.00
 machine). Added up that is at most 0.047, 0.022 and 0.0009 (calculated: two worst rows of different runs), within
 the same limits; Q4_0's comes close to its 0.05. `glm53_compare.py`'s defaults would fail it: these models' largest
 logits are about 0.3, so at 0.032 two tokens 0.02 apart can swap, which is no tie. The limits come from the small
-random models; nothing is measured on the real model yet.
+random models.
 
-Step 7 should see no selection difference: up to 2,051 tokens of context the indexer selects every pool, so the
-precision of its keys cannot change what is selected, and step 6's prompt is far shorter (801 bytes of text, so at
-most about 800 tokens). Step 6 runs llama.cpp with its default f16 cache, which keeps the latent as Strata does.
+On the real file the logits cannot be compared this way: they differ by far more than any rounding the small models
+show, between any two paths. On step 6's 205 tokens (napster-ai, 2026-10-22/23) the mean KL was 0.052 between
+Strata's CPU reference and llama.cpp's CPU path, 0.036 between Strata's GPU engine and that path, and 0.0375 and
+0.0165 between llama.cpp's own CPU path and its runs with the GPUs (all three cards, and two cards with two layers'
+experts moved to the CPU). Layer dumps of both CPU paths (`--dump-layers` on both tools,
+`tools/glm53_layers_compare.py`) found where it starts. At the first token layer 0's attention half agreed to
+3.2e-7; the mixer before its FFN, whose Q8_0 product rounds the activations to 8 bits, turned that into 9.3e-6;
+and the dense FFN turned 2.6e-6 at its input into 1.4e-2 at its output. A float64 recomputation of that FFN from
+the file's Q6_K weights reproduced each engine's output from its own input to 3e-7. One of the 4,096 values that
+Q8_K rounding gives the input differed, and that alone made the whole 1.4e-2: the FFN's output is small next to its
+input (RMS 0.0084 against a largest input of 0.55), and Q8_K rounding itself moves it 2.1% from exact arithmetic.
+Through 45 layers such flips add up. So step 7 compares how well the engines predict the text, not their logits
+(`tools/glm53_nll.py`): on 1,953 tokens Strata's CPU reference and llama.cpp's CPU path gave a mean NLL of 1.7211
+and 1.7238 nats per token (paired difference -0.0028, 95% interval -0.0137 to +0.0091).
+
+Step 7 sees no selection difference: up to 2,051 tokens of context the indexer selects every pool, so the precision
+of its keys cannot change what is selected, and step 6's text is shorter. Step 6 runs llama.cpp with its default f16
+cache, which keeps the latent as Strata does.
 
 ## What to run on napster-ai
 
-Each step prints a few lines to paste back. Steps 1-4 need no model download. Steps 0-4 and step 5's inspector ran on
-napster-ai on 2026-10-20, and steps 3 and 4 pass at `fa74d8a`; steps 6-8 have not run yet. Run them from the
-Strata folder.
+Each step prints a few lines to paste back. Steps 1-4 need no model download. Steps 0-5 ran on napster-ai on
+2026-10-20, steps 3 and 4 pass at `fa74d8a`, and steps 6-8 ran on 2026-10-22/23 ("The real model has run"). Run them
+from the Strata folder.
 
 0. **The checkout, the PC check and the tools the steps use.** `./setup.sh --check` checks the GPUs, the driver, the
    RAM, the CPU and the disk, and makes the `.venv` (it asks for sudo when Python's venv is missing); it stops before
@@ -321,33 +361,39 @@ Strata folder.
    on napster-ai"; the 4-bit's are derived). Steps 6-8 need the RAM in place and the Qwen service stopped ("Memory on
    napster-ai").
 
-6. **Reference logits from llama.cpp** on the real model. `--n-cpu-moe` keeps that many layers' experts on the
-   CPU; lower it until VRAM runs out, then raise it by a few:
+6. **Reference logits from llama.cpp** on the real model, on the CPU, for `tools/glm53_ref/text.txt` (7,000 bytes:
+   the start of the README as it was at `dba806b`, 1,954 tokens). On napster-ai it took 2 minutes 51 seconds:
 
    ```bash
-   ~/llama.cpp/build/bin/llama-strata-ref -m ~/models/glm53/<first shard> -f tools/glm53_ref/prompt.txt \
-       -ngl 99 --n-cpu-moe 40 -c 4096 -b 512 -ub 512 \
-       --out ~/glm53-ref/ref.bin --ids-out ~/glm53-ref/ids.txt
+   CUDA_VISIBLE_DEVICES= ~/llama.cpp/build/bin/llama-strata-ref -m ~/models/glm53/<first shard> \
+       -f tools/glm53_ref/text.txt -c 4096 -b 256 -ub 256 \
+       --out ~/glm53-ref/text-ref.bin --ids-out ~/glm53-ref/text-ids.txt
    ```
 
-7. **Strata's GPU engine on the real model**, compared with step 6 (paste both outputs):
+   llama.cpp on the GPUs works too (`-ngl 99 --n-cpu-moe 40`), but its default split puts the last layers, whose
+   experts it keeps in VRAM, on the last card: on napster-ai that ran the RTX 3080 out of memory. Put the largest
+   card last (`CUDA_VISIBLE_DEVICES=2,1,0` there).
+
+7. **Strata's GPU engine on the real model**, compared with step 6 by how well each predicts the text (paste both
+   outputs). It needs the GPUs free, so stop the Strata server first:
 
    ```bash
-   build/strata-glm -m ~/models/glm53/<first shard> --tokens-file ~/glm53-ref/ids.txt --ctx 4096 \
-       --out ~/glm53-ref/strata.bin
-   python tools/glm53_compare.py ~/glm53-ref/ref.bin ~/glm53-ref/strata.bin
+   build/strata-glm -m ~/models/glm53/<first shard> --tokens-file ~/glm53-ref/text-ids.txt --ctx 4096 \
+       --out ~/glm53-ref/text-strata.bin --expert-profile ~/glm53-ref/profile.bin
+   python tools/glm53_nll.py ~/glm53-ref/text-ids.txt ~/glm53-ref/text-ref.bin ~/glm53-ref/text-strata.bin
    ```
 
-   It passes at a mean KL up to 0.01 and 98% top-1 agreement. A row where the engines pick different tokens, but
-   each has the other's within 0.01 of its own, counts as a tie, not a disagreement. The prompt is far below 2,051
-   tokens, up to which the indexer selects every pool, so the indexer's precision makes no difference here
-   ("Checking against llama.cpp").
+   It passes when Strata's mean negative log-likelihood is at most 0.02 nats per token above llama.cpp's, at the
+   upper end of the 95% interval: about a 2% higher perplexity at most. The logits themselves differ between any
+   two paths, llama.cpp's own included, by a mean KL of 0.03 to 0.05 on this file, so `tools/glm53_compare.py`'s
+   limits fail every pair ("Checking against llama.cpp"). The CPU reference passes this step (`build/strata-glm-ref
+   ... -t 16` in place of `strata-glm`: 13 minutes on napster-ai, -0.0028, interval -0.0137 to +0.0091). The GPU
+   engine has run it on 205 tokens only, too few for an interval that narrow; the full text has not run yet.
 
-   This compares one token at a time. The VRAM expert cache starts empty and fills from what the prompt uses, so
-   the first run is the slowest; `--expert-profile ~/glm53-ref/profile.bin` saves the use counts for the next
-   start.
+   This compares one token at a time. The VRAM expert cache starts empty and fills from what the text uses, so the
+   first run is the slowest; `--expert-profile` saves the use counts for the next start.
 
-8. **The server**, once step 7 agrees with llama.cpp. Setup writes the run config and the start script for the
+8. **The server**, once step 7 passes. Setup writes the run config and the start script for the
    shards step 5 downloaded (`--gguf-dir` finds them by their quantization's name, so nothing is downloaded
    again), compiles the engine into `build/` with its own settings (it records the build in `build/BUILD.json`),
    and uses port 8101, which keeps clear of Open WebUI (3000), Portainer (8000) and the UPS dashboard (8080).

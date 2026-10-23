@@ -1,0 +1,101 @@
+<h1 align="center">Strata</h1>
+
+<p align="center"><b>Run GLM-5.3-Flash, a 320-billion-parameter AI model, on one Linux PC</b><br>
+NVIDIA graphics cards and a lot of system RAM · Linux · free and open source</p>
+
+Strata runs **GLM-5.3-Flash** (by Z.ai) on a PC with NVIDIA graphics cards and a lot of system RAM. It has a C++/CUDA
+engine, a server with OpenAI-, Anthropic- and Responses-compatible APIs and a web app, and an installer. Your apps,
+coding agents and bots talk to it as they would to a cloud model, and nothing leaves your PC. Strata is a fork of
+[Niko1221/Strata](https://github.com/Niko1221/Strata), which runs Qwen3.8-Flash-Next on gaming PCs. This fork keeps
+its design, its server and its web app, replaces the engine, and runs GLM-5.3-Flash only.
+
+> **Status: the engine has run on the owner's GPUs, but only on small random test models, not yet on the real
+> model.** There are no measured speeds, load times or memory figures. The sizes on this page come from the real
+> files or are calculated or derived, and they say which. What is checked and what is not: [Status](#status).
+
+## What you need
+
+| | |
+| --- | --- |
+| **Graphics cards** | **NVIDIA**, compute capability 7.5 or newer (GeForce RTX 20 series and newer). One card or several: the model's layers are split over them. Driver **580** or newer for the CUDA 13 toolkit setup installs; 525 or newer when it builds with a CUDA 12 toolkit you have. Setup stops with an older one. |
+| **RAM** | Every expert of the model stays in RAM: 109.9 GB (102.4 GiB) at 3-bit, counted in the real file; about 146 GB (136 GiB) at 4-bit, derived from its download ([Which size](#which-size-should-i-pick)). Setup counts RAM in GiB, as Linux reports it (`free -g`). It wants at least 12 GiB left beside the experts for Linux and the server, and calls a size a good fit when 40 GiB are left. So Linux must report about **114 GiB** at the least for the 3-bit size (a PC with 128 GB installed reports about 125) and about **148 GiB** for the 4-bit size (192 GB installed: about 188). |
+| **Disk** | 120.4 GB free for the 3-bit download, 156.8 GB for the 4-bit one (the repository's listing), and about 10 GB more when setup installs the CUDA toolkit. An SSD helps: the first start after a reboot reads every expert from it. |
+| **System** | **Linux** only: setup stops on any other system. A CPU with **AVX2**: without it setup warns, because the experts the cards do not hold run on the CPU. |
+
+The cards hold everything except the routed experts, plus the attention cache and a cache of the most used experts.
+How much VRAM the part they must hold takes is not measured yet. Setup installs everything else when it is missing:
+Python (through apt, dnf or pacman), the C++ compiler (through apt) and the CUDA toolkit (by itself on Ubuntu 22.04
+and 24.04 only).
+
+**The reference machine** is the owner's PC, napster-ai: a Xeon E5-2699 v4 (AVX2, no AVX-512), 192 GB of DDR4
+(planned; 91 GiB for now), an RTX 3090 Ti 24 GB + RTX 3080 Ti 12 GB + RTX 3080 10 GB (all compute capability 8.6), a
+SATA SSD, Linux. Strata is planned for it: port 8101 (3000, 8000 and 8080 are taken there), contexts up to 512K-1M
+tokens, and four agents, a chat and a Discord bot taking turns on one engine.
+
+The full list: [docs/INSTALL.md](docs/INSTALL.md#what-you-need).
+
+## Install
+
+### Let your AI set it up
+
+Do you use an AI coding assistant (Claude Code, Codex, Cursor, ...)? Paste this into it:
+
+```text
+Set up Strata on this PC for me: https://github.com/Rarebigshot17/Strata (branch glm53-flash) - follow
+docs/AI_SETUP.md in that repository.
+```
+
+It checks your cards, RAM and disk, picks the size that fits, runs setup without questions, starts the server and
+tells you how to connect your apps. The steps it follows: [docs/AI_SETUP.md](docs/AI_SETUP.md).
+
+### Or do it yourself
+
+```bash
+git clone -b glm53-flash https://github.com/Rarebigshot17/Strata.git
+cd Strata
+./setup.sh
+```
+
+(Without git: download [the zip](https://github.com/Rarebigshot17/Strata/archive/refs/heads/glm53-flash.zip), unzip
+it and run `./setup.sh` in the folder.)
+
+`./setup.sh` makes a Python environment in `.venv` and runs `setup.py`. When Python 3.10 or newer is missing, it
+installs it through apt, dnf or pacman first. Setup asks **two questions**: which size (3-bit or 4-bit) and how much
+context. Press Enter for the recommended answer, or pass `--yes` to take them all. Then it does the rest, and skips
+every step that is already done:
+
+1. **Checks your PC:** the NVIDIA cards and driver, the RAM and the CPU. It stops with a plain message when the
+   engine cannot run there.
+2. **Asks the questions** and lists the model's files on Hugging Face
+   ([unsloth/GLM-5.3-Flash-GGUF](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF)), with their sizes. It stops
+   when the disk has too little free space for them.
+3. **Installs the Python packages** into `.venv`.
+4. **Compiles the engine** (`strata-glm`, and the CPU reference `strata-glm-ref`) for your cards, with ggml from
+   llama.cpp's source at a fixed commit. When the C++ compiler or the CUDA toolkit is missing, it asks first and
+   installs them (sudo asks for your password).
+5. **Downloads the model.** A stopped download resumes where it stopped. Each file's size and SHA-256 are checked
+   against the repository's listing. The files go to `Strata-GLM-data/models` next to the Strata folder
+   (`--data-dir` puts them elsewhere; `--gguf-dir` uses files you already have).
+6. **Writes** the run config (`strata-glm-ud-iq3_xxs.json` or `strata-glm-ud-iq4_xs.json`) and a start script
+   (`run-glm-ud-iq3_xxs.sh` or `run-glm-ud-iq4_xs.sh`), and starts the model on port **8101**. Your browser opens
+   the web app when the model is ready.
+
+**How long this takes is not measured yet.** The download depends on your connection: at 100 MB/s, 120 GB takes about
+20 minutes (calculated). Before the server says it is ready, the engine reads every expert into RAM once (the
+warm-up; it prints its progress). From a SATA SSD, at most about 550 MB/s, the 3-bit's 109.9 GB take at least about
+3.3 minutes (calculated). Setup prints its own estimates for the compile and the toolkit install. None of them is
+measured on this version.
+
+**Next time**, run `./setup.sh` again (or the start script). It starts right away and downloads nothing twice.
+Press Ctrl+C, or close the terminal, to stop the model. `./update.sh` updates Strata without starting it.
+`./setup.sh --setup` sets up the other size or changes the answers. `./setup.sh --check` only checks the PC and
+says which size fits. Docker, every option, where the files go and how to update:
+[docs/INSTALL.md](docs/INSTALL.md) ([the run config](docs/INSTALL.md#the-run-config),
+[updating](docs/INSTALL.md#updating)).
+
+## Which size should I pick?
+
+The model's experts are compressed ("quantized") to about 3 or 4 bits. All of them stay in RAM, so your RAM decides.
+The 4-bit size is closer to the full model. How much better its answers are is not measured here.
+
+|

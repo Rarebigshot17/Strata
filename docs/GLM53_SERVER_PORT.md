@@ -203,7 +203,9 @@ the server does with it:
 
 ## Known risks to check on napster-ai
 
-The real model has not run yet; the server is tested on the CPU engine with small random models.
+The real model has run on napster-ai (2026-10-22/23, [GLM53_PORT.md](GLM53_PORT.md)): through this server it
+answered a chat, a question with thinking off and a tool call correctly. The rest is tested on the CPU engine with
+small random models.
 
 - The real GLM-5.3 template is known now (`tools/glm53_template_probe.py` on the real UD-IQ3_XXS GGUF, napster-ai,
   2026-10-20). `serve/chat_template.jinja` is that template, byte for byte, and the tests use it.

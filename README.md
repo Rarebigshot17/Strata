@@ -240,8 +240,20 @@ The longer explanation: [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md).
 
 ## Status
 
-What has run on napster-ai, the owner's PC, on 2026-10-20 (an RTX 3090 Ti 24 GB, an RTX 3080 Ti 12 GB and an
-RTX 3080 10 GB, compute capability 8.6, driver 580.95.05, CUDA 13.2, gcc 14.2):
+**The real model runs.** On napster-ai, the owner's PC (a Xeon E5-2699 v4 with 184 GiB of RAM, an RTX 3090 Ti 24 GB,
+an RTX 3080 Ti 12 GB and an RTX 3080 10 GB), on 2026-10-22/23, with the 3-bit file:
+
+- **Answers:** correct through the server, with its reasoning apart, with thinking off, and with a tool call.
+- **Quality:** it predicts text as well as llama.cpp. On 1,953 tokens, Strata's CPU reference and llama.cpp's CPU
+  path differ by -0.0028 nats per token in mean negative log-likelihood (95% interval -0.0137 to +0.0091). The GPU
+  engine was compared on 205 tokens only (+0.022, interval -0.016 to +0.062).
+- **Speed:** 14 to 18 tokens/s while it writes a chat answer, with 56% to 70% of the experts it uses read from VRAM.
+  About 18 to 20 tokens/s is this PC's limit (calculated from its measured RAM bandwidth).
+- **Start-up:** ready about 2 minutes after the start with most of the files in Linux's page cache. A start straight
+  after a reboot was not timed.
+
+The details: [docs/GLM53_PORT.md](docs/GLM53_PORT.md) ("The real model has run"). Before that, on 2026-10-20 (driver
+580.95.05, CUDA 13.2, gcc 14.2):
 
 - **The builds:** llama.cpp and the engine (`strata-glm`, `strata-glm-ref`), compiled with CUDA.
 - **The CPU reference** (`strata-glm-ref`) against llama.cpp on small random GLM-5.3-Flash models: every model
@@ -249,9 +261,9 @@ RTX 3080 10 GB, compute capability 8.6, driver 580.95.05, CUDA 13.2, gcc 14.2):
 - **The GPU engine** (`strata-glm`) on the same small models (`tools/glm53_gpu_check.sh`): its decode and its
   prompt path matched the CPU reference and llama.cpp, within the rounding that llama.cpp's own GPU shows, on one
   card and with the layers split over two of the three. Conversation parking passed there too.
-- **The real 3-bit file, read but not run:** `tools/glm53_inspect.py` read its shapes and its expert types and
-  sizes, and `tools/glm53_template_probe.py` its special tokens and chat template. The server's tokenizer agrees
-  with llama.cpp's on 21 of 21 strings. The server ships the real file's chat template, and the tests use it.
+- **The real 3-bit file:** `tools/glm53_inspect.py` read its shapes and its expert types and sizes, and
+  `tools/glm53_template_probe.py` its special tokens and chat template. The server's tokenizer agrees with
+  llama.cpp's on 21 of 21 strings. The server ships the real file's chat template, and the tests use it.
 
 What is checked without a GPU:
 
@@ -265,11 +277,13 @@ What is checked without a GPU:
 
 What is **not** checked yet:
 
-- **The real model** has not run in Strata: it needs more RAM on napster-ai (91 GiB for now, 192 GB planned). So
-  the GPU engine's logits have not been compared with llama.cpp's on it.
-- **No speed, load time or memory use is measured.** Every such figure in these docs is calculated or derived, and
-  says so.
-- **A full install** that ends with the real model answering has not run yet.
+- **Long contexts** on the real model: nothing past about 2,000 tokens has run, so the indexer's selection of what
+  to attend to has not been compared with llama.cpp's there.
+- **Long agent sessions and several clients at once** on the real model, and the prompt's reading speed beyond
+  short prompts.
+- **The 4-bit file**, a setup that downloads the files itself, the systemd unit and the Docker image. (Setup with
+  `--gguf-dir`, on files already downloaded, ran on napster-ai.)
+- Figures in these docs that are not from these runs are calculated or derived, and say so.
 
 The steps that check these on napster-ai, one by one: [docs/GLM53_PORT.md](docs/GLM53_PORT.md) ("What to run on
 napster-ai"). The server port's decisions, the engine protocol and the plan's state:

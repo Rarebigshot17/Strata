@@ -4,8 +4,9 @@ Problems with Strata on GLM-5.3-Flash (Linux, NVIDIA GPUs) and what to do about 
 lines are the messages that setup, the server and the engine print, so you can search this page for the words you
 see. Back to the [README](../README.md#something-went-wrong).
 
-The real model has not run yet, so this page has no measured times, speeds or memory figures.
-Where a fix depends on how long something takes, it says which line of the log to look at instead.
+The real model has run on one PC only (napster-ai: ready about 2 minutes after the start with the files in the page
+cache, 14 to 18 tokens/s in chat), so this page has few measured times. Where a fix depends on how long something
+takes, it says which line of the log to look at instead.
 
 ## Reading the log
 

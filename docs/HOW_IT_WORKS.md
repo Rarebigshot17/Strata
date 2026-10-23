@@ -6,9 +6,9 @@ for, have 46 GB together. Strata makes the model fit by **sharing the work acros
 kitchen: the things you use all the time stay on the counter, and the rest waits in the pantry. Back to the
 [README](../README.md).
 
-The real model has not run yet, and there are no measured speeds; on napster-ai's cards the engine has run small
-random test models. The sizes on this page come from the real files or are calculated or derived, and say which;
-[How it is checked](#how-it-is-checked) says what has run.
+The real model has run on one PC, napster-ai: the 3-bit file at 14 to 18 tokens/s in chat. The sizes on this page
+come from the real files or are calculated or derived, and say which; [How it is checked](#how-it-is-checked) says
+what has run.
 
 ## Who does what
 
@@ -98,11 +98,15 @@ What has run on napster-ai's three cards (2026-10-20), on the same small random 
   activations that llama.cpp's own GPU shows too, on one card and with the layers split over two of the three.
 - **Conversation parking** on the GPU engine, with the layers split over two cards: passed.
 
-What waits for more RAM on napster-ai:
+The real 3-bit file on napster-ai (2026-10-22/23, after its RAM went to 184 GiB):
 
-- **The real model:** its logits compared with llama.cpp's (`tools/glm53_compare.py`), then its speed, load time
-  and memory.
-- The steps, and what each one has shown so far: [GLM53_PORT.md](GLM53_PORT.md).
+- **Quality:** Strata predicts text as well as llama.cpp. Their logits differ by more than on the small models,
+  but llama.cpp's own CPU and GPU paths differ as much: the file's 2- and 3-bit experts make every product round
+  its activations to 8 bits, and tiny differences flip a few of those roundings. So the check compares how well
+  each predicts 1,953 tokens of text (`tools/glm53_nll.py`): the same within 0.014 nats per token.
+- **Speed:** 14 to 18 tokens/s in chat, with two thirds of the experts each token uses already in VRAM.
+- **Not yet:** contexts past about 2,000 tokens, long agent sessions, several clients at once.
+- The steps, and what each one has shown: [GLM53_PORT.md](GLM53_PORT.md).
 
 ## Credits
 

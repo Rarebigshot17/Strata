@@ -4,8 +4,10 @@ This is the reference for using Strata's server: every route, the request fields
 how several clients share the engine, monitoring, security and limits. How the engine works is in
 [HOW_IT_WORKS.md](HOW_IT_WORKS.md); installing is in [INSTALL.md](INSTALL.md).
 
-**What has been checked so far.** The real GLM-5.3-Flash model has not run yet, so this page has no measured speeds,
-load times or memory figures. Figures marked "calculated" come from the model's shapes. What is checked: the
+**What has been checked so far.** The real GLM-5.3-Flash model has run on one PC (napster-ai, 2026-10-22/23, the
+3-bit file): it answers correctly through this server, predicts text as well as llama.cpp, and decodes 14 to 18
+tokens/s in chat ([GLM53_PORT.md](GLM53_PORT.md), "The real model has run"). Other figures on this page are
+marked "calculated" (from the model's shapes) or say where they come from. Also checked: the
 server's behaviour by its Python tests (a scripted engine stands in for the model), the server end to end on the CPU
 reference engine with a small random GLM model (`tools/glm53_server_check.sh`), conversation parking
 (`tools/glm53_park_check.py`) and the CPU reference against llama.cpp (`tools/glm53_selftest.sh`). On napster-ai's

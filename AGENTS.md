@@ -7,13 +7,12 @@ web app (`serve/`), and an installer (`setup.py`, started by `./setup.sh`). It i
 [Niko1221/Strata](https://github.com/Niko1221/Strata), which ran Qwen3.8-Flash-Next. The Qwen engine, AMD (HIP),
 the Windows launchers, vision, batching, replicas, MTP drafting, the speed projection and slot save/restore are gone.
 
-**The real model has not run yet (it waits for more RAM on napster-ai), so there is no speed, load time or memory
-measurement.** What has run, on napster-ai on 2026-10-20 (RTX 3090 Ti 24 GB + RTX 3080 Ti 12 GB + RTX 3080 10 GB,
-sm_86, driver 580.95.05, CUDA 13.2, gcc 14.2): the builds; the CPU reference against llama.cpp on small random
-models (all PASS, KL 0); the GPU check on the same models (three runs at `fa74d8a`: every model's decode and prompt
-path matched the CPU reference and llama.cpp within the CUDA rounding that llama.cpp's own GPU shows, and
-conversation parking passed; the models' two layers went to the RTX 3090 Ti and the RTX 3080); and the inspector
-and the template probe on the real file. Do not write a speed, load time or memory figure as measured.
+**The real model has run** on napster-ai (2026-10-22/23: the 3-bit file on a Xeon E5-2699 v4, 184 GiB of RAM, an
+RTX 3090 Ti 24 GB + RTX 3080 Ti 12 GB + RTX 3080 10 GB, sm_86). It answers correctly through the server, predicts
+text as well as llama.cpp (the CPU reference on 1,953 tokens: mean NLL within 0.014 nats per token, 95% interval),
+and decodes 14 to 18 tokens/s in chat. What was measured, on what, and what has not run:
+[docs/GLM53_PORT.md](docs/GLM53_PORT.md) ("The real model has run"). Every other speed, load time or memory figure
+is calculated or derived and says so; write a new one as measured only with what it was measured on.
 A figure calculated from the model's shapes says that it is calculated; one derived from another says so.
 
 ## Installing Strata for a user

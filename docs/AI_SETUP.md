@@ -7,10 +7,11 @@ is [INSTALL.md](INSTALL.md).
 
 Work through the steps in order. Tell the user what you are doing in plain words.
 
-> **The real model has not run yet.** The project has no measured speeds, load times or memory figures: the engine
-> has run on GPUs only on small random test models. The sizes below come from the repository's listing and the real
-> 3-bit file, or are derived or calculated, as each says. Do not promise the user a speed or a load time. If you
-> time something on their PC, say what you timed and that it was one run on their PC.
+> **The real model has run on one PC only** (napster-ai, the 3-bit file: 14 to 18 tokens/s in chat, ready about 2
+> minutes after the start with the files in Linux's page cache; [GLM53_PORT.md](GLM53_PORT.md)). Another PC's
+> speed depends on its RAM bandwidth and its cards, so do not promise the user a speed or a load time. The sizes
+> below come from the repository's listing and the real 3-bit file, or are derived or calculated, as each says. If
+> you time something on their PC, say what you timed and that it was one run on their PC.
 
 ## 0. Rules
 

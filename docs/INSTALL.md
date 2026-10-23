@@ -4,17 +4,15 @@ Everything about installing, starting, updating and configuring Strata: GLM-5.3-
 system RAM. The short version is in the [README](../README.md#install). An AI coding assistant can do all of this for
 you with [AI_SETUP.md](AI_SETUP.md).
 
-> **The real model has not run yet.** There are no measured speeds, load times or memory figures. The sizes on this
-> page come from the repository's listing and the real 3-bit file, or are derived or calculated, and each says which;
-> setup's own figures come from `setup.py`. What has run on napster-ai (2026-10-20): the builds; on small random GLM
-> models, the CPU reference against llama.cpp (`tools/glm53_selftest.sh`), the GPU engine on its three RTX 30 cards
-> against both (`tools/glm53_gpu_check.sh`: decode and the prompt path matched, within the CUDA rounding) and
-> conversation parking on the GPU engine (`tools/glm53_park_check.py`); and the
-> inspector and the template probe on the real file. Checked without a GPU: the server end to end on the CPU engine
-> (`tools/glm53_server_check.sh`), the Python tests, the engine's C++ unit tests (`ctest`) and setup's own tests
-> (`tools/test_setup_*.py`, which mock the GPUs, the downloads and the build). A full install with setup, the
-> systemd unit and the Docker image below have not been run on a real machine yet. The steps still to run on a real
-> machine are in [GLM53_PORT.md](GLM53_PORT.md).
+> **The real model has run once, on one PC** (napster-ai, 2026-10-22/23: the 3-bit file, a Xeon E5-2699 v4 with 184
+> GiB of RAM and three RTX 30 cards): setup with `--gguf-dir` on the downloaded files, then the server, which
+> answered correctly, at 14 to 18 tokens/s in chat, ready about 2 minutes after the start with the files in the page
+> cache ([GLM53_PORT.md](GLM53_PORT.md), "The real model has run"). Other speeds, load times and memory figures on
+> this page are calculated or derived, and say so; the sizes come from the repository's listing and the real 3-bit
+> file, setup's own figures from `setup.py`. Also checked: the CPU reference and the GPU engine against llama.cpp on
+> small random models, and without a GPU the server end to end on the CPU engine, the Python tests, the engine's
+> C++ unit tests and setup's own tests (which mock the GPUs, the downloads and the build). Not run yet: a setup that
+> downloads the files itself, the 4-bit file, and the systemd unit and the Docker image below.
 
 > **On this page:** [What you need](#what-you-need) · [Install with ./setup.sh](#install-with-setupsh) ·
 > [Setup's options](#setups-options) · [Where files go](#where-files-go) · [The build](#the-build) ·
