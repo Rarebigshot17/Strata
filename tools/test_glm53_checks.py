@@ -9,6 +9,7 @@ GGUF lacks is read_config's.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -79,6 +80,8 @@ STUBS = {
     "sb/strata-glm-ref": 'python3 "$FAKE/write_logits.py" "$out"\n',
     "sb/strata-glm": 'if gpu_full; then echo "strata-glm: cudaSetDevice: out of memory" >&2; exit 1; fi\n'
                      'case " $* " in\n'
+                     '  *" --pin-experts "*) echo "experts in page-locked RAM: 2 of 2 MoE layers, 0.1 GB" >&2\n'
+                     '     echo "check-prefill: top-1 agreement 5/5: PASS";;\n'
                      '  *" --prefill "*) echo "check-prefill: top-1 agreement 5/5: PASS";;\n'
                      '  *) python3 "$FAKE/write_logits.py" "$out"\n'
                      '     echo "GPU 0: layers 0-1, 1.21 GB weights and buffers"\n'
@@ -183,7 +186,16 @@ class Checks(unittest.TestCase):
         rc, out = self.run_script("glm53_gpu_check.sh", FAKE_SMI="0, 23900\\n1, 11800\\n2, 9800\\n")
         self.assertEqual(rc, 0, out)
         self.assertEqual(out.count("vs llama.cpp: rows 40"), len(GPU_MODELS), out)
-        self.assertEqual(out.count("check-prefill:"), len(GPU_MODELS), out)
+        # each model's runs: decode, the prompt path, it 6 rows at a time, both with the latent cache in RAM, and
+        # the prompt path with the experts page-locked
+        for line in ("prefill: check-prefill: top-1 agreement 5/5: PASS",
+                     "prefill, 6 rows at a time: check-prefill: top-1 agreement 5/5: PASS",
+                     "latent cache in RAM: check-cpu: top-1 agreement 40/40: PASS",
+                     "prefill, latent cache in RAM: check-prefill: top-1 agreement 5/5: PASS",
+                     "prefill, experts page-locked: experts in page-locked RAM: 2 of 2 MoE layers, 0.1 GB; "
+                     "check-prefill: top-1 agreement 5/5: PASS"):
+            self.assertEqual(len(re.findall("^" + re.escape(line) + "$", out, re.M)), len(GPU_MODELS), line + "\n" + out)
+        self.assertEqual(out.count("check-prefill:"), 4 * len(GPU_MODELS), out)
         self.assertIn("parking: 6 turns, all PASS", out)
         self.assertNotIn("Traceback", out)
 
@@ -192,7 +204,7 @@ class Checks(unittest.TestCase):
         # them is the one that says PASS or FAIL, and must not be cut off with them
         rc, out = self.run_script("glm53_gpu_check.sh", FAKE_SMI="0, 23900\\n", FAKE_LAYERS="20")
         self.assertEqual(rc, 0, out)
-        self.assertEqual(out.count("check-cpu: top-1 agreement 40/40: PASS"), len(GPU_MODELS), out)
+        self.assertEqual(len(re.findall("^check-cpu: top-1 agreement 40/40: PASS$", out, re.M)), len(GPU_MODELS), out)
         self.assertEqual(out.count("residual differs"), 4 * len(GPU_MODELS), out)
         self.assertEqual(out.count("(16 more positions where a layer differs)"), len(GPU_MODELS), out)
 
