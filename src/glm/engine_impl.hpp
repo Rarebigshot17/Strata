@@ -132,6 +132,12 @@ struct DevCtx {
     cudaEvent_t ev_xready = nullptr;         ///< the rows are ready on this card's stream
     // copying from page-locked RAM to this card (GB/s): alone, and with every card copying at once
     double link_solo = 0, link_all = 0;
+    // --prefill-spread: this card's share of a layer's streamed experts, copied in while the layer's attention half
+    // runs (pf_slots experts of blob_max bytes), each slot's copy done event, and this card done with the pool
+    uint8_t* pf_pool = nullptr;
+    int pf_slots = 0;
+    std::vector<cudaEvent_t> pf_ev;
+    cudaEvent_t ev_pf_free = nullptr;
 };
 
 struct GpuEngine::Impl {
@@ -181,6 +187,8 @@ struct GpuEngine::Impl {
     bool spread = false;                         ///< --prefill-spread with more than one card
     std::vector<std::vector<char>> same_link;    ///< cards that share one link to RAM (measure_links)
     std::vector<std::vector<int>> help_order;    ///< per card: the cards that help it, its own first (--decode-help)
+    int64_t pf_layer = -1;                       ///< the layer whose streamed experts were copied in ahead
+    std::vector<int> pf_card, pf_slot;           ///< per expert of it: the card and pool slot, or -1
 
     Impl(const Model& model, const EngineOptions& o) : m(model), c(model.config()), opt(o) {}
 };

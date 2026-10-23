@@ -156,6 +156,41 @@ void measure_links(std::vector<DevCtx>& ctx, const Model& model, const Config& c
     }
 }
 
+/// Shares experts out over the cards by when each would be done with them: a card's copying (an expert's `blob` bytes
+/// over its link with every card copying) and computing (rows over its multiprocessors) run side by side, so it is
+/// done at the later of the two; a helper (not `owner`) also pays `xfer_s` once, for the chunk's rows and its sum
+/// going card to card. `rows[i]` is item i's rows (kExpertRows included), taken in the order given; `comp` the
+/// seconds each card computes already; `room[k]` how many more items card k takes (-1: no limit). Returns each
+/// item's card, or -1 where no card had room.
+std::vector<int> share_out(const std::vector<double>& rows, double blob, const std::vector<DevCtx>& ctx, int owner,
+                           double xfer_s, std::vector<double> comp, std::vector<int> room) {
+    const size_t nd = ctx.size();
+    std::vector<double> copy(nd, 0.0);
+    std::vector<char> used(nd, 0);
+    used[(size_t) owner] = 1;
+    std::vector<int> out(rows.size(), -1);
+    for (size_t i = 0; i < rows.size(); ++i) {
+        int best = -1;
+        double best_t = 1e30;
+        for (size_t k = 0; k < nd; ++k) {
+            if (room[k] == 0) continue;
+            const double cp = copy[k] + blob / (ctx[k].link_all * 1e9) + (used[k] ? 0.0 : xfer_s);
+            const double t = std::max(cp, comp[k] + rows[i] * kRowSmSeconds / ctx[k].sms);
+            if (t < best_t) {
+                best_t = t;
+                best = (int) k;
+            }
+        }
+        if (best < 0) continue;
+        copy[(size_t) best] += blob / (ctx[(size_t) best].link_all * 1e9) + (used[(size_t) best] ? 0.0 : xfer_s);
+        comp[(size_t) best] += rows[i] * kRowSmSeconds / ctx[(size_t) best].sms;
+        used[(size_t) best] = 1;
+        if (room[(size_t) best] > 0) --room[(size_t) best];
+        out[i] = best;
+    }
+    return out;
+}
+
 }  // namespace
 
 void GpuEngine::setup_prefill() {
@@ -341,6 +376,28 @@ void GpuEngine::setup_prefill() {
             I.help_order[ci].insert(I.help_order[ci].end(), others.begin(), others.end());
         }
     }
+    // --prefill-spread: each card's pool for its share of a layer's streamed experts, sized by its link's part of
+    // all the links (with every card copying), a quarter more, at most every expert of a layer
+    if (I.spread && I.blob_max) {
+        double all = 0;
+        for (const auto& d : I.ctx) all += d.link_all;
+        std::string line = "prefill spread: experts copied in ahead into";
+        for (auto& d : I.ctx) {
+            ok(cudaSetDevice(d.id), "cudaSetDevice");
+            const double part = all > 0 ? d.link_all / all : 1.0 / (double) I.ctx.size();
+            d.pf_slots = (int) std::min<int64_t>(NE, (int64_t) std::ceil(1.25 * part * (double) NE) + 4);
+            d.pf_pool = dalloc<uint8_t>((size_t) d.pf_slots * I.blob_max, &d.bytes);
+            d.pf_ev.resize((size_t) d.pf_slots);
+            for (auto& ev : d.pf_ev) ok(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming), "cudaEventCreate");
+            ok(cudaEventCreateWithFlags(&d.ev_pf_free, cudaEventDisableTiming), "cudaEventCreate");
+            ok(cudaEventRecord(d.ev_pf_free, d.stream), "cudaEventRecord");
+            char buf[96];
+            std::snprintf(buf, sizeof buf, " GPU %d %d experts (%.2f GB);", d.id, d.pf_slots,
+                          (double) d.pf_slots * I.blob_max / 1e9);
+            line += buf;
+        }
+        if (I.opt.verbose) std::fprintf(stderr, "%s\n", line.c_str());
+    }
     if (const char* pv = std::getenv("STRATA_GLM_PROFILE")) {
         long long from = -1;
         int n = 0;
@@ -439,6 +496,59 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
         void* s = d.stream;
         gpu::GemmCtx& G = *d.gemm;
         const int64_t H = c.n_head[(size_t) il];
+
+        // ---- --prefill-spread: the layer's streamed experts start copying in now, while its attention half runs
+        // (the links are idle then). The routing is not known yet, but a chunk of T tokens routes T * k picks over
+        // the layer's experts, so at T * k >= 4 * experts nearly all of them are used (each unused with probability
+        // about exp(-T * k / experts), 2% at 4): every expert the VRAM cache does not hold is shared out as if each
+        // had the same rows, each card copying its share into its pool after it is done with the pool's last use.
+        I.pf_layer = -1;
+        if (I.spread && !c.is_dense(il) && I.experts_pinned[(size_t) il] && I.ctx[0].pf_pool &&
+            (int64_t) T * c.n_expert_used >= 4 * c.n_expert && I.cache->layer(il).cacheable) {
+            NvtxRange r_pf("routed experts: copied in ahead");
+            const ExpertSlots& es = I.cache->layer(il);
+            const LayerWeights& lw = m.layer(il);
+            const int64_t NE = c.n_expert;
+            const size_t nd = I.ctx.size();
+            const double blob = (double) (es.down_off + es.down.row_bytes * (size_t) es.down.n_out);
+            const double xfer_s = 2.0 * (double) ((int64_t) T * E) * sizeof(float) / (kCardToCardGBs * 1e9);
+            const double rows_e = (double) T * (double) c.n_expert_used / (double) NE + kExpertRows;
+            std::vector<double> comp(nd, 0.0), rows;
+            std::vector<int64_t> streamed;
+            for (int64_t e = 0; e < NE; ++e) {
+                if (I.cache->slot(il, (int) e) >= 0) comp[(size_t) ci] += rows_e * kRowSmSeconds / d.sms;
+                else streamed.push_back(e);
+            }
+            rows.assign(streamed.size(), rows_e);
+            std::vector<int> room(nd);
+            for (size_t k = 0; k < nd; ++k) room[k] = I.ctx[k].pf_slots;
+            const std::vector<int> to = share_out(rows, blob, I.ctx, ci, xfer_s, comp, room);
+            I.pf_card.assign((size_t) NE, -1);
+            I.pf_slot.assign((size_t) NE, -1);
+            std::vector<int> next(nd, 0);
+            for (size_t q = 0; q < streamed.size(); ++q) {
+                if (to[q] < 0) continue;                     // no room: streamed after the routing, as before
+                const int64_t e = streamed[q];
+                const size_t k = (size_t) to[q];
+                DevCtx& h = I.ctx[k];
+                ok(cudaSetDevice(h.id), "cudaSetDevice");
+                if (next[k] == 0) ok(cudaStreamWaitEvent(h.copy_stream, h.ev_pf_free, 0), "cudaStreamWaitEvent");
+                const int slot = next[k]++;
+                uint8_t* base = h.pf_pool + (size_t) slot * I.blob_max;
+                const Tensor g = lw.gate_exps.slice2(e), u = lw.up_exps.slice2(e), dn = lw.down_exps.slice2(e);
+                const size_t db = es.down.row_bytes * (size_t) es.down.n_out;
+                ok(cudaMemcpyAsync(base, g.data, es.up_off, cudaMemcpyHostToDevice, h.copy_stream), "expert ahead");
+                ok(cudaMemcpyAsync(base + es.up_off, u.data, es.down_off - es.up_off, cudaMemcpyHostToDevice,
+                                   h.copy_stream), "expert ahead");
+                ok(cudaMemcpyAsync(base + es.down_off, dn.data, db, cudaMemcpyHostToDevice, h.copy_stream),
+                   "expert ahead");
+                ok(cudaEventRecord(h.pf_ev[(size_t) slot], h.copy_stream), "cudaEventRecord");
+                I.pf_card[(size_t) e] = (int) k;
+                I.pf_slot[(size_t) e] = slot;
+            }
+            I.pf_layer = il;
+            ok(cudaSetDevice(d.id), "cudaSetDevice");
+        }
 
         // ---- attention half, Ta tokens at a time (the KDA state, the latent cache and the pooled keys carry over
         // from one to the next as from chunk to chunk)
@@ -762,45 +872,45 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
                 // weighted sum of their experts' outputs, which is added after this card's own.
                 std::vector<int> dev_of((size_t) NE, ci);
                 std::vector<int> helpers;
+                const bool pf = I.pf_layer == il;                  // copied in ahead (the top of the layer)
                 if (I.spread && I.experts_pinned[(size_t) il]) {
                     // each card's copying (bytes over its link with every card copying) and computing (rows over
                     // its multiprocessors) run side by side, so it is done at the later of the two; a helper also
                     // takes the chunk's rows and gives back its sum, card to card through RAM. Each streamed expert,
                     // the biggest first, goes where it would be done soonest.
                     const size_t nd = I.ctx.size();
-                    const double blob = (double) (es.down_off + es.down.row_bytes * (size_t) es.down.n_out);
-                    const double xfer_s = 2.0 * (double) (T * E) * sizeof(float) / (kCardToCardGBs * 1e9);
-                    std::vector<double> copy_s(nd, 0.0), comp_s(nd, 0.0);
                     std::vector<char> used(nd, 0);
-                    used[(size_t) ci] = 1;
-                    std::vector<int64_t> streamed;
-                    for (int64_t e = 0; e < NE; ++e) {
-                        const int64_t mc = off[(size_t) e + 1] - off[(size_t) e];
-                        if (mc == 0) continue;
-                        if (I.cache->slot(il, (int) e) >= 0)
-                            comp_s[(size_t) ci] += (double) (mc + kExpertRows) * kRowSmSeconds / d.sms;
-                        else streamed.push_back(e);
-                    }
-                    std::stable_sort(streamed.begin(), streamed.end(), [&](int64_t x, int64_t y) {
-                        return off[(size_t) x + 1] - off[(size_t) x] > off[(size_t) y + 1] - off[(size_t) y];
-                    });
-                    for (int64_t e : streamed) {
-                        const double rows = (double) (off[(size_t) e + 1] - off[(size_t) e] + kExpertRows);
-                        size_t best = (size_t) ci;
-                        double best_t = 1e30;
-                        for (size_t k = 0; k < nd; ++k) {
-                            const DevCtx& h = I.ctx[k];
-                            const double cp = copy_s[k] + blob / (h.link_all * 1e9) + (used[k] ? 0.0 : xfer_s);
-                            const double t = std::max(cp, comp_s[k] + rows * kRowSmSeconds / h.sms);
-                            if (t < best_t) {
-                                best_t = t;
-                                best = k;
+                    if (pf) {
+                        // copied in ahead (the top of the layer): each used expert where it was sent, the rest (none
+                        // or few) streamed by this card as before
+                        for (int64_t e = 0; e < NE; ++e)
+                            if (off[(size_t) e + 1] > off[(size_t) e] && I.pf_card[(size_t) e] >= 0) {
+                                dev_of[(size_t) e] = I.pf_card[(size_t) e];
+                                used[(size_t) I.pf_card[(size_t) e]] = 1;
                             }
+                    } else {
+                        const double blob = (double) (es.down_off + es.down.row_bytes * (size_t) es.down.n_out);
+                        const double xfer_s = 2.0 * (double) (T * E) * sizeof(float) / (kCardToCardGBs * 1e9);
+                        std::vector<double> comp(nd, 0.0), rows;
+                        std::vector<int64_t> streamed;
+                        for (int64_t e = 0; e < NE; ++e) {
+                            const int64_t mc = off[(size_t) e + 1] - off[(size_t) e];
+                            if (mc == 0) continue;
+                            if (I.cache->slot(il, (int) e) >= 0)
+                                comp[(size_t) ci] += (double) (mc + kExpertRows) * kRowSmSeconds / d.sms;
+                            else streamed.push_back(e);
                         }
-                        copy_s[best] += blob / (I.ctx[best].link_all * 1e9) + (used[best] ? 0.0 : xfer_s);
-                        comp_s[best] += rows * kRowSmSeconds / I.ctx[best].sms;
-                        used[best] = 1;
-                        dev_of[(size_t) e] = (int) best;
+                        std::stable_sort(streamed.begin(), streamed.end(), [&](int64_t x, int64_t y) {
+                            return off[(size_t) x + 1] - off[(size_t) x] > off[(size_t) y + 1] - off[(size_t) y];
+                        });
+                        for (int64_t e : streamed) rows.push_back((double) (off[(size_t) e + 1] - off[(size_t) e] +
+                                                                             kExpertRows));
+                        const std::vector<int> to = share_out(rows, blob, I.ctx, ci, xfer_s, comp,
+                                                              std::vector<int>(nd, -1));
+                        for (size_t q = 0; q < streamed.size(); ++q) {
+                            dev_of[(size_t) streamed[q]] = to[q];
+                            used[(size_t) to[q]] = 1;
+                        }
                     }
                     for (size_t k = 0; k < nd; ++k)
                         if ((int) k != ci && used[k]) helpers.push_back((int) k);
@@ -861,19 +971,26 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
                             for (size_t q = 0; q < mine.size(); ++q) {
                                 const int64_t e = mine[q];
                                 const int mc = (int) (off[(size_t) e + 1] - off[(size_t) e]);
-                                uint8_t* base = h.dstage[hb];
-                                const Tensor g = lw.gate_exps.slice2(e), u = lw.up_exps.slice2(e),
-                                             dn = lw.down_exps.slice2(e);
-                                const size_t db = es.down.row_bytes * (size_t) es.down.n_out;
-                                ok(cudaStreamWaitEvent(h.copy_stream, h.ev_free[hb], 0), "cudaStreamWaitEvent");
-                                ok(cudaMemcpyAsync(base, g.data, es.up_off, cudaMemcpyHostToDevice, h.copy_stream),
-                                   "expert upload");
-                                ok(cudaMemcpyAsync(base + es.up_off, u.data, es.down_off - es.up_off,
-                                                   cudaMemcpyHostToDevice, h.copy_stream), "expert upload");
-                                ok(cudaMemcpyAsync(base + es.down_off, dn.data, db, cudaMemcpyHostToDevice,
-                                                   h.copy_stream), "expert upload");
-                                ok(cudaEventRecord(h.ev_copied[hb], h.copy_stream), "cudaEventRecord");
-                                ok(cudaStreamWaitEvent(h.stream, h.ev_copied[hb], 0), "cudaStreamWaitEvent");
+                                const bool ahead = pf && I.pf_slot[(size_t) e] >= 0;
+                                uint8_t* base = ahead ? h.pf_pool + (size_t) I.pf_slot[(size_t) e] * I.blob_max
+                                                      : h.dstage[hb];
+                                if (ahead) {                       // copied in ahead: wait for its copy only
+                                    ok(cudaStreamWaitEvent(h.stream, h.pf_ev[(size_t) I.pf_slot[(size_t) e]], 0),
+                                       "cudaStreamWaitEvent");
+                                } else {
+                                    const Tensor g = lw.gate_exps.slice2(e), u = lw.up_exps.slice2(e),
+                                                 dn = lw.down_exps.slice2(e);
+                                    const size_t db = es.down.row_bytes * (size_t) es.down.n_out;
+                                    ok(cudaStreamWaitEvent(h.copy_stream, h.ev_free[hb], 0), "cudaStreamWaitEvent");
+                                    ok(cudaMemcpyAsync(base, g.data, es.up_off, cudaMemcpyHostToDevice,
+                                                       h.copy_stream), "expert upload");
+                                    ok(cudaMemcpyAsync(base + es.up_off, u.data, es.down_off - es.up_off,
+                                                       cudaMemcpyHostToDevice, h.copy_stream), "expert upload");
+                                    ok(cudaMemcpyAsync(base + es.down_off, dn.data, db, cudaMemcpyHostToDevice,
+                                                       h.copy_stream), "expert upload");
+                                    ok(cudaEventRecord(h.ev_copied[hb], h.copy_stream), "cudaEventRecord");
+                                    ok(cudaStreamWaitEvent(h.stream, h.ev_copied[hb], 0), "cudaStreamWaitEvent");
+                                }
                                 DevMatrix Gm = es.gate, Um = es.up, Dm = es.down;
                                 Gm.w = base;
                                 Um.w = base + es.up_off;
@@ -885,9 +1002,12 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
                                 HG.gemm(Dm, hfact, mc, hey, hs);
                                 gpu::scatter_add_w_rows(hey, h.d_idx + hoff[q], h.d_wrow + hoff[q], h.y_part, mc,
                                                         (int) E, hs);
-                                ok(cudaEventRecord(h.ev_free[hb], h.stream), "cudaEventRecord");
-                                hb ^= 1;
+                                if (!ahead) {
+                                    ok(cudaEventRecord(h.ev_free[hb], h.stream), "cudaEventRecord");
+                                    hb ^= 1;
+                                }
                             }
+                            if (pf) ok(cudaEventRecord(h.ev_pf_free, h.stream), "cudaEventRecord");
                             ok(cudaMemcpyPeerAsync(d.y_recv[(size_t) k], d.id, h.y_part, h.id,
                                                    (size_t) (T * E) * sizeof(float), h.stream), "partial sum back");
                             ok(cudaEventRecord(h.ev_y, h.stream), "cudaEventRecord");
@@ -909,6 +1029,10 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
                     bool staged = false, streamed = false;
                     if (slot >= 0) {
                         base = I.cache->slot_ptr(il, slot);
+                    } else if (pf && I.pf_slot[(size_t) e] >= 0) {     // copied in ahead into this card's pool
+                        base = d.pf_pool + (size_t) I.pf_slot[(size_t) e] * I.blob_max;
+                        ok(cudaStreamWaitEvent(d.stream, d.pf_ev[(size_t) I.pf_slot[(size_t) e]], 0),
+                           "cudaStreamWaitEvent");
                     } else {
                         // stream it in: into a free cache slot when there is one, else a staging buffer
                         slot = I.cache->claim_free(il, (int) e);
@@ -953,6 +1077,7 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
                     if (staged) ok(cudaEventRecord(d.ev_free[b], d.stream), "cudaEventRecord");
                     if (streamed) b ^= 1;     // the other pair of buffers for the next streamed expert
                 }
+                if (pf) ok(cudaEventRecord(d.ev_pf_free, d.stream), "cudaEventRecord");
                 for (auto& th : helper_threads) th.join();
                 for (const auto& e : helper_err)
                     if (e) std::rethrow_exception(e);
