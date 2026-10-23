@@ -10,9 +10,9 @@
 # Needs gguf-py: PYTHONPATH=<llama.cpp>/gguf-py (or pip install gguf).
 #
 # For each model: strata-glm --check-cpu (GPU vs CPU reference, layer by layer), the prompt path (--prefill, in
-# chunks) against the CPU reference, the same 6 tokens at a time outside the routed experts and with the experts
-# page-locked and no VRAM cache, then the GPU's logits against llama.cpp's. Last, conversation parking
-# (tools/glm53_park_check.py).
+# chunks) against the CPU reference, the same 6 tokens at a time outside the routed experts, with the latent cache
+# in host RAM (decode and prompt) and with the experts page-locked and no VRAM cache, then the GPU's logits against
+# llama.cpp's. Last, conversation parking (tools/glm53_park_check.py), also with the latent cache in host RAM.
 #
 # The GPU quantizes activations to q8_1 like llama.cpp's CUDA backend, so on quantized weights its logits differ from
 # the CPU's by more than float rounding: on napster-ai (2026-10-20, 36 seeds) by up to 3.2% of a row's largest
@@ -108,6 +108,20 @@ for m in glm5-next-moe v1 v1-bare q4_0 q8_0; do
     else
         echo "prefill, 6 rows at a time FAILED:"; tail -8 "$W/rows_$m.txt"; fail=1
     fi
+    # with the latent cache in host RAM (--kv-in-ram): one token at a time against the CPU reference (each token's
+    # selected rows read over PCIe), then the prompt path 6 rows at a time (each batch's cells read once)
+    if "$SB/strata-glm" -m "$W/$m.gguf" --tokens-file "$W/ids.txt" --check-cpu --kv-in-ram > "$W/kv_$m.txt" 2>&1; then
+        echo "latent cache in RAM: $(grep -E "^check-cpu" "$W/kv_$m.txt")"
+    else
+        echo "latent cache in RAM FAILED:"; grep -E "layer .* differs|strata-glm:|CUDA" "$W/kv_$m.txt" | head -6
+        grep -E "^check-cpu" "$W/kv_$m.txt"; fail=1
+    fi
+    if "$SB/strata-glm" -m "$W/$m.gguf" --tokens-file "$W/ids.txt" --prefill --prefill-chunk 16 --prefill-rows 6 \
+            --kv-in-ram --check-cpu > "$W/kvpp_$m.txt" 2>&1; then
+        echo "prefill, latent cache in RAM: $(grep check-prefill "$W/kvpp_$m.txt")"
+    else
+        echo "prefill, latent cache in RAM FAILED:"; tail -8 "$W/kvpp_$m.txt"; fail=1
+    fi
     # again with the experts page-locked (--pin-experts) and no VRAM cache: every expert of every chunk is copied in
     # from RAM by DMA (engine_prefill.cu), and the 4 decoded tokens run every expert on the CPU from the locked copy
     if "$SB/strata-glm" -m "$W/$m.gguf" --tokens-file "$W/ids.txt" --prefill --prefill-chunk 16 --check-cpu \
@@ -140,4 +154,11 @@ if ! python3 "$HERE/glm53_park_check.py" "$SB/strata-glm" -m "$W/v1.gguf" --pref
     grep -E "FAIL|error|exited|died" "$W/park.txt" | head -12
 fi
 tail -1 "$W/park.txt"
+echo "== conversation parking, latent cache in RAM"
+if ! python3 "$HERE/glm53_park_check.py" "$SB/strata-glm" -m "$W/v1.gguf" --prefill-chunk 0 --no-expert-cache \
+        --kv-in-ram > "$W/park_kv.txt" 2>&1; then
+    fail=1
+    grep -E "FAIL|error|exited|died" "$W/park_kv.txt" | head -12
+fi
+tail -1 "$W/park_kv.txt"
 exit $fail

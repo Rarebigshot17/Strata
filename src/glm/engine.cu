@@ -7,6 +7,7 @@
 
 #include "engine_impl.hpp"
 #include "strata/glm/gpu_kernels.hpp"
+#include "strata/glm/gpu_prefill.hpp"
 
 #include "ggml.h"
 
@@ -52,7 +53,10 @@ GpuEngine::GpuEngine(const Model& model, const EngineOptions& opt) : impl_(new I
         // pooled keys (l.pooled). The other context-sized buffers (pscore, the prompt arena's pool scores) are on
         // every device, whichever layers it holds.
         if (!c.is_kda(il)) {
-            b += (double) opt.max_ctx * c.kv_lora_rank * 2.0;
+            // with --kv-in-ram only the dense range's rows (max_sel) are in VRAM
+            const int64_t rows = opt.kv_in_ram ? std::min<int64_t>(opt.max_ctx, c.indexer_top_k + c.indexer_kpool - 1)
+                                               : opt.max_ctx;
+            b += (double) rows * c.kv_lora_rank * 2.0;
             if (c.indexer_full[(size_t) il])
                 b += (double) (opt.max_ctx / c.indexer_kpool + 1) * c.indexer_head_size * 4.0;
         }
@@ -131,6 +135,13 @@ GpuEngine::GpuEngine(const Model& model, const EngineOptions& opt) : impl_(new I
         d.heads = dalloc<float>((size_t) (maxH * c.head_v_mla), b);
         d.scores = dalloc<float>((size_t) (maxH * I.max_sel), b);
         d.sel = dalloc<int32_t>((size_t) I.max_sel, b);
+        if (opt.kv_in_ram) {
+            d.kvsel = dalloc<uint16_t>((size_t) (I.max_sel * c.kv_lora_rank), b);
+            d.iota = dalloc<int32_t>((size_t) I.max_sel, b);
+            std::vector<int32_t> io((size_t) I.max_sel);
+            std::iota(io.begin(), io.end(), 0);
+            ok(cudaMemcpy(d.iota, io.data(), io.size() * sizeof(int32_t), cudaMemcpyHostToDevice), "iota");
+        }
         d.iq = dalloc<float>((size_t) (c.indexer_n_head * c.indexer_head_size), b);
         d.ik = dalloc<float>((size_t) c.indexer_head_size, b);
         d.wts = dalloc<float>((size_t) c.indexer_n_head, b);
@@ -195,7 +206,19 @@ GpuEngine::GpuEngine(const Model& model, const EngineOptions& opt) : impl_(new I
             l.v_b = gpu::upload(w.mla.v_b, b);
             l.q_a_norm = gpu::upload_f32(w.mla.q_a_norm, b);
             l.kv_a_norm = gpu::upload_f32(w.mla.kv_a_norm, b);
-            l.cache = dalloc<uint16_t>((size_t) (opt.max_ctx * c.kv_lora_rank), b);
+            if (opt.kv_in_ram) {
+                // page-locked and mapped: the kernels write rows into it and read the selected rows over PCIe
+                const size_t n = (size_t) (opt.max_ctx * c.kv_lora_rank);
+                void* p = nullptr;
+                ok(cudaHostAlloc(&p, n * sizeof(uint16_t), cudaHostAllocMapped | cudaHostAllocPortable),
+                   "cudaHostAlloc for the latent cache (--kv-in-ram)");
+                std::memset(p, 0, n * sizeof(uint16_t));
+                I.kv_host.push_back(p);
+                l.cache = static_cast<uint16_t*>(p);
+                l.head = dalloc<uint16_t>((size_t) (I.max_sel * c.kv_lora_rank), b);
+            } else {
+                l.cache = dalloc<uint16_t>((size_t) (opt.max_ctx * c.kv_lora_rank), b);
+            }
             if (c.indexer_full[(size_t) il]) {
                 const int64_t ID = c.indexer_head_size;
                 l.idx_q_b = gpu::upload(w.mla.idx_attn_q_b, b);
@@ -273,6 +296,13 @@ GpuEngine::GpuEngine(const Model& model, const EngineOptions& opt) : impl_(new I
         placement_.push_back(line);
     }
     placement_.push_back(I.cache->summary());
+    if (I.opt.kv_in_ram) {
+        char line[160];
+        std::snprintf(line, sizeof line, "latent cache in page-locked RAM: %.2f GB (%zu MLA layers)",
+                      (double) I.kv_host.size() * (double) I.opt.max_ctx * (double) c.kv_lora_rank * 2.0 / 1e9,
+                      I.kv_host.size());
+        placement_.push_back(line);
+    }
     if (I.opt.prefill_chunk > 1) {
         char line[160];
         std::snprintf(line, sizeof line, "prompt chunks: %d tokens, %d at a time outside the routed experts",
@@ -316,6 +346,7 @@ GpuEngine::~GpuEngine() {
     for (void* p : {(void*) impl_->h_x, (void*) impl_->h_yr, (void*) impl_->h_w, (void*) impl_->h_ids,
                     (void*) impl_->h_pscore})
         if (p) cudaFreeHost(p);
+    for (void* p : impl_->kv_host) cudaFreeHost(p);
 }
 
 void GpuEngine::reset() {
@@ -386,7 +417,13 @@ std::shared_ptr<Snapshot> GpuEngine::snapshot(bool full) {
             down(sn->pend_g[i], l.pend_g, (size_t) (P * ID));
         }
         if (full) {
-            down(sn->cache[i], l.cache, (size_t) (pos_ * c.kv_lora_rank));
+            if (l.head) {                              // --kv-in-ram: the cache is host memory already
+                const size_t n = (size_t) (pos_ * c.kv_lora_rank);
+                sn->cache[i].assign(l.cache, l.cache + n);
+                bytes += n * sizeof(uint16_t);
+            } else {
+                down(sn->cache[i], l.cache, (size_t) (pos_ * c.kv_lora_rank));
+            }
             if (c.indexer_full[i]) down(sn->pooled[i], l.pooled, (size_t) (pos_ / P * ID));
         }
     }
@@ -445,7 +482,16 @@ void GpuEngine::restore(const Snapshot& snap) {
             up(l.pend_g, sn->pend_g[i], (size_t) (P * ID));
         }
         if (sn->full) {
-            up(l.cache, sn->cache[i], (size_t) (sn->pos * c.kv_lora_rank));
+            if (l.head) {
+                // --kv-in-ram: the host cache, then the dense range's rows into the VRAM head
+                const size_t n = (size_t) (sn->pos * c.kv_lora_rank);
+                if (sn->cache[i].size() < n) throw std::runtime_error("GpuEngine::restore: a truncated snapshot");
+                std::memcpy(l.cache, sn->cache[i].data(), n * sizeof(uint16_t));
+                const size_t nh = (size_t) (std::min<int64_t>(sn->pos, I.max_sel) * c.kv_lora_rank);
+                if (nh) ok(cudaMemcpy(l.head, l.cache, nh * sizeof(uint16_t), cudaMemcpyHostToDevice), "cudaMemcpy");
+            } else {
+                up(l.cache, sn->cache[i], (size_t) (sn->pos * c.kv_lora_rank));
+            }
             if (c.indexer_full[i]) up(l.pooled, sn->pooled[i], (size_t) (sn->pos / P * ID));
         }
     }
@@ -536,6 +582,7 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
             gpu::gemv(l.kv_a, d.xn, d.kv, d.q8, s);
             gpu::rms_norm(d.kv, d.kv, (int) KL, c.rms_eps, l.kv_a_norm, s);
             gpu::store_f16_row(d.kv, l.cache, t, (int) KL, s);
+            if (l.head && t < I.max_sel) gpu::store_f16_row(d.kv, l.head, t, (int) KL, s);
             if (l.k_b.n_in == HK && l.k_b.n_out == H * KL) {
                 gpu::gemv_heads(l.k_b, (int) H, d.qm, d.q_abs, d.q8, s);
             } else {
@@ -578,7 +625,19 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
             ok(cudaMemcpyAsync(d.sel, I.sel_host.data(), (size_t) n_sel * sizeof(int32_t), cudaMemcpyHostToDevice,
                                d.stream), "selection");
             // pageable source: the copy is complete when cudaMemcpyAsync returns, so sel_host may change after
-            gpu::mla_attend(d.q_abs, l.cache, d.sel, n_sel, d.scores, d.lat, (int) H, (int) KL,
+
+            // --kv-in-ram: the selected rows read from host memory into kvsel, then attended in order; in the
+            // dense range every selected cell is in the VRAM head
+            const uint16_t* kc = l.cache;
+            const int32_t* ks = d.sel;
+            if (l.head && t < I.max_sel) {
+                kc = l.head;
+            } else if (l.head) {
+                gpu::gather_host_rows(l.cache, d.sel, nullptr, n_sel, (int) KL, d.kvsel, s);
+                kc = d.kvsel;
+                ks = d.iota;
+            }
+            gpu::mla_attend(d.q_abs, kc, ks, n_sel, d.scores, d.lat, (int) H, (int) KL,
                             1.0f / std::sqrt((float) HK), s);
             if (l.v_b.n_in == KL && l.v_b.n_out == H * HV) {
                 gpu::gemv_heads(l.v_b, (int) H, d.lat, d.heads, d.q8, s);

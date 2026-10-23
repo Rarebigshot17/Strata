@@ -1,6 +1,7 @@
 // src/glm/gpu_prefill.cu - kernels for a chunk of prompt tokens (gpu_prefill.hpp).
 #include "strata/glm/gpu_prefill.hpp"
 
+#include <cub/device/device_scan.cuh>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
@@ -471,6 +472,38 @@ __global__ void k_combine(const float* O, const float* w, const float* shared, f
     y[i] = acc;
 }
 
+// ---------------------------------------------------------------- the latent cache in host RAM (--kv-in-ram)
+
+__global__ void k_mark_cells(const int32_t* sel, const int32_t* n_sel, int max_sel, int32_t* flags) {
+    const int j = blockIdx.x * blockDim.x + threadIdx.x, b = blockIdx.y;
+    if (j < n_sel[b]) flags[sel[(size_t) b * max_sel + j]] = 1;
+}
+
+__global__ void k_compact_cells(const int32_t* flags, const int32_t* pos, int64_t n, int32_t* U, int32_t* count) {
+    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    if (flags[i]) U[pos[i]] = (int32_t) i;
+    if (i == n - 1) *count = pos[i] + flags[i];
+}
+
+__global__ void k_remap_cells(const int32_t* sel, const int32_t* n_sel, int max_sel, const int32_t* pos,
+                              int32_t* local) {
+    const int j = blockIdx.x * blockDim.x + threadIdx.x, b = blockIdx.y;
+    const size_t at = (size_t) b * max_sel + j;
+    if (j < n_sel[b]) local[at] = pos[sel[at]];
+}
+
+// one block per row: rows idx[i] of `src` (host memory, read over PCIe) into dst row i, for i < *count (or n)
+template <class V>
+__global__ void k_gather_host_rows(const V* src, const int32_t* idx, const int32_t* count, int n, int row_v,
+                                   V* dst) {
+    const int i = blockIdx.x;
+    if (i >= (count ? *count : n)) return;
+    const V* s = src + (size_t) idx[i] * row_v;
+    V* d = dst + (size_t) i * row_v;
+    for (int c = threadIdx.x; c < row_v; c += blockDim.x) d[c] = s[c];
+}
+
 }  // namespace
 
 void hc_weights_rows(const float* mixes, const float* scale, const float* base, float* pc, int T, int hc, int iters,
@@ -587,6 +620,34 @@ void combine_experts(const float* O, const float* w, const float* shared, float*
                      void* stream) {
     k_combine<<<grid((int64_t) T * n, 256), 256, 0, S(stream)>>>(O, w, shared, y, T, k, n);
     check("combine_experts");
+}
+
+size_t cell_union_scratch(int64_t n_cells) {
+    size_t bytes = 0;
+    cub::DeviceScan::ExclusiveSum(nullptr, bytes, (const int32_t*) nullptr, (int32_t*) nullptr, (int) n_cells);
+    return bytes;
+}
+
+void cell_union(const int32_t* sel, const int32_t* n_sel, int B, int max_sel, int64_t n_cells, int32_t* flags,
+                int32_t* pos, void* tmp, size_t tmp_bytes, int32_t* U, int32_t* count, int32_t* local, void* stream) {
+    cudaMemsetAsync(flags, 0, (size_t) n_cells * sizeof(int32_t), S(stream));
+    const dim3 g(grid(max_sel, 128), (unsigned) B);
+    k_mark_cells<<<g, 128, 0, S(stream)>>>(sel, n_sel, max_sel, flags);
+    cub::DeviceScan::ExclusiveSum(tmp, tmp_bytes, flags, pos, (int) n_cells, S(stream));
+    k_compact_cells<<<grid(n_cells, 256), 256, 0, S(stream)>>>(flags, pos, n_cells, U, count);
+    k_remap_cells<<<g, 128, 0, S(stream)>>>(sel, n_sel, max_sel, pos, local);
+    check("cell_union");
+}
+
+void gather_host_rows(const uint16_t* src, const int32_t* idx, const int32_t* count, int n, int KL, uint16_t* dst,
+                      void* stream) {
+    if (n <= 0) return;
+    if ((KL * 2) % 16 == 0)
+        k_gather_host_rows<int4><<<(unsigned) n, 64, 0, S(stream)>>>((const int4*) src, idx, count, n, KL * 2 / 16,
+                                                                      (int4*) dst);
+    else
+        k_gather_host_rows<uint16_t><<<(unsigned) n, 64, 0, S(stream)>>>(src, idx, count, n, KL, dst);
+    check("gather_host_rows");
 }
 
 }  // namespace strata::glm::gpu

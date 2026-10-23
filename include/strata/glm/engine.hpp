@@ -28,6 +28,7 @@ struct EngineOptions {
     bool verbose = true;
     int prefill_chunk = 256;         ///< prompt tokens read at once (0: one at a time)
     int prefill_rows = 0;            ///< of those, tokens at a time outside the routed experts (0: by memory, <= 512)
+    bool kv_in_ram = false;          ///< the f16 latent cache in page-locked host RAM, not VRAM (--kv-in-ram)
     ExpertCacheOptions cache;
 };
 

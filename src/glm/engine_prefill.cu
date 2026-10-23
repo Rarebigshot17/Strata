@@ -59,6 +59,9 @@ size_t align256(size_t b) { return (b + 255) / 256 * 256; }
 // context's pool scores take 8 bytes per query and pool: 1 MiB a query at 524,288 tokens).
 constexpr int kRowsMax = 512;
 constexpr size_t kAttnArena = (size_t) 512 << 20;
+// --kv-in-ram: the sparse attention's queries a batch, whose cells are read from host memory once (at most
+// kKvBatch * max_sel rows, 64 MiB of f16 at 2,051 cells of 512)
+constexpr int kKvBatch = 32;
 
 }  // namespace
 
@@ -149,6 +152,18 @@ void GpuEngine::setup_prefill() {
         d.d_slot = dalloc<int32_t>((size_t) (T * KU), b);
         d.sel_rows = dalloc<int32_t>((size_t) (T * MS), b);
         d.n_sel = dalloc<int32_t>((size_t) T, b);
+        if (I.opt.kv_in_ram) {
+            // a batch of kKvBatch queries' cells, each read from host memory once (cell_union)
+            const int64_t cells = I.opt.max_ctx;
+            d.kv_flags = dalloc<int32_t>((size_t) cells, b);
+            d.kv_pos = dalloc<int32_t>((size_t) cells, b);
+            d.kv_U = dalloc<int32_t>((size_t) (kKvBatch * MS), b);
+            d.kv_local = dalloc<int32_t>((size_t) (kKvBatch * MS), b);
+            d.kv_count = dalloc<int32_t>(1, b);
+            d.kv_rows = dalloc<uint16_t>((size_t) (kKvBatch * MS * KL), b);
+            d.kv_tmp_bytes = gpu::cell_union_scratch(cells);
+            d.kv_tmp = dalloc<uint8_t>(d.kv_tmp_bytes, b);
+        }
         // the largest weight a product dequantizes on this device, and the largest activation it converts
         size_t welems = (size_t) (E * maxF);
         for (int64_t il = 0; il < c.n_layer; ++il) {
@@ -338,6 +353,8 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
                 G.gemm(l.kv_a, xn, ta, kv, s);
                 gpu::rms_norm_rows(kv, kv, ta, (int) KL, c.rms_eps, l.kv_a_norm, s);
                 gpu::store_f16_rows(kv, l.cache, tp, ta, (int) KL, s);
+                if (l.head && tp < I.max_sel)                // --kv-in-ram: the dense range's rows in VRAM too
+                    gpu::store_f16_rows(kv, l.head, tp, (int) std::min<int64_t>(ta, I.max_sel - tp), (int) KL, s);
                 G.gemm_heads(l.k_b, (int) H, qm, (int) (H * HK), HK, ta, q_abs, (int) (H * KL), KL, s);
                 gpu::to_f16(q_abs, q16, ta * H * KL, s);
 
@@ -371,14 +388,17 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
                 if (!sparse) {
                     // causal attention over the latent cache: S = Q K^T * scale, f16 softmax, O = P K
                     const int n_ctx = (int) (tp + ta);
+                    // --kv-in-ram: the dense range is in the VRAM head (prefill() ends dense chunks at max_sel)
+                    const uint16_t* kc = l.head ? l.head : l.cache;
+                    if (l.head && n_ctx > I.max_sel) throw std::runtime_error("a dense prompt chunk past the head");
                     float* Sc = A.take<float>((size_t) (ta * H) * (size_t) n_ctx);
                     uint16_t* P16 = A.take<uint16_t>((size_t) (ta * H) * (size_t) n_ctx);
                     cb(cublasSetStream(hb, d.stream), "cublasSetStream");
-                    cb(cublasGemmEx(hb, CUBLAS_OP_T, CUBLAS_OP_N, n_ctx, (int) (ta * H), (int) KL, &scale, l.cache,
+                    cb(cublasGemmEx(hb, CUBLAS_OP_T, CUBLAS_OP_N, n_ctx, (int) (ta * H), (int) KL, &scale, kc,
                                     CUDA_R_16F, (int) KL, q16, CUDA_R_16F, (int) KL, &zero, Sc, CUDA_R_32F, n_ctx,
                                     CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT), "attention scores");
                     gpu::causal_softmax_f16(Sc, P16, ta, (int) H, n_ctx, tp, s);
-                    cb(cublasGemmEx(hb, CUBLAS_OP_N, CUBLAS_OP_N, (int) KL, (int) (ta * H), n_ctx, &one, l.cache,
+                    cb(cublasGemmEx(hb, CUBLAS_OP_N, CUBLAS_OP_N, (int) KL, (int) (ta * H), n_ctx, &one, kc,
                                     CUDA_R_16F, (int) KL, P16, CUDA_R_16F, n_ctx, &zero, lat, CUDA_R_32F, (int) KL,
                                     CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT), "attention values");
                 } else {
@@ -411,7 +431,8 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
                     const size_t per_q = align256((size_t) MS * KL * 2) + align256((size_t) H * MS * sizeof(float)) +
                                          align256((size_t) H * MS * 2);
                     const size_t room = A.cap > A.used + 3 * 256 ? A.cap - A.used - 3 * 256 : 0;
-                    const int nb = (int) std::min<size_t>((size_t) ta, room / per_q);
+                    const int nb = (int) std::min<size_t>({(size_t) ta, room / per_q,
+                                                           l.head ? (size_t) kKvBatch : (size_t) ta});
                     if (nb < 1) throw std::runtime_error("prompt chunk arena too small for sparse attention");
                     uint16_t* Kg = A.take<uint16_t>((size_t) nb * MS * KL);
                     float* Sc = A.take<float>((size_t) nb * H * MS);
@@ -419,8 +440,17 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
                     cb(cublasSetStream(hb, d.stream), "cublasSetStream");
                     for (int b0 = 0; b0 < ta; b0 += nb) {
                         const int bn = std::min(nb, ta - b0);
-                        gpu::gather_cells(l.cache, d.sel_rows + (size_t) (a0 + b0) * MS, d.n_sel + a0 + b0, bn, MS,
-                                          (int) KL, Kg, s);
+                        const int32_t* qsel = d.sel_rows + (size_t) (a0 + b0) * MS;
+                        if (l.head) {
+                            // --kv-in-ram: the batch's cells, each once, over PCIe into kv_rows, then each query's
+                            // from there
+                            gpu::cell_union(qsel, d.n_sel + a0 + b0, bn, MS, tp + ta, d.kv_flags, d.kv_pos, d.kv_tmp,
+                                            d.kv_tmp_bytes, d.kv_U, d.kv_count, d.kv_local, s);
+                            gpu::gather_host_rows(l.cache, d.kv_U, d.kv_count, bn * MS, (int) KL, d.kv_rows, s);
+                            gpu::gather_cells(d.kv_rows, d.kv_local, d.n_sel + a0 + b0, bn, MS, (int) KL, Kg, s);
+                        } else {
+                            gpu::gather_cells(l.cache, qsel, d.n_sel + a0 + b0, bn, MS, (int) KL, Kg, s);
+                        }
                         // S_b [H][MS] = q_b [H][KL] Kg_b^T * scale
                         cb(cublasGemmStridedBatchedEx(hb, CUBLAS_OP_T, CUBLAS_OP_N, MS, (int) H, (int) KL, &scale, Kg,
                                                       CUDA_R_16F, (int) KL, (long long) MS * KL,

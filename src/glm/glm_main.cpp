@@ -13,6 +13,9 @@
 // long as MemAvailable stays above --pin-keep-free GB (16); the VRAM expert cache is filled from there.
 // --prefill-rows N: of each --prefill-chunk, the tokens run at a time outside the routed experts (default: as many
 // as fit 512 MiB of attention buffers, at most 512); a test setting, to make the chunks split.
+// --kv-in-ram keeps the MLA layers' f16 latent cache (11 KB a token for the 3-bit file) in page-locked host RAM,
+// with only the indexer's dense range (its first max_sel rows) in VRAM too; the VRAM it frees goes to the expert
+// cache. Each token's selected rows, and a prompt batch's, are read over PCIe.
 #include "strata/glm/check.hpp"
 #include "strata/glm/cpu_ref.hpp"
 #include "strata/glm/engine.hpp"
@@ -106,7 +109,7 @@ int usage() {
                  "                  [--devices 0,1,2] [--split 24,12,10] [--threads N] [--check-cpu]\n"
                  "                  [--max-tokens N] [--vram-reserve GB] [--expert-profile PATH]\n"
                  "                  [--max-swaps N] [--cache-decay D] [--no-expert-cache] [--prefill] [--prefill-chunk N]\n"
-                 "                  [--pin-experts [--pin-keep-free GB]] [--prefill-rows N]\n"
+                 "                  [--pin-experts [--pin-keep-free GB]] [--prefill-rows N] [--kv-in-ram]\n"
                  "       strata-glm -m MODEL.gguf --serve [--ctx N] [--eos-ids A,B] [--park-mib N] [--no-warm]\n"
                  "                  [--checkpoint-min N] [same GPU and cache options]\n");
     return 2;
@@ -147,6 +150,7 @@ int main(int argc, char** argv) {
         else if (a == "--prefill") use_prefill = true;
         else if (a == "--prefill-chunk" && (v = next())) opt.prefill_chunk = std::atoi(v);
         else if (a == "--prefill-rows" && (v = next())) opt.prefill_rows = std::atoi(v);
+        else if (a == "--kv-in-ram") opt.kv_in_ram = true;
         else if (a == "--eos-ids" && (v = next())) eos = parse_list<int32_t>(v);
         else if (a == "--park-mib" && (v = next())) so.park_bytes = (size_t) (std::max(0.0, std::atof(v)) * 1048576.0);
         else if (a == "--checkpoint-min" && (v = next())) so.checkpoint_min = std::atoll(v);

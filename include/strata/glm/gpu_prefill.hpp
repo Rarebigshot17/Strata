@@ -41,6 +41,18 @@ void gather_cells(const uint16_t* cache, const int32_t* sel, const int32_t* n_se
 /// causal_softmax_f16 for the gathered cells: row b*H + h of S [B*H][max_sel] over its first n_sel[b] entries.
 void sparse_softmax_f16(const float* S, uint16_t* P, const int32_t* n_sel, int B, int H, int max_sel, void* stream);
 
+// the latent cache in host RAM (--kv-in-ram): what a batch of queries selects is read over PCIe once
+/// The bytes cell_union needs for its scan over n_cells cells.
+size_t cell_union_scratch(int64_t n_cells);
+/// The cells B queries select (sel [B][max_sel], n_sel [B], every cell below n_cells), each once: U [*count] in
+/// increasing order, and each query's cells as indices into U: local [B][max_sel]. flags and pos hold n_cells.
+void cell_union(const int32_t* sel, const int32_t* n_sel, int B, int max_sel, int64_t n_cells, int32_t* flags,
+                int32_t* pos, void* tmp, size_t tmp_bytes, int32_t* U, int32_t* count, int32_t* local, void* stream);
+/// dst [i] = src row idx[i] (KL f16 values a row) for i below *count, or below n when count is null; n bounds
+/// *count. src may be host memory the device can read (cudaHostAllocMapped).
+void gather_host_rows(const uint16_t* src, const int32_t* idx, const int32_t* count, int n, int KL, uint16_t* dst,
+                      void* stream);
+
 // the k-pool indexer
 /// Pools `n_pools` complete pools whose P members are consecutive rows of keys/gates [rows][ID] starting at row
 /// `first`, into pooled + p0 * ID.

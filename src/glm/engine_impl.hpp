@@ -62,7 +62,8 @@ struct DevLayer {
     // MLA
     DevMatrix q_a, q_b, kv_a, k_b, v_b;
     float *q_a_norm = nullptr, *kv_a_norm = nullptr;
-    uint16_t* cache = nullptr;               ///< max_ctx x KL, f16
+    uint16_t* cache = nullptr;               ///< max_ctx x KL, f16; page-locked host memory with --kv-in-ram
+    uint16_t* head = nullptr;                ///< --kv-in-ram: rows 0 .. max_sel-1 in VRAM too (the dense range)
     // indexer
     DevMatrix idx_q_b, idx_k, idx_gate, idx_proj;
     float *idx_k_norm = nullptr, *idx_k_norm_b = nullptr, *idx_ape = nullptr;
@@ -85,6 +86,8 @@ struct DevCtx {
     float *qr = nullptr, *qm = nullptr, *kv = nullptr, *q_abs = nullptr, *lat = nullptr, *heads = nullptr,
           *scores = nullptr, *iq = nullptr, *ik = nullptr, *wts = nullptr, *pscore = nullptr;
     int32_t* sel = nullptr;
+    uint16_t* kvsel = nullptr;               ///< --kv-in-ram: the selected rows, read from host memory
+    int32_t* iota = nullptr;                 ///< 0, 1, ..., max_sel-1: kvsel's rows as a selection
     float *fg = nullptr, *fu = nullptr, *fact = nullptr, *logits_e = nullptr, *wexp = nullptr, *ysh = nullptr,
           *yr = nullptr, *yexp = nullptr, *ygpu = nullptr, *out_logits = nullptr;
     int32_t* ids = nullptr;
@@ -102,6 +105,11 @@ struct DevCtx {
     // layer's selection they are (Impl::sel_version)
     int32_t *sel_rows = nullptr, *n_sel = nullptr;
     uint64_t sel_have = 0;
+    // --kv-in-ram: the cells a batch of queries selects, each read from host memory once (cell_union)
+    int32_t *kv_flags = nullptr, *kv_pos = nullptr, *kv_U = nullptr, *kv_count = nullptr, *kv_local = nullptr;
+    uint16_t* kv_rows = nullptr;
+    void* kv_tmp = nullptr;
+    size_t kv_tmp_bytes = 0;
     std::unique_ptr<gpu::GemmCtx> gemm;
     // streamed experts: two device buffers, filled on a copy stream while the other is computed
     uint8_t* dstage[2] = {nullptr, nullptr};
@@ -139,6 +147,7 @@ struct GpuEngine::Impl {
     std::vector<uint8_t> experts_pinned;         ///< per layer: its experts are page-locked (--pin-experts)
     size_t blob_max = 0;
     int prefill_rows = 0;                        ///< a chunk's tokens at a time outside the routed experts
+    std::vector<void*> kv_host;                  ///< --kv-in-ram: the latent caches' page-locked blocks
     std::vector<int32_t> h_ids_rows;
     std::vector<float> h_w_rows;
     int32_t *h_sel_rows = nullptr, *h_n_sel = nullptr;   ///< pinned: the last selection, for other devices
