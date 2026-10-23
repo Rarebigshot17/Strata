@@ -30,8 +30,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
+#include <functional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 namespace strata::glm {
 
@@ -802,8 +805,17 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
                     for (size_t k = 0; k < nd; ++k)
                         if ((int) k != ci && used[k]) helpers.push_back((int) k);
                 }
+                std::vector<std::thread> helper_threads;
+                std::vector<std::exception_ptr> helper_err(I.ctx.size());
+                struct Joiner {                             // joined however this scope ends
+                    std::vector<std::thread>& t;
+                    ~Joiner() {
+                        for (auto& th : t)
+                            if (th.joinable()) th.join();
+                    }
+                } joiner{helper_threads};
                 if (!helpers.empty()) {
-                    NvtxRange r_help("routed experts: the other cards' shares");
+                    NvtxRange r_help("routed experts: the other cards' shares queued");
                     // the chunk's rows to each helper (card to card where they have peer access, else through RAM),
                     // on a stream of their own so this card's experts start at once
                     ok(cudaEventRecord(d.ev_xready, d.stream), "cudaEventRecord");
@@ -812,70 +824,79 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
                         ok(cudaMemcpyPeerAsync(I.ctx[(size_t) k].pxn, I.ctx[(size_t) k].id, d.pxn, d.id,
                                                (size_t) (T * E) * sizeof(float), d.xfer), "rows to a helper");
                     ok(cudaEventRecord(d.ev_x, d.xfer), "cudaEventRecord");
-                    for (int k : helpers) {
-                        DevCtx& h = I.ctx[(size_t) k];
-                        ok(cudaSetDevice(h.id), "cudaSetDevice");
-                        void* hs = h.stream;
-                        // the share's rows grouped by expert: their tokens and routing weights, and each expert's start
-                        std::vector<int64_t> mine, hoff;
-                        int64_t n = 0;
-                        for (int64_t e = 0; e < NE; ++e) {
-                            if (dev_of[(size_t) e] != k) continue;
-                            mine.push_back(e);
-                            hoff.push_back(n);
-                            for (int64_t r = off[(size_t) e]; r < off[(size_t) e + 1]; ++r, ++n) {
-                                h.h_idx[n] = idx_all[(size_t) r];
-                                h.h_wrow[n] = I.h_w_rows[(size_t) slot_all[(size_t) r]];
+                    // each helper's share queued by a thread of its own: one thread queueing for all cards blocked
+                    // on a helper's full launch queue while this card waited for its own work (napster-ai, P5)
+                    const auto run_helper = [&](int k, std::exception_ptr& err) {
+                        try {
+                            DevCtx& h = I.ctx[(size_t) k];
+                            ok(cudaSetDevice(h.id), "cudaSetDevice");
+                            void* hs = h.stream;
+                            // the share's rows grouped by expert: their tokens and routing weights, and each
+                            // expert's start
+                            std::vector<int64_t> mine, hoff;
+                            int64_t n = 0;
+                            for (int64_t e = 0; e < NE; ++e) {
+                                if (dev_of[(size_t) e] != k) continue;
+                                mine.push_back(e);
+                                hoff.push_back(n);
+                                for (int64_t r = off[(size_t) e]; r < off[(size_t) e + 1]; ++r, ++n) {
+                                    h.h_idx[n] = idx_all[(size_t) r];
+                                    h.h_wrow[n] = I.h_w_rows[(size_t) slot_all[(size_t) r]];
+                                }
                             }
+                            ok(cudaStreamWaitEvent(h.stream, d.ev_x, 0), "cudaStreamWaitEvent");
+                            ok(cudaMemcpyAsync(h.d_idx, h.h_idx, (size_t) n * sizeof(int32_t), cudaMemcpyHostToDevice,
+                                               h.stream), "share rows");
+                            ok(cudaMemcpyAsync(h.d_wrow, h.h_wrow, (size_t) n * sizeof(float), cudaMemcpyHostToDevice,
+                                               h.stream), "share weights");
+                            ok(cudaMemsetAsync(h.y_part, 0, (size_t) (T * E) * sizeof(float), h.stream), "memset");
+                            Bump H{h.arena, h.arena_bytes};
+                            float* hfg = H.take<float>((size_t) (T * F));
+                            float* hfu = H.take<float>((size_t) (T * F));
+                            float* hfact = H.take<float>((size_t) (T * F));
+                            float* hXg = H.take<float>((size_t) (T * E));
+                            float* hey = H.take<float>((size_t) (T * E));
+                            gpu::GemmCtx& HG = *h.gemm;
+                            int hb = 0;
+                            for (size_t q = 0; q < mine.size(); ++q) {
+                                const int64_t e = mine[q];
+                                const int mc = (int) (off[(size_t) e + 1] - off[(size_t) e]);
+                                uint8_t* base = h.dstage[hb];
+                                const Tensor g = lw.gate_exps.slice2(e), u = lw.up_exps.slice2(e),
+                                             dn = lw.down_exps.slice2(e);
+                                const size_t db = es.down.row_bytes * (size_t) es.down.n_out;
+                                ok(cudaStreamWaitEvent(h.copy_stream, h.ev_free[hb], 0), "cudaStreamWaitEvent");
+                                ok(cudaMemcpyAsync(base, g.data, es.up_off, cudaMemcpyHostToDevice, h.copy_stream),
+                                   "expert upload");
+                                ok(cudaMemcpyAsync(base + es.up_off, u.data, es.down_off - es.up_off,
+                                                   cudaMemcpyHostToDevice, h.copy_stream), "expert upload");
+                                ok(cudaMemcpyAsync(base + es.down_off, dn.data, db, cudaMemcpyHostToDevice,
+                                                   h.copy_stream), "expert upload");
+                                ok(cudaEventRecord(h.ev_copied[hb], h.copy_stream), "cudaEventRecord");
+                                ok(cudaStreamWaitEvent(h.stream, h.ev_copied[hb], 0), "cudaStreamWaitEvent");
+                                DevMatrix Gm = es.gate, Um = es.up, Dm = es.down;
+                                Gm.w = base;
+                                Um.w = base + es.up_off;
+                                Dm.w = base + es.down_off;
+                                gpu::gather_rows(h.pxn, h.d_idx + hoff[q], hXg, mc, (int) E, hs);
+                                HG.gemm(Gm, hXg, mc, hfg, hs);
+                                HG.gemm(Um, hXg, mc, hfu, hs);
+                                gpu::swiglu(hfg, hfu, hfact, (int) (mc * F), c.clamp_exp[(size_t) il], hs);
+                                HG.gemm(Dm, hfact, mc, hey, hs);
+                                gpu::scatter_add_w_rows(hey, h.d_idx + hoff[q], h.d_wrow + hoff[q], h.y_part, mc,
+                                                        (int) E, hs);
+                                ok(cudaEventRecord(h.ev_free[hb], h.stream), "cudaEventRecord");
+                                hb ^= 1;
+                            }
+                            ok(cudaMemcpyPeerAsync(d.y_recv[(size_t) k], d.id, h.y_part, h.id,
+                                                   (size_t) (T * E) * sizeof(float), h.stream), "partial sum back");
+                            ok(cudaEventRecord(h.ev_y, h.stream), "cudaEventRecord");
+                        } catch (...) {
+                            err = std::current_exception();
                         }
-                        ok(cudaStreamWaitEvent(h.stream, d.ev_x, 0), "cudaStreamWaitEvent");
-                        ok(cudaMemcpyAsync(h.d_idx, h.h_idx, (size_t) n * sizeof(int32_t), cudaMemcpyHostToDevice,
-                                           h.stream), "share rows");
-                        ok(cudaMemcpyAsync(h.d_wrow, h.h_wrow, (size_t) n * sizeof(float), cudaMemcpyHostToDevice,
-                                           h.stream), "share weights");
-                        ok(cudaMemsetAsync(h.y_part, 0, (size_t) (T * E) * sizeof(float), h.stream), "memset");
-                        Bump H{h.arena, h.arena_bytes};
-                        float* hfg = H.take<float>((size_t) (T * F));
-                        float* hfu = H.take<float>((size_t) (T * F));
-                        float* hfact = H.take<float>((size_t) (T * F));
-                        float* hXg = H.take<float>((size_t) (T * E));
-                        float* hey = H.take<float>((size_t) (T * E));
-                        gpu::GemmCtx& HG = *h.gemm;
-                        int hb = 0;
-                        for (size_t q = 0; q < mine.size(); ++q) {
-                            const int64_t e = mine[q];
-                            const int mc = (int) (off[(size_t) e + 1] - off[(size_t) e]);
-                            uint8_t* base = h.dstage[hb];
-                            const Tensor g = lw.gate_exps.slice2(e), u = lw.up_exps.slice2(e),
-                                         dn = lw.down_exps.slice2(e);
-                            const size_t db = es.down.row_bytes * (size_t) es.down.n_out;
-                            ok(cudaStreamWaitEvent(h.copy_stream, h.ev_free[hb], 0), "cudaStreamWaitEvent");
-                            ok(cudaMemcpyAsync(base, g.data, es.up_off, cudaMemcpyHostToDevice, h.copy_stream),
-                               "expert upload");
-                            ok(cudaMemcpyAsync(base + es.up_off, u.data, es.down_off - es.up_off,
-                                               cudaMemcpyHostToDevice, h.copy_stream), "expert upload");
-                            ok(cudaMemcpyAsync(base + es.down_off, dn.data, db, cudaMemcpyHostToDevice, h.copy_stream),
-                               "expert upload");
-                            ok(cudaEventRecord(h.ev_copied[hb], h.copy_stream), "cudaEventRecord");
-                            ok(cudaStreamWaitEvent(h.stream, h.ev_copied[hb], 0), "cudaStreamWaitEvent");
-                            DevMatrix Gm = es.gate, Um = es.up, Dm = es.down;
-                            Gm.w = base;
-                            Um.w = base + es.up_off;
-                            Dm.w = base + es.down_off;
-                            gpu::gather_rows(h.pxn, h.d_idx + hoff[q], hXg, mc, (int) E, hs);
-                            HG.gemm(Gm, hXg, mc, hfg, hs);
-                            HG.gemm(Um, hXg, mc, hfu, hs);
-                            gpu::swiglu(hfg, hfu, hfact, (int) (mc * F), c.clamp_exp[(size_t) il], hs);
-                            HG.gemm(Dm, hfact, mc, hey, hs);
-                            gpu::scatter_add_w_rows(hey, h.d_idx + hoff[q], h.d_wrow + hoff[q], h.y_part, mc, (int) E,
-                                                    hs);
-                            ok(cudaEventRecord(h.ev_free[hb], h.stream), "cudaEventRecord");
-                            hb ^= 1;
-                        }
-                        ok(cudaMemcpyPeerAsync(d.y_recv[(size_t) k], d.id, h.y_part, h.id,
-                                               (size_t) (T * E) * sizeof(float), h.stream), "partial sum back");
-                        ok(cudaEventRecord(h.ev_y, h.stream), "cudaEventRecord");
-                    }
+                    };
+                    for (int k : helpers)
+                        helper_threads.emplace_back(run_helper, k, std::ref(helper_err[(size_t) k]));
                     ok(cudaSetDevice(d.id), "cudaSetDevice");
                     // the helpers' slots stay zero in O (the arena holds other phases' bytes)
                     ok(cudaMemsetAsync(O, 0, (size_t) (T * KU * E) * sizeof(float), d.stream), "memset");
@@ -932,6 +953,10 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
                     if (staged) ok(cudaEventRecord(d.ev_free[b], d.stream), "cudaEventRecord");
                     if (streamed) b ^= 1;     // the other pair of buffers for the next streamed expert
                 }
+                for (auto& th : helper_threads) th.join();
+                for (const auto& e : helper_err)
+                    if (e) std::rethrow_exception(e);
+                ok(cudaSetDevice(d.id), "cudaSetDevice");
                 gpu::combine_experts(O, w_d, c.n_expert_shared > 0 ? ysh : nullptr, d.py, T, KU, (int) E, s);
                 for (int k : helpers) {
                     ok(cudaStreamWaitEvent(d.stream, I.ctx[(size_t) k].ev_y, 0), "cudaStreamWaitEvent");

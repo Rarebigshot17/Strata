@@ -18,6 +18,21 @@
 
 namespace strata::glm {
 
+namespace {
+// MADV_PAGEOUT (Linux 5.4): reclaim the range now; clean file pages are dropped. Older kernels say EINVAL, then
+// MADV_COLD (also 5.4) or nothing.
+#ifdef MADV_PAGEOUT
+constexpr int kPageOut = MADV_PAGEOUT;
+#else
+constexpr int kPageOut = 21;
+#endif
+#ifdef MADV_COLD
+constexpr int kCold = MADV_COLD;
+#else
+constexpr int kCold = MADV_NORMAL;
+#endif
+}  // namespace
+
 size_t mem_available() {
     std::ifstream in("/proc/meminfo");
     std::string key, unit;
@@ -93,13 +108,21 @@ PinnedExperts::PinnedExperts(Model& model, int threads, size_t keep_free,
         moves.push_back(mv);
     }
 
-    // the copies, taken by the threads in order (the disk reads ahead along each piece)
+    // the copies, taken by the threads in order (the disk reads ahead along each piece). Each piece's pages of the
+    // file are let go as soon as it is copied (MADV_PAGEOUT): the page cache still holds the whole model, and with
+    // the copies growing beside it the kernel otherwise takes back the oldest pages first, which are the pieces not
+    // copied yet (read again from disk), and swaps out the new copies (on napster-ai, 184 GiB of RAM, filling took
+    // 122 s and locking about 185 s more).
+    const size_t page = (size_t) std::max(4096L, sysconf(_SC_PAGESIZE));
     std::atomic<size_t> next{0}, done{0};
     auto work = [&] {
         for (;;) {
             const size_t i = next.fetch_add(1);
             if (i >= pieces.size()) return;
             std::memcpy(pieces[i].dst, pieces[i].src, pieces[i].n);
+            const uintptr_t a = ((uintptr_t) pieces[i].src + page - 1) & ~(uintptr_t) (page - 1);
+            const uintptr_t b = ((uintptr_t) pieces[i].src + pieces[i].n) & ~(uintptr_t) (page - 1);
+            if (b > a && madvise((void*) a, b - a, kPageOut) != 0) madvise((void*) a, b - a, kCold);
             done.fetch_add(pieces[i].n);
         }
     };
@@ -146,7 +169,6 @@ PinnedExperts::PinnedExperts(Model& model, int threads, size_t keep_free,
     }
     // the mapping's pages of the moved experts are not read again: let them go (they stay in the page cache, which
     // the kernel takes back when it needs the memory)
-    const size_t page = (size_t) std::max(4096L, sysconf(_SC_PAGESIZE));
     for (const Piece& s : sources) {
         const uintptr_t a = ((uintptr_t) s.src + page - 1) & ~(uintptr_t) (page - 1);
         const uintptr_t b = ((uintptr_t) s.src + s.n) & ~(uintptr_t) (page - 1);

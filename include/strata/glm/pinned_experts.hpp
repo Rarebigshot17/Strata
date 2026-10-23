@@ -8,7 +8,8 @@
 // them there. The VRAM cache stays the first place an expert runs from. The memory is anonymous (2 MiB pages where
 // the kernel allows), filled by all the threads, then locked with cudaHostRegister (cudaHostRegisterPortable), a
 // layer's block per thread: cudaHostAlloc, which locks every page before the copy, ran at 0.65 GB/s on napster-ai
-// (168 s for 109.9 GB).
+// (168 s for 109.9 GB). Each piece's pages of the file are let go once copied, so the copies do not push the pieces
+// still to come out of the page cache, or themselves into swap.
 //
 // The memory stays locked while the engine runs (about 110 GB for the 3-bit file): the rest of the PC can neither
 // use nor swap it. Layers are moved while MemAvailable, less what the layers before took, stays above `keep_free`
