@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -39,12 +40,15 @@ PinnedExperts::PinnedExperts(Model& model, int threads, size_t keep_free,
     struct Move {
         int64_t il;
         uint8_t* dst[3];
+        void* block;
+        size_t size;
     };
     std::vector<Piece> pieces;     // the copies, in 64 MiB pieces
     std::vector<Piece> sources;    // each tensor's whole source range, for its pages to be let go after
     std::vector<Move> moves;
-    const size_t piece = (size_t) 64 << 20, align = 4096;
-    size_t total = 0;
+    const size_t piece = (size_t) 64 << 20, align = 4096, huge = (size_t) 2 << 20;
+    size_t total = 0, planned = 0;
+    const size_t avail0 = mem_available();
     for (int64_t il = 0; il < c.n_layer; ++il) {
         if (c.is_dense(il)) continue;
         const LayerWeights& w = model.layer(il);
@@ -60,25 +64,24 @@ PinnedExperts::PinnedExperts(Model& model, int threads, size_t keep_free,
             ++left_;
             continue;
         }
-        const size_t avail = mem_available();
-        if (avail != 0 && avail < size + keep_free) {
-            why_ = "MemAvailable " + std::to_string(avail >> 30) + " GiB would fall below the " +
-                   std::to_string(keep_free >> 30) + " GiB kept free";
+        // the memory is taken as it is written, so what this layer will take is counted against MemAvailable
+        // before any of it is used
+        size = (size + huge - 1) / huge * huge;
+        if (avail0 != 0 && avail0 < planned + size + keep_free) {
+            why_ = "MemAvailable " + std::to_string((avail0 - std::min(avail0, planned)) >> 30) +
+                   " GiB would fall below the " + std::to_string(keep_free >> 30) + " GiB kept free";
             ++left_;
             continue;
         }
-        void* p = nullptr;
-        const cudaError_t e = cudaHostAlloc(&p, size, cudaHostAllocPortable);
-        if (e != cudaSuccess) {
-            (void) cudaGetLastError();
-            why_ = std::string("cudaHostAlloc: ") + cudaGetErrorString(e);
+        void* p = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) {
+            why_ = std::string("mmap: ") + std::strerror(errno);
             ++left_;
             continue;
         }
-        blocks_.push_back(p);
-        bytes_ += size;
-        ++layers_;
-        Move mv{il, {nullptr, nullptr, nullptr}};
+        madvise(p, size, MADV_HUGEPAGE);    // 2 MiB pages where the kernel allows them: fewer faults, faster locking
+        planned += size;
+        Move mv{il, {nullptr, nullptr, nullptr}, p, size};
         for (int k = 0; k < 3; ++k) {
             const uint8_t* src = static_cast<const uint8_t*>(ts[k]->data);
             uint8_t* dst = static_cast<uint8_t*>(p) + off[k];
@@ -113,7 +116,34 @@ PinnedExperts::PinnedExperts(Model& model, int threads, size_t keep_free,
     for (auto& th : pool) th.join();
     if (progress) progress(total, total);
 
-    for (const Move& mv : moves) model.move_experts(mv.il, mv.dst[0], mv.dst[1], mv.dst[2]);
+    // then each layer's block page-locked for every GPU (cudaHostRegister, the threads one block each at a time);
+    // a layer whose block cannot be is left on the mapped file
+    std::vector<cudaError_t> reg(moves.size(), cudaSuccess);
+    std::atomic<size_t> next_reg{0};
+    auto lock = [&] {
+        for (;;) {
+            const size_t i = next_reg.fetch_add(1);
+            if (i >= moves.size()) return;
+            reg[i] = cudaHostRegister(moves[i].block, moves[i].size, cudaHostRegisterPortable);
+        }
+    };
+    pool.clear();
+    for (int t = 0; t < std::max(1, std::min(threads, 8)); ++t) pool.emplace_back(lock);
+    for (auto& th : pool) th.join();
+    for (size_t i = 0; i < moves.size(); ++i) {
+        const Move& mv = moves[i];
+        if (reg[i] != cudaSuccess) {
+            (void) cudaGetLastError();
+            if (why_.empty()) why_ = std::string("cudaHostRegister: ") + cudaGetErrorString(reg[i]);
+            munmap(mv.block, mv.size);
+            ++left_;
+            continue;
+        }
+        blocks_.push_back({mv.block, mv.size});
+        bytes_ += mv.size;
+        ++layers_;
+        model.move_experts(mv.il, mv.dst[0], mv.dst[1], mv.dst[2]);
+    }
     // the mapping's pages of the moved experts are not read again: let them go (they stay in the page cache, which
     // the kernel takes back when it needs the memory)
     const size_t page = (size_t) std::max(4096L, sysconf(_SC_PAGESIZE));
@@ -125,7 +155,10 @@ PinnedExperts::PinnedExperts(Model& model, int threads, size_t keep_free,
 }
 
 PinnedExperts::~PinnedExperts() {
-    for (void* p : blocks_) cudaFreeHost(p);
+    for (const auto& [p, n] : blocks_) {
+        cudaHostUnregister(p);
+        munmap(p, n);
+    }
 }
 
 }  // namespace strata::glm

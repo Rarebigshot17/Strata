@@ -30,7 +30,13 @@ def make_profile(path: str) -> None:
                    [(2 * S, 6 * S, 0, 1, 10 * 10**9), (9 * S, 10 * S, 1, 2, 10**9)])
     db.execute("CREATE TABLE NVTX_EVENTS (start INT, end INT, text TEXT, textId INT)")
     db.executemany("INSERT INTO NVTX_EVENTS VALUES (?, ?, ?, ?)",
-                   [(0, 10 * S, None, 3), (5 * S, 6 * S, "routing: wait for the GPU", None)])
+                   [(0, 10 * S, None, 3), (5 * S, 6 * S, "routing: wait for the GPU", None),
+                    (9 * S, 9 * S, "chunk end: wait for every card", None)])
+    # nsys numbers GPUs by PCI order (TARGET_INFO_GPU.id); the activity's deviceId is the CUDA number (cudaId)
+    db.execute("CREATE TABLE TARGET_INFO_GPU (id INT, name TEXT)")
+    db.executemany("INSERT INTO TARGET_INFO_GPU VALUES (?, ?)", [(0, "RTX 3080"), (1, "RTX 3090 Ti")])
+    db.execute("CREATE TABLE TARGET_INFO_CUDA_DEVICE (gpuId INT, cudaId INT, pid INT)")
+    db.executemany("INSERT INTO TARGET_INFO_CUDA_DEVICE VALUES (?, ?, ?)", [(1, 0, 7), (0, 1, 7)])
     db.commit()
     db.close()
 
@@ -62,6 +68,9 @@ class NsysBusyTest(unittest.TestCase):
         self.assertIn("  0:    6.000 s   60.0%", text)
         self.assertIn("  1:    4.000 s   40.0%", text)
         self.assertIn("chunk 0+1024", text)
+        self.assertIn("CUDA device 0 (RTX 3090 Ti):", text)
+        self.assertIn("CUDA device 1 (RTX 3080):", text)
+        self.assertNotIn("chunk end: wait for every card    0.000 s", text.split("host time")[0])
         self.assertIn("102.4 tokens/s", text)
         self.assertIn("routing: wait for the GPU", text)
         self.assertIn("gemm_a", text)

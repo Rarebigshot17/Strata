@@ -14,6 +14,7 @@ kernels that took the most time on each card. Standard library only.
 from __future__ import annotations
 
 import argparse
+import re
 import sqlite3
 import sys
 from collections import defaultdict
@@ -101,11 +102,21 @@ def main() -> int:
     if not devices:
         print("no kernels or copies in this profile (was it captured? see --capture-range)")
         return 1
+    # the activity tables' deviceId is the process's CUDA device number; the GPU table numbers the GPUs its own way,
+    # so a name is only taken through a CUDA number (TARGET_INFO_GPU.cuDevice, or TARGET_INFO_CUDA_DEVICE's
+    # cudaId -> gpuId), else none is shown
     names: dict[int, str] = {}
-    for table in ("TARGET_INFO_CUDA_DEVICE", "TARGET_INFO_GPU"):
-        if has_table(db, table) and {"id", "name"} <= columns(db, table):
-            for i, n in db.execute(f"SELECT id, name FROM {table}"):
-                names.setdefault(int(i), name_of(n, ids))
+    if has_table(db, "TARGET_INFO_GPU") and {"cuDevice", "name"} <= columns(db, "TARGET_INFO_GPU"):
+        for cu, n in db.execute("SELECT cuDevice, name FROM TARGET_INFO_GPU"):
+            if cu is not None:
+                names.setdefault(int(cu), name_of(n, ids))
+    if (not names and has_table(db, "TARGET_INFO_CUDA_DEVICE") and has_table(db, "TARGET_INFO_GPU")
+            and {"cudaId", "gpuId"} <= columns(db, "TARGET_INFO_CUDA_DEVICE")
+            and {"id", "name"} <= columns(db, "TARGET_INFO_GPU")):
+        gpu_name = {int(i): name_of(n, ids) for i, n in db.execute("SELECT id, name FROM TARGET_INFO_GPU")}
+        for cuda_id, gpu_id in db.execute("SELECT DISTINCT cudaId, gpuId FROM TARGET_INFO_CUDA_DEVICE"):
+            if gpu_id is not None and int(gpu_id) in gpu_name:
+                names.setdefault(int(cuda_id), gpu_name[int(gpu_id)])
 
     t0 = min(min(s for s, _ in v) for v in list(kern.values()) + [x for d in copies.values() for x in d.values()] if v)
     t1 = max(max(e for _, e in v) for v in list(kern.values()) + [x for d in copies.values() for x in d.values()] if v)
@@ -115,12 +126,12 @@ def main() -> int:
     merged = {d: merge(kern[d]) for d in devices}
     for d in devices:
         k = merged[d]
-        print(f"card {d}{' (' + names[d] + ')' if d in names else ''}:")
+        print(f"CUDA device {d}{' (' + names[d] + ')' if d in names else ''}:")
         print(f"  kernels           {total(k) / 1e9:8.3f} s  {100 * total(k) / span:5.1f}% of the window")
         h2d = merge(copies[d].get("RAM->card", []))
         for what in ("RAM->card", "card->RAM", "card->card", "card->card (peer)"):
             iv = merge(copies[d].get(what, []))
-            if not iv:
+            if not iv or copy_bytes[d][what] < 1 << 20:      # nothing, or a few small copies
                 continue
             gb = copy_bytes[d][what] / 1e9
             busy = total(iv) / 1e9
@@ -156,7 +167,7 @@ def main() -> int:
         cols = columns(db, "NVTX_EVENTS")
         txt = "COALESCE(text, (SELECT value FROM StringIds WHERE id = textId))" if "textId" in cols else "text"
         rows = db.execute(f"SELECT start, end, {txt} FROM NVTX_EVENTS WHERE end IS NOT NULL").fetchall()
-        chunks = [(s, e, t) for s, e, t in rows if t and str(t).startswith("chunk ")]
+        chunks = [(s, e, t) for s, e, t in rows if t and re.fullmatch(r"chunk \d+\+\d+", str(t))]
         if chunks:
             print("\nprompt chunks (host time from start to every card done):")
             for s, e, t in sorted(chunks):
@@ -174,7 +185,7 @@ def main() -> int:
                 print(f"  {t:<40} {v / 1e9:8.3f} s")
 
     for d in devices:
-        print(f"\ncard {d}: the kernels that took the most time")
+        print(f"\nCUDA device {d}: the kernels that took the most time")
         tot = total(merged[d]) or 1
         for name, (count, ns) in sorted(kern_by_name[d].items(), key=lambda x: -x[1][1])[:a.top]:
             print(f"  {ns / 1e9:8.3f} s  {100 * ns / tot:5.1f}%  x{count:<7} {name[:90]}")
