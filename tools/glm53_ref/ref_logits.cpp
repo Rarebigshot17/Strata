@@ -239,8 +239,9 @@ int main(int argc, char ** argv) {
             }
             if (dump.bad || have == 0 || (dumped >= 0 && have != dumped)) {
                 LOG_ERR("--dump-layers: position %d gave %d layers (%s)\n", off, have,
-                        dump.bad ? "a dumped tensor was not contiguous f32" :
-                        have == 0 ? "a name in --dump-names is not in the graph" : "expected the same count every time");
+                        dump.bad    ? "a dumped tensor was not contiguous f32" :
+                        have == 0   ? "a name in --dump-names is not in the graph" :
+                                      "expected the same count every time");
                 fclose(out);
                 fclose(lay);
                 return 1;
