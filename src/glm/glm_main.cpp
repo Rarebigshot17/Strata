@@ -83,7 +83,7 @@ int usage() {
                  "usage: strata-glm -m MODEL.gguf --tokens-file IDS.txt [--out LOGITS.bin] [--ctx N]\n"
                  "                  [--devices 0,1,2] [--split 24,12,10] [--threads N] [--check-cpu]\n"
                  "                  [--max-tokens N] [--vram-reserve GB] [--expert-profile PATH]\n"
-                 "                  [--max-swaps N] [--no-expert-cache] [--prefill] [--prefill-chunk N]\n"
+                 "                  [--max-swaps N] [--cache-decay D] [--no-expert-cache] [--prefill] [--prefill-chunk N]\n"
                  "       strata-glm -m MODEL.gguf --serve [--ctx N] [--eos-ids A,B] [--park-mib N] [--no-warm]\n"
                  "                  [--checkpoint-min N] [same GPU and cache options]\n");
     return 2;
@@ -114,6 +114,7 @@ int main(int argc, char** argv) {
         else if (a == "--vram-reserve" && (v = next())) opt.cache.vram_reserve_gb = std::atof(v);
         else if (a == "--expert-profile" && (v = next())) opt.cache.profile = v;
         else if (a == "--max-swaps" && (v = next())) opt.cache.max_swaps_per_token = std::atoi(v);
+        else if (a == "--cache-decay" && (v = next())) opt.cache.decay = std::atof(v);
         else if (a == "--no-expert-cache") opt.cache.disabled = true;
         else if (a == "--serve") serve = true;
         else if (a == "--no-warm") warm = false;

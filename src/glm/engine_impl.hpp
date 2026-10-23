@@ -123,6 +123,10 @@ struct GpuEngine::Impl {
     std::unique_ptr<ExpertCache> cache;
     std::vector<int32_t> miss_ids;
     std::vector<float> miss_w;
+    // STRATA_GLM_TIMING=1: where eval's time goes, printed when the engine ends (seconds, tokens)
+    bool timing = false;
+    double t_eval = 0, t_route_wait = 0, t_cpu = 0, t_logits_wait = 0, t_maintain = 0;
+    int64_t t_tokens = 0;
     // host side
     float *h_x = nullptr, *h_w = nullptr, *h_yr = nullptr, *h_pscore = nullptr;
     int32_t* h_ids = nullptr;

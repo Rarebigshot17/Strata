@@ -44,6 +44,7 @@ else()
 endif()
 if(STRATA_GGML_DIR)
   add_subdirectory(${STRATA_GGML_DIR}/ggml ${CMAKE_BINARY_DIR}/ggml EXCLUDE_FROM_ALL)
+  set(STRATA_GGML_SRC ${STRATA_GGML_DIR}/ggml/src)
 else()
   include(FetchContent)
   FetchContent_Declare(strata_llamacpp
@@ -55,12 +56,19 @@ else()
     FetchContent_Populate(strata_llamacpp)
   endif()
   add_subdirectory(${strata_llamacpp_SOURCE_DIR}/ggml ${CMAKE_BINARY_DIR}/ggml EXCLUDE_FROM_ALL)
+  set(STRATA_GGML_SRC ${strata_llamacpp_SOURCE_DIR}/ggml/src)
 endif()
 
 # ---------------------------------------------------------------- the model, the CPU reference, the serve loop
 add_library(strata_glm STATIC
-  src/glm/model.cpp src/glm/cpu_ref.cpp src/glm/cpu_experts.cpp src/glm/sampler.cpp src/glm/serve_loop.cpp)
+  src/glm/model.cpp src/glm/cpu_ref.cpp src/glm/cpu_experts.cpp src/glm/cpu_dot.cpp src/glm/sampler.cpp
+  src/glm/serve_loop.cpp)
 target_include_directories(strata_glm PUBLIC include)
+# cpu_dot.cpp: AVX2 kernels with the grid tables of ggml-common.h, handed out only on a CPU that has AVX2 (cpu_dot.hpp)
+set_source_files_properties(src/glm/cpu_dot.cpp PROPERTIES INCLUDE_DIRECTORIES ${STRATA_GGML_SRC})
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+  set_source_files_properties(src/glm/cpu_dot.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c")
+endif()
 target_link_libraries(strata_glm PUBLIC ggml-cpu ggml-base Threads::Threads)
 
 add_executable(strata-glm-ref src/glm/ref_main.cpp)

@@ -89,8 +89,8 @@ stdout (SIGPIPE, restored even when the launcher ignored it). Run by hand from a
 session of its own, and Ctrl+C or a `kill` ends it as before.
 
 Engine options (strata-glm --serve): `-m <first shard> --ctx N --eos-ids a,b,c [--devices 0,1,2]
-[--split w,w,w] [--threads N] [--vram-reserve GB] [--expert-profile FILE] [--max-swaps N] [--no-expert-cache]
-[--prefill-chunk N] [--park-mib N] [--checkpoint-min N] [--no-warm]`. It exits 2 on any other option. The server
+[--split w,w,w] [--threads N] [--vram-reserve GB] [--expert-profile FILE] [--max-swaps N] [--cache-decay D]
+[--no-expert-cache] [--prefill-chunk N] [--park-mib N] [--checkpoint-min N] [--no-warm]`. It exits 2 on any other option. The server
 adds `--serve`, `--eos-ids` (the end-of-turn ids) and `--split` (the config's `"split"`) to the config's `"args"`,
 and names the GPUs with `CUDA_VISIBLE_DEVICES` (the config's `"gpu"`), not `--devices`. strata-glm-ref takes
 `-m --ctx --eos-ids --threads --park-mib --checkpoint-min` and accepts `--no-warm` (it has nothing to warm).

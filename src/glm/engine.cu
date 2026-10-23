@@ -13,8 +13,10 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <numeric>
 #include <stdexcept>
@@ -243,6 +245,7 @@ GpuEngine::GpuEngine(const Model& model, const EngineOptions& opt) : impl_(new I
     // ---- host side: the CPU experts and the pinned exchange buffers
     const int threads = opt.cpu_threads > 0 ? opt.cpu_threads : ThreadPool::physical_cores();
     I.pool = std::make_unique<ThreadPool>(threads);
+    I.timing = std::getenv("STRATA_GLM_TIMING") && std::atoi(std::getenv("STRATA_GLM_TIMING")) > 0;
     I.experts = std::make_unique<CpuExperts>(model, *I.pool);
     I.h_x = halloc<float>((size_t) E);
     I.h_yr = halloc<float>((size_t) E);
@@ -292,6 +295,15 @@ void GpuEngine::save_profile() const { impl_->cache->save_profile(); }
 GpuEngine::~GpuEngine() {
     // device memory is released with the process; streams and pinned buffers here
     if (!impl_) return;
+    if (impl_->timing && impl_->t_tokens > 0) {
+        const Impl& I = *impl_;
+        const double n = (double) I.t_tokens, ms = 1e3 / n;
+        std::fprintf(stderr,
+                     "timing over %lld tokens, ms per token: eval %.2f = waiting for the GPU at routing %.2f + CPU "
+                     "experts %.2f + waiting for the logits %.2f + cache upkeep %.2f + the rest (launches, host) %.2f\n",
+                     (long long) I.t_tokens, I.t_eval * ms, I.t_route_wait * ms, I.t_cpu * ms, I.t_logits_wait * ms,
+                     I.t_maintain * ms, (I.t_eval - I.t_route_wait - I.t_cpu - I.t_logits_wait - I.t_maintain) * ms);
+    }
     for (auto& d : impl_->ctx)
         if (d.stream) cudaStreamDestroy(d.stream);
     for (void* p : {(void*) impl_->h_x, (void*) impl_->h_yr, (void*) impl_->h_w, (void*) impl_->h_ids,
@@ -445,6 +457,9 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
     const int64_t E = c.n_embd, hc = c.hc, t = pos_;
     if (t >= I.opt.max_ctx) throw std::runtime_error("the sequence is longer than the context (--ctx)");
     if (token < 0 || token >= c.n_vocab) throw std::runtime_error("token id outside the vocabulary");
+    using tclock = std::chrono::steady_clock;
+    const auto sec = [](tclock::time_point a) { return std::chrono::duration<double>(tclock::now() - a).count(); };
+    const auto t_eval0 = tclock::now();
 
     // ---- embedding (hc_init), dequantized on the host
     {
@@ -590,7 +605,9 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
             ok(cudaMemcpyAsync(I.h_x, d.xn, (size_t) E * sizeof(float), cudaMemcpyDeviceToHost, d.stream), "x");
             ok(cudaMemcpyAsync(I.h_ids, d.ids, (size_t) KU * sizeof(int32_t), cudaMemcpyDeviceToHost, d.stream), "ids");
             ok(cudaMemcpyAsync(I.h_w, d.wexp, (size_t) KU * sizeof(float), cudaMemcpyDeviceToHost, d.stream), "w");
+            const auto t_rw = tclock::now();
             ok(cudaStreamSynchronize(d.stream), "sync");
+            if (I.timing) I.t_route_wait += sec(t_rw);
             I.cache->record(il, I.h_ids, KU);
             // the cached experts on the GPU, in routing order; the rest go to the CPU
             const int64_t F = c.n_ff_exp[(size_t) il];
@@ -619,7 +636,9 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
                 gpu::gemv(l.down_shexp, d.fact, d.ysh, d.q8, s);
             }
             if (!I.miss_ids.empty()) {
+                const auto t_c = tclock::now();
                 I.experts->run(il, I.h_x, I.miss_ids.data(), I.miss_w.data(), (int) I.miss_ids.size(), I.h_yr);
+                if (I.timing) I.t_cpu += sec(t_c);
                 ok(cudaMemcpyAsync(d.y, I.h_yr, (size_t) E * sizeof(float), cudaMemcpyHostToDevice, d.stream),
                    "experts");
             } else {
@@ -648,8 +667,16 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
     gpu::gemv(I.output, d.xn, d.out_logits, d.q8, d.stream);
     ok(cudaMemcpyAsync(I.logits.data(), d.out_logits, (size_t) c.n_vocab * sizeof(float), cudaMemcpyDeviceToHost,
                        d.stream), "logits");
+    const auto t_lw = tclock::now();
     ok(cudaStreamSynchronize(d.stream), "sync");
+    const auto t_m = tclock::now();
     I.cache->maintain();
+    if (I.timing) {
+        I.t_logits_wait += std::chrono::duration<double>(t_m - t_lw).count();
+        I.t_maintain += sec(t_m);
+        I.t_eval += sec(t_eval0);
+        ++I.t_tokens;
+    }
     ++pos_;
     return I.logits;
 }

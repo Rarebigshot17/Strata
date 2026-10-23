@@ -65,6 +65,16 @@ ExpertCache::ExpertCache(const Model& model, const ExpertCacheOptions& opt) : m_
             loaded_profile_ = (bool) in;
         }
     }
+    copier_ = std::thread([this] { copier(); });
+}
+
+ExpertCache::~ExpertCache() {
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        stop_ = true;
+    }
+    cv_todo_.notify_all();
+    if (copier_.joinable()) copier_.join();
 }
 
 size_t ExpertCache::allocate(int dev, const std::vector<int64_t>& layers) {
@@ -103,20 +113,81 @@ size_t ExpertCache::allocate(int dev, const std::vector<int64_t>& layers) {
     return used;
 }
 
-void ExpertCache::load(int64_t il, int e, int slot) {
-    ExpertSlots& s = L_[(size_t) il];
+void ExpertCache::copy_expert(int64_t il, int e, int slot, void* stream) {
+    const ExpertSlots& s = L_[(size_t) il];
     const LayerWeights& w = m_.layer(il);
-    const int old = s.expert_in[(size_t) slot];
-    if (old >= 0) s.slot_of[(size_t) old] = -1;
     ok(cudaSetDevice(s.dev), "cudaSetDevice");
     uint8_t* dst = s.d + (size_t) slot * s.blob;
     const Tensor g = w.gate_exps.slice2(e), u = w.up_exps.slice2(e), d = w.down_exps.slice2(e);
-    ok(cudaMemcpy(dst, g.data, s.up_off, cudaMemcpyHostToDevice), "expert copy");
-    ok(cudaMemcpy(dst + s.up_off, u.data, s.down_off - s.up_off, cudaMemcpyHostToDevice), "expert copy");
-    ok(cudaMemcpy(dst + s.down_off, d.data, s.down.row_bytes * (size_t) s.down.n_out, cudaMemcpyHostToDevice),
-       "expert copy");
+    const cudaStream_t st = (cudaStream_t) stream;
+    ok(cudaMemcpyAsync(dst, g.data, s.up_off, cudaMemcpyHostToDevice, st), "expert copy");
+    ok(cudaMemcpyAsync(dst + s.up_off, u.data, s.down_off - s.up_off, cudaMemcpyHostToDevice, st), "expert copy");
+    ok(cudaMemcpyAsync(dst + s.down_off, d.data, s.down.row_bytes * (size_t) s.down.n_out, cudaMemcpyHostToDevice,
+                       st), "expert copy");
+    ok(cudaStreamSynchronize(st), "expert copy");
+}
+
+void ExpertCache::load(int64_t il, int e, int slot) {
+    ExpertSlots& s = L_[(size_t) il];
+    const int old = s.expert_in[(size_t) slot];
+    if (old >= 0) s.slot_of[(size_t) old] = -1;
+    copy_expert(il, e, slot, nullptr);   // at start (warm_start), before any kernel runs
     s.expert_in[(size_t) slot] = e;
     s.slot_of[(size_t) e] = slot;
+}
+
+void ExpertCache::copier() {
+    std::vector<cudaStream_t> streams;   // per device, made here
+    for (;;) {
+        Copy job;
+        {
+            std::unique_lock<std::mutex> lk(mu_);
+            cv_todo_.wait(lk, [&] { return stop_ || !todo_.empty(); });
+            if (stop_) return;
+            job = todo_.front();
+            todo_.pop_front();
+            ++busy_;
+        }
+        const int dev = L_[(size_t) job.il].dev;
+        bool copied = false;
+        try {
+            if ((int) streams.size() <= dev) streams.resize((size_t) dev + 1, nullptr);
+            ok(cudaSetDevice(dev), "cudaSetDevice");
+            if (!streams[(size_t) dev])
+                ok(cudaStreamCreateWithFlags(&streams[(size_t) dev], cudaStreamNonBlocking), "cudaStreamCreate");
+            copy_expert(job.il, job.e, job.slot, streams[(size_t) dev]);
+            copied = true;
+        } catch (const std::exception& ex) {
+            std::fprintf(stderr, "expert cache: copying expert %d of layer %lld failed (%s); its slot stays empty\n",
+                         job.e, (long long) job.il, ex.what());
+        }
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!copied) job.e = -1;
+        done_.push_back(job);
+        --busy_;
+        if (todo_.empty() && busy_ == 0) cv_idle_.notify_all();
+    }
+}
+
+void ExpertCache::apply_done() {
+    std::vector<Copy> done;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        done.swap(done_);
+    }
+    for (const Copy& c : done) {
+        ExpertSlots& s = L_[(size_t) c.il];
+        s.expert_in[(size_t) c.slot] = c.e;
+        if (c.e >= 0) s.slot_of[(size_t) c.e] = c.slot;
+    }
+}
+
+void ExpertCache::drain() {
+    {
+        std::unique_lock<std::mutex> lk(mu_);
+        cv_idle_.wait(lk, [&] { return todo_.empty() && busy_ == 0; });
+    }
+    apply_done();
 }
 
 void ExpertCache::warm_start() {
@@ -135,7 +206,7 @@ void ExpertCache::warm_start() {
 
 int ExpertCache::slot(int64_t il, int e) const {
     const ExpertSlots& s = L_[(size_t) il];
-    return s.n_slots ? s.slot_of[(size_t) e] : -1;
+    return s.n_slots && s.slot_of[(size_t) e] >= 0 ? s.slot_of[(size_t) e] : -1;
 }
 
 void ExpertCache::matrices(int64_t il, int slot, gpu::DevMatrix& gate, gpu::DevMatrix& up,
@@ -152,9 +223,9 @@ void ExpertCache::matrices(int64_t il, int slot, gpu::DevMatrix& gate, gpu::DevM
 
 int ExpertCache::claim_free(int64_t il, int e) {
     ExpertSlots& s = L_[(size_t) il];
-    if (s.n_slots == 0 || s.slot_of[(size_t) e] >= 0) return -1;
+    if (s.n_slots == 0 || s.slot_of[(size_t) e] != -1) return -1;
     for (int i = 0; i < s.n_slots; ++i)
-        if (s.expert_in[(size_t) i] < 0) {
+        if (s.expert_in[(size_t) i] == -1) {
             s.expert_in[(size_t) i] = e;
             s.slot_of[(size_t) e] = i;
             return i;
@@ -173,12 +244,19 @@ void ExpertCache::record(int64_t il, const int32_t* ids, int k) {
 }
 
 void ExpertCache::maintain() {
+    apply_done();
     const Config& c = m_.config();
     for (auto& row : score_)
         for (auto& v : row) v *= (float) opt_.decay;
     // filling a free slot costs one copy and displaces nothing, so the cache fills four times faster than it swaps
     // the starting layer rotates, so a cap reached early in the loop does not always favour the first layers
     int swaps = 0, fills = 0;
+    // copies still queued or running count against this token's swaps, so the copy thread never falls behind by
+    // more than a token's worth (a backlog leaves evicted slots empty while it waits)
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        swaps = std::min<int>((int) todo_.size() + busy_, opt_.max_swaps_per_token);
+    }
     const int64_t first = tick_++ % c.n_layer;
     for (int64_t n = 0; n < c.n_layer; ++n) {
         const int64_t il = (first + n) % c.n_layer;
@@ -186,12 +264,13 @@ void ExpertCache::maintain() {
         auto& miss = missed_[(size_t) il];
         for (int e : miss) {
             if (swaps >= opt_.max_swaps_per_token && fills >= 4 * opt_.max_swaps_per_token) break;
-            if (s.slot_of[(size_t) e] >= 0) continue;
+            if (s.slot_of[(size_t) e] != -1) continue;   // cached, or being copied
             const auto& sc = score_[(size_t) il];
             int victim = -1;
             float vscore = 0.0f;
             for (int i = 0; i < s.n_slots; ++i) {
                 const int ex = s.expert_in[(size_t) i];
+                if (ex == kLoading) continue;
                 if (ex < 0) { victim = i; vscore = -1.0f; break; }
                 if (victim < 0 || sc[(size_t) ex] < vscore) { victim = i; vscore = sc[(size_t) ex]; }
             }
@@ -203,7 +282,15 @@ void ExpertCache::maintain() {
                 if (swaps >= opt_.max_swaps_per_token || !(sc[(size_t) e] > 1.2f * vscore + 0.5f)) continue;
                 ++swaps;
             }
-            load(il, e, victim);
+            const int old = s.expert_in[(size_t) victim];
+            if (old >= 0) s.slot_of[(size_t) old] = -1;   // no kernel reads it now: the token's work is done
+            s.expert_in[(size_t) victim] = kLoading;
+            s.slot_of[(size_t) e] = kLoading;
+            {
+                std::lock_guard<std::mutex> lk(mu_);
+                todo_.push_back({il, e, victim});
+            }
+            cv_todo_.notify_one();
         }
         miss.clear();
     }

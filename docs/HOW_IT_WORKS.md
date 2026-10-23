@@ -27,9 +27,12 @@ The same in technical terms:
   over the cards in order, in proportion to each card's free VRAM at start or to `--split` (the run config's
   `"split"`), with the output head on the last card. What VRAM is left, less `--vram-reserve` (1 GB per card by
   default), holds an **expert cache** of the experts each card's layers use most.
-- **The expert cache:** every expert has a use score that halves over about 700 tokens. A missed expert takes a
-  free slot, or replaces a cached one whose score is clearly lower. At most 8 experts are copied in per token
-  (`--max-swaps`), so a change of topic moves the cache over a few dozen tokens instead of stalling one.
+- **The expert cache:** every expert has a use score that halves over about 14 tokens (`--cache-decay`, 0.95 per
+  token). While the model writes an answer it keeps coming back to a small set of experts, so the cache follows
+  the conversation: a missed expert takes a free slot, or replaces a cached one whose score is clearly lower. At
+  most 32 experts are copied in per token (`--max-swaps`), on a thread of their own while decoding goes on; a
+  copy still running counts against the next token's 32. The new expert takes its slot at the first token after
+  its copy is done.
   `--expert-profile FILE` saves the scores when the engine leaves its request loop (the server's `QUIT`, or the
   server's end of the pipe closing) and loads them at the next start, so the cache starts full. Every ordinary stop
   of the server (Ctrl+C, closing its terminal, SIGTERM) ends the engine with `QUIT`; an engine that is killed ends

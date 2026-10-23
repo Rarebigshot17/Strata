@@ -195,6 +195,7 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
     const Model& m = I.m;
     const int64_t E = c.n_embd, hc = c.hc, t0 = pos_;
     if (t0 + T > I.opt.max_ctx) throw std::runtime_error("the sequence is longer than the context (--ctx)");
+    I.cache->drain();   // the decode's queued expert copies land before this chunk claims free slots
 
     // ---- embeddings, dequantized on the host, copied into every stream
     {

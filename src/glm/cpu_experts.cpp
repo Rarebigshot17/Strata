@@ -1,6 +1,8 @@
 // src/glm/cpu_experts.cpp - the routed experts on the CPU (cpu_experts.hpp).
 #include "strata/glm/cpu_experts.hpp"
 
+#include "strata/glm/cpu_dot.hpp"
+
 #include "ggml.h"
 #include "ggml-cpu.h"
 
@@ -39,6 +41,10 @@ void CpuExperts::run(int64_t il, const float* x, const int32_t* ids, const float
     const auto* tg = dot_traits(w.gate_exps);
     const auto* tu = dot_traits(w.up_exps);
     const auto* td = dot_traits(w.down_exps);
+    // cpu_dot.hpp's kernel where there is one (bitwise ggml's), else ggml-cpu's
+    const VecDotFn dot_g = fast_vec_dot((int) w.gate_exps.type) ? fast_vec_dot((int) w.gate_exps.type) : tg->vec_dot;
+    const VecDotFn dot_u = fast_vec_dot((int) w.up_exps.type) ? fast_vec_dot((int) w.up_exps.type) : tu->vec_dot;
+    const VecDotFn dot_d = fast_vec_dot((int) w.down_exps.type) ? fast_vec_dot((int) w.down_exps.type) : td->vec_dot;
     quant_act(w.gate_exps, x, E, xq_g_);
     quant_act(w.up_exps, x, E, xq_u_);
     g_.resize((size_t) (k * F));
@@ -60,7 +66,7 @@ void CpuExperts::run(int64_t il, const float* x, const int32_t* ids, const float
             const int64_t j = rr / F, row = rr % F;
             const uint8_t* wr = (up ? up_ : gate_)[(size_t) j].row(row);
             float sum = 0.0f;
-            (up ? tu : tg)->vec_dot((int) E, &sum, 0, wr, 0, (up ? xq_u_ : xq_g_).data(), 0, 1);
+            (up ? dot_u : dot_g)((int) E, &sum, 0, wr, 0, (up ? xq_u_ : xq_g_).data(), 0, 1);
             (up ? u_ : g_)[(size_t) rr] = sum;
         }
     });
@@ -95,7 +101,7 @@ void CpuExperts::run(int64_t il, const float* x, const int32_t* ids, const float
             float acc = 0.0f;
             for (int j = 0; j < k; ++j) {
                 float sum = 0.0f;
-                td->vec_dot((int) F, &sum, 0, down_[(size_t) j].row(row), 0, hq_.data() + hrow * j, 0, 1);
+                dot_d((int) F, &sum, 0, down_[(size_t) j].row(row), 0, hq_.data() + hrow * j, 0, 1);
                 acc += weights[j] * sum;
             }
             out[row] = acc;

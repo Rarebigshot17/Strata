@@ -324,6 +324,45 @@ __global__ void k_kda_step(float* S, const float* q, const float* k, const float
     }
 }
 
+// k_kda_step for a compile-time D: one thread per column j of a head's state, the column kept in registers between
+// the two passes (k_kda_step writes it out and reads it back), and D / 64 blocks per head instead of one. The same
+// expressions in the same order, so the same values.
+template <int D>
+__global__ void __launch_bounds__(64) k_kda_step_cols(float* S, const float* q, const float* k, const float* v,
+                                                      const float* g, const float* beta, float* o, float scale) {
+    __shared__ float eg[D], ks[D], qs[D];
+    const int h = blockIdx.x;
+    for (int i = threadIdx.x; i < D; i += blockDim.x) {
+        eg[i] = expf(g[(size_t) h * D + i]);
+        ks[i] = k[(size_t) h * D + i];
+        qs[i] = q[(size_t) h * D + i];
+    }
+    __syncthreads();
+    const int j = blockIdx.y * blockDim.x + threadIdx.x;
+    if (j >= D) return;
+    float* Sh = S + (size_t) h * D * D;
+    const float bh = beta[h];
+    float col[D];
+    float sk = 0.0f;
+    // the roundings spelled out: k_kda_step stores S * exp(g) before its second pass, so that product is rounded
+    // on its own there; kept in a register, the compiler could fuse it into the next multiply-add instead
+#pragma unroll
+    for (int i = 0; i < D; ++i) {
+        const float s = __fmul_rn(Sh[(size_t) i * D + j], eg[i]);
+        col[i] = s;
+        sk = __fmaf_rn(s, ks[i], sk);
+    }
+    const float delta = (v[(size_t) h * D + j] - sk) * bh;
+    float acc = 0.0f;
+#pragma unroll
+    for (int i = 0; i < D; ++i) {
+        const float s = __fmaf_rn(ks[i], delta, col[i]);
+        Sh[(size_t) i * D + j] = s;
+        acc = __fmaf_rn(s, qs[i], acc);
+    }
+    o[(size_t) h * D + j] = acc * scale;
+}
+
 __global__ void k_kda_out_gate(const float* o, const float* o_norm, const float* g2, float* gated, int D, float eps) {
     const size_t base = (size_t) blockIdx.x * D;
     float ss = 0.0f;
@@ -556,6 +595,11 @@ void l2_norm_heads(float* x, int H, int D, void* stream) {
 
 void kda_step(float* S_, const float* q, const float* k, const float* v, const float* g, const float* beta, float* o,
               int H, int D, void* stream) {
+    if (D == 128) {
+        k_kda_step_cols<128><<<dim3(H, 2), 64, 0, S(stream)>>>(S_, q, k, v, g, beta, o, 1.0f / sqrtf((float) D));
+        check("kda_step");
+        return;
+    }
     const int threads = D >= 128 ? 128 : 32 * ((D + 31) / 32);
     k_kda_step<<<H, threads, (size_t) 3 * D * sizeof(float), S(stream)>>>(S_, q, k, v, g, beta, o, D,
                                                                           1.0f / sqrtf((float) D));

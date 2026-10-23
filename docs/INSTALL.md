@@ -374,7 +374,8 @@ server adds `--serve`, `--split` from the config's `split` key, and `--eos-ids` 
 | `--checkpoint-min N` | No checkpoint closer than N tokens to the start of a conversation. | 256 |
 | `--expert-profile FILE` | The expert use scores: loaded at start (the VRAM cache starts full), written when the engine ends cleanly. | None |
 | `--vram-reserve GB` | VRAM left free on each GPU after the expert cache. | 1 |
-| `--max-swaps N` | Experts copied into the VRAM cache per token, all layers together. | 8 |
+| `--max-swaps N` | Experts copied into the VRAM cache per token, all layers together, in the background. | 32 |
+| `--cache-decay D` | How fast the expert cache forgets: each token multiplies every expert's use score by D. | 0.95 (measured on napster-ai, UD-IQ3_XXS, four chat prompts after the first: 15.1-15.9 tokens/s and 67-69% of the experts in VRAM, against 12.4-12.8 tokens/s and 35-38% with 0.999 and 8 swaps on the same build) |
 | `--no-expert-cache` | No VRAM expert cache. | Off |
 | `--prefill-chunk N` | Prompt tokens read at once. 0 = one at a time. | 256 |
 | `--threads N` (`-t N`) | CPU threads for the experts computed on the CPU. The warm-up uses at most 16 of them (8 when this is 0). | 0 = one per CPU core (measured on napster-ai, Xeon E5-2699 v4, UD-IQ3_XXS, 205 tokens one at a time: 22 threads 10.0 tokens/s, all 44 hardware threads 6.8) |
