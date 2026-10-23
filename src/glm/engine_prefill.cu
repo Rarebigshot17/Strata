@@ -55,6 +55,11 @@ void cb(cublasStatus_t s, const char* what) {
 
 size_t align256(size_t b) { return (b + 255) / 256 * 256; }
 
+// The attention half's tokens at a time: at most kRowsMax, fewer while its arena would pass kAttnArena (a long
+// context's pool scores take 8 bytes per query and pool: 1 MiB a query at 524,288 tokens).
+constexpr int kRowsMax = 512;
+constexpr size_t kAttnArena = (size_t) 512 << 20;
+
 }  // namespace
 
 void GpuEngine::setup_prefill() {
@@ -65,35 +70,47 @@ void GpuEngine::setup_prefill() {
     const int64_t E = c.n_embd, hc = c.hc, D = c.kda_head_dim, KL = c.kv_lora_rank, HK = c.head_k_mla,
                   HV = c.head_v_mla, QL = c.q_lora_rank, ID = c.indexer_head_size,
                   P = c.indexer_kpool, NE = c.n_expert, KU = c.n_expert_used;
-    int64_t maxH = 0, maxDI = 0, maxF = 0, maxFF = c.n_ff;
+    int64_t maxH = 0, maxDI = 0, maxF = 0;
     for (int64_t il = 0; il < c.n_layer; ++il) {
         maxH = std::max(maxH, c.n_head[(size_t) il]);
         if (c.is_kda(il)) maxDI = std::max(maxDI, c.n_head[(size_t) il] * D);
-        if (!c.is_dense(il)) {
-            maxF = std::max(maxF, c.n_ff_exp[(size_t) il]);
-            maxFF = std::max(maxFF, c.n_ff_exp[(size_t) il] * std::max<int64_t>(c.n_expert_shared, 1));
-        }
+        if (!c.is_dense(il)) maxF = std::max(maxF, c.n_ff_exp[(size_t) il]);
     }
-    // the three phases share one arena: the KDA mixer, the MLA mixer, the FFN
+    // Everything but the routed experts runs Ta tokens at a time (the attention half, the mixing, a dense FFN):
+    // their buffers grow with the context (the dense range's scores, every query's pool scores), the routed experts'
+    // with T only, and a larger T spreads the copying of the streamed experts over more tokens. The phases share one
+    // arena: the KDA mixer, the MLA mixer, the FFN.
     const size_t f = sizeof(float);
     const int64_t MS = I.max_sel, IH = c.indexer_n_head;
-    const size_t kda = align256(8 * T * maxDI * f) + align256(T * D * f) + align256(T * maxH * f) + 8 * 256;
-    // MLA: the projections and the indexer's keys, then the attention: over every cell (the dense range), or past
-    // it the indexer's queries and pool scores, and per batch of queries their gathered cells, scores and
-    // probabilities (sparse_batch() queries at a time, at least min(T, 32))
-    const size_t mla_common = align256(T * QL * f) + align256(T * maxH * HK * f) + align256(T * KL * f) +
-                              2 * align256(T * maxH * KL * f) + align256(T * maxH * KL * 2) +
-                              align256(T * maxH * HV * f) + align256(T * ID * f) + 2 * align256((P + T) * ID * f) +
-                              8 * 256;
-    const size_t dense_att = align256(T * maxH * MS * f) + align256(T * maxH * MS * 2);
-    const int64_t nb = std::min<int64_t>(T, 32);
-    const size_t sparse_att = align256(T * IH * ID * f) + align256(T * IH * f) + 2 * align256(T * I.max_pools * f) +
-                              align256(nb * MS * KL * 2) + align256(nb * maxH * MS * f) + align256(nb * maxH * MS * 2) +
-                              8 * 256;
-    const size_t mla = mla_common + std::max(dense_att, sparse_att);
-    const size_t ffn = 3 * align256(T * maxFF * f) + align256(T * NE * f) + align256(T * KU * f) +
+    int64_t FM = 0;                                  // the widest routed or shared expert
+    for (int64_t il = 0; il < c.n_layer; ++il)
+        if (!c.is_dense(il)) FM = std::max(FM, c.n_ff_exp[(size_t) il] * std::max<int64_t>(c.n_expert_shared, 1));
+    FM = std::max(FM, maxF);
+    const int64_t n_ff_dense = c.n_layer_dense_lead > 0 ? c.n_ff : 0;
+    const auto attn_arena = [&](int64_t r) {
+        const size_t kda = align256(8 * r * maxDI * f) + align256(r * D * f) + align256(r * maxH * f) + 8 * 256;
+        // MLA: the projections and the indexer's keys, then the attention: over every cell (the dense range), or
+        // past it the indexer's queries and pool scores, and per batch of queries their gathered cells, scores and
+        // probabilities (at least min(r, 32) queries a batch)
+        const size_t mla_common = align256(r * QL * f) + align256(r * maxH * HK * f) + align256(r * KL * f) +
+                                  2 * align256(r * maxH * KL * f) + align256(r * maxH * KL * 2) +
+                                  align256(r * maxH * HV * f) + align256(r * ID * f) + 2 * align256((P + r) * ID * f) +
+                                  8 * 256;
+        const size_t dense_att = align256(r * maxH * MS * f) + align256(r * maxH * MS * 2);
+        const int64_t nb = std::min<int64_t>(r, 32);
+        const size_t sparse_att = align256(r * IH * ID * f) + align256(r * IH * f) + 2 * align256(r * I.max_pools * f) +
+                                  align256(nb * MS * KL * 2) + align256(nb * maxH * MS * f) +
+                                  align256(nb * maxH * MS * 2) + 8 * 256;
+        return std::max(kda, mla_common + std::max(dense_att, sparse_att));
+    };
+    int Ta = I.opt.prefill_rows > 0 ? std::min(I.opt.prefill_rows, T) : std::min(T, kRowsMax);
+    if (I.opt.prefill_rows <= 0)
+        while (Ta > 16 && attn_arena(Ta) > kAttnArena) Ta -= 16;
+    I.prefill_rows = Ta;
+    const size_t dense_ffn = 3 * align256(Ta * n_ff_dense * f) + 3 * 256;
+    const size_t moe = 3 * align256(T * FM * f) + align256(T * NE * f) + align256(T * KU * f) +
                        align256(T * KU * sizeof(int32_t)) + align256(T * KU * E * f) + 3 * align256(T * E * f) + 10 * 256;
-    const size_t arena = std::max({kda, mla, ffn});
+    const size_t arena = std::max({attn_arena(Ta), dense_ffn, moe});
 
     // the experts' blob, for the streaming buffers; which layers' experts are page-locked (--pin-experts)
     I.experts_pinned.assign((size_t) c.n_layer, 0);
@@ -120,10 +137,10 @@ void GpuEngine::setup_prefill() {
         d.T = T;
         d.pR = dalloc<float>((size_t) (T * hc * E), b);
         d.pR2 = dalloc<float>((size_t) (T * hc * E), b);
-        d.pflat = dalloc<float>((size_t) (T * hc * E), b);
-        d.pmixes = dalloc<float>((size_t) (T * c.hc_mix_dim()), b);
+        d.pflat = dalloc<float>((size_t) (Ta * hc * E), b);
+        d.pmixes = dalloc<float>((size_t) (Ta * c.hc_mix_dim()), b);
         d.ppc = dalloc<float>((size_t) (T * (2 * hc + hc * hc)), b);
-        d.px = dalloc<float>((size_t) (T * E), b);
+        d.px = dalloc<float>((size_t) (Ta * E), b);
         d.pxn = dalloc<float>((size_t) (T * E), b);
         d.py = dalloc<float>((size_t) (T * E), b);
         d.arena = dalloc<uint8_t>(arena, b);
@@ -143,7 +160,9 @@ void GpuEngine::setup_prefill() {
                                        &l.gate_inp, &l.gate_shexp, &l.up_shexp, &l.down_shexp})
                 if (m->ok()) welems = std::max(welems, (size_t) (m->n_in * m->n_out));
         }
-        const size_t act = (size_t) T * std::max({hc * E, maxDI, maxH * KL, maxH * HK, maxH * HV, maxFF, E, QL});
+        const size_t act = std::max((size_t) Ta * std::max({hc * E, maxDI, maxH * KL, maxH * HK, maxH * HV, n_ff_dense,
+                                                             E, QL}),
+                                    (size_t) T * std::max(E, FM));
         d.gemm = std::make_unique<gpu::GemmCtx>(d.id);
         d.gemm->reserve(welems, act);
         d.bytes += welems * 2 + act * 2;
@@ -242,199 +261,229 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
         gpu::GemmCtx& G = *d.gemm;
         const int64_t H = c.n_head[(size_t) il];
 
-        // ---- attention half
-        gpu::rms_norm_rows(d.pR, d.pflat, T, (int) (hc * E), c.rms_eps, nullptr, s);
-        G.gemm(l.hc_attn_fn, d.pflat, T, d.pmixes, s);
-        gpu::hc_weights_rows(d.pmixes, l.hc_attn_scale, l.hc_attn_base, d.ppc, T, (int) hc, (int) c.hc_sinkhorn_iters,
-                             c.hc_eps, s);
-        gpu::hc_mix_rows(d.pR, d.ppc, d.px, T, (int) hc, (int) E, s);
-        gpu::rms_norm_rows(d.px, d.pxn, T, (int) E, c.rms_eps, l.attn_norm, s);
+        // ---- attention half, Ta tokens at a time (the KDA state, the latent cache and the pooled keys carry over
+        // from one to the next as from chunk to chunk)
+        const int64_t PCW = 2 * hc + hc * hc;           // a token's mHC weights (ppc)
+        const int Ta = I.prefill_rows;
+        const bool mla = !c.is_kda(il);
+        if (mla && sparse && !c.indexer_full[(size_t) il] && d.sel_have != I.sel_version) {
+            // a shared indexer layer on another device than the full one: the chunk's selection from the host
+            // (prefill() runs sparse chunks only when a full layer comes first)
+            const int MS = (int) I.max_sel;
+            ok(cudaMemcpyAsync(d.sel_rows, I.h_sel_rows, (size_t) T * MS * sizeof(int32_t), cudaMemcpyHostToDevice,
+                               d.stream), "selection");
+            ok(cudaMemcpyAsync(d.n_sel, I.h_n_sel, (size_t) T * sizeof(int32_t), cudaMemcpyHostToDevice, d.stream),
+               "selection");
+            ok(cudaStreamSynchronize(d.stream), "sync");    // before the next full layer refills them
+            d.sel_have = I.sel_version;
+        }
+        for (int a0 = 0; a0 < T; a0 += Ta) {
+            const int ta = std::min(Ta, T - a0);
+            const int64_t tp = t0 + a0;                     // the rows' first position
+            const float* R = d.pR + (size_t) a0 * hc * E;
+            float* pc = d.ppc + (size_t) a0 * PCW;
+            float* xn = d.pxn + (size_t) a0 * E;
+            float* y = d.py + (size_t) a0 * E;
+            gpu::rms_norm_rows(R, d.pflat, ta, (int) (hc * E), c.rms_eps, nullptr, s);
+            G.gemm(l.hc_attn_fn, d.pflat, ta, d.pmixes, s);
+            gpu::hc_weights_rows(d.pmixes, l.hc_attn_scale, l.hc_attn_base, pc, ta, (int) hc,
+                                 (int) c.hc_sinkhorn_iters, c.hc_eps, s);
+            gpu::hc_mix_rows(R, pc, d.px, ta, (int) hc, (int) E, s);
+            gpu::rms_norm_rows(d.px, xn, ta, (int) E, c.rms_eps, l.attn_norm, s);
 
-        Bump A{d.arena, d.arena_bytes};
-        if (c.is_kda(il)) {
-            const int64_t D = c.kda_head_dim, DI = H * D, K = c.ssm_d_conv;
-            float* raw = A.take<float>((size_t) (T * DI));
-            float* q = A.take<float>((size_t) (T * DI));
-            float* k = A.take<float>((size_t) (T * DI));
-            float* v = A.take<float>((size_t) (T * DI));
-            float* g = A.take<float>((size_t) (T * DI));
-            float* g2 = A.take<float>((size_t) (T * DI));
-            float* o = A.take<float>((size_t) (T * DI));
-            float* gated = A.take<float>((size_t) (T * DI));
-            float* fa = A.take<float>((size_t) (T * D));
-            float* bta = A.take<float>((size_t) (T * H));
-            float* outs[3] = {q, k, v};
-            const DevMatrix* proj[3] = {&l.wq, &l.wk, &l.wv};
-            for (int j = 0; j < 3; ++j) {
-                G.gemm(*proj[j], d.pxn, T, raw, s);
-                gpu::kda_conv_rows(raw, l.conv_st[j], l.conv_w[j], outs[j], T, (int) DI, (int) K, s);
-            }
-            G.gemm(l.f_a, d.pxn, T, fa, s);
-            G.gemm(l.f_b, fa, T, g, s);
-            gpu::kda_gate_rows(g, l.dt_b, l.a, T, (int) H, (int) D, c.has_gate_lower_bound, c.kda_gate_lower_bound, s);
-            G.gemm(l.beta, d.pxn, T, bta, s);
-            gpu::sigmoid_inplace(bta, (int) (T * H), s);
-            gpu::l2_norm_heads(q, (int) (T * H), (int) D, s);
-            gpu::l2_norm_heads(k, (int) (T * H), (int) D, s);
-            gpu::kda_scan(l.S, q, k, v, g, bta, o, T, (int) H, (int) D, s);
-            G.gemm(l.g_a, d.pxn, T, fa, s);
-            G.gemm(l.g_b, fa, T, g2, s);
-            gpu::kda_out_gate(o, l.o_norm, g2, gated, (int) (T * H), (int) D, c.rms_eps, s);
-            G.gemm(l.wo, gated, T, d.py, s);
-        } else {
-            const int64_t QL = c.q_lora_rank, KL = c.kv_lora_rank, HK = c.head_k_mla, HV = c.head_v_mla;
-            float* qr = A.take<float>((size_t) (T * QL));
-            float* qm = A.take<float>((size_t) (T * H * HK));
-            float* kv = A.take<float>((size_t) (T * KL));
-            float* q_abs = A.take<float>((size_t) (T * H * KL));
-            uint16_t* q16 = A.take<uint16_t>((size_t) (T * H * KL));
-            float* lat = A.take<float>((size_t) (T * H * KL));
-            float* heads = A.take<float>((size_t) (T * H * HV));
-            G.gemm(l.q_a, d.pxn, T, qr, s);
-            gpu::rms_norm_rows(qr, qr, T, (int) QL, c.rms_eps, l.q_a_norm, s);
-            G.gemm(l.q_b, qr, T, qm, s);
-            G.gemm(l.kv_a, d.pxn, T, kv, s);
-            gpu::rms_norm_rows(kv, kv, T, (int) KL, c.rms_eps, l.kv_a_norm, s);
-            gpu::store_f16_rows(kv, l.cache, t0, T, (int) KL, s);
-            G.gemm_heads(l.k_b, (int) H, qm, (int) (H * HK), HK, T, q_abs, (int) (H * KL), KL, s);
-            gpu::to_f16(q_abs, q16, T * H * KL, s);
-
-            if (c.indexer_full[(size_t) il]) {
-                // the pooled keys later tokens' selections read: the pool being filled carries over chunks
-                const int64_t ID = c.indexer_head_size, P = c.indexer_kpool, r = t0 % P;
-                float* ik = A.take<float>((size_t) (T * ID));
-                float* kb = A.take<float>((size_t) ((P + T) * ID));
-                float* gb = A.take<float>((size_t) ((P + T) * ID));
-                if (r) {
-                    ok(cudaMemcpyAsync(kb, l.pend_k, (size_t) (r * ID) * sizeof(float), cudaMemcpyDeviceToDevice,
-                                       d.stream), "pending keys");
-                    ok(cudaMemcpyAsync(gb, l.pend_g, (size_t) (r * ID) * sizeof(float), cudaMemcpyDeviceToDevice,
-                                       d.stream), "pending gates");
+            Bump A{d.arena, d.arena_bytes};
+            if (c.is_kda(il)) {
+                const int64_t D = c.kda_head_dim, DI = H * D, K = c.ssm_d_conv;
+                float* raw = A.take<float>((size_t) (ta * DI));
+                float* q = A.take<float>((size_t) (ta * DI));
+                float* k = A.take<float>((size_t) (ta * DI));
+                float* v = A.take<float>((size_t) (ta * DI));
+                float* g = A.take<float>((size_t) (ta * DI));
+                float* g2 = A.take<float>((size_t) (ta * DI));
+                float* o = A.take<float>((size_t) (ta * DI));
+                float* gated = A.take<float>((size_t) (ta * DI));
+                float* fa = A.take<float>((size_t) (ta * D));
+                float* bta = A.take<float>((size_t) (ta * H));
+                float* outs[3] = {q, k, v};
+                const DevMatrix* proj[3] = {&l.wq, &l.wk, &l.wv};
+                for (int j = 0; j < 3; ++j) {
+                    G.gemm(*proj[j], xn, ta, raw, s);
+                    gpu::kda_conv_rows(raw, l.conv_st[j], l.conv_w[j], outs[j], ta, (int) DI, (int) K, s);
                 }
-                G.gemm(l.idx_k, d.pxn, T, ik, s);
-                gpu::layer_norm_rows(ik, kb + r * ID, T, (int) ID, c.norm_eps, l.idx_k_norm, l.idx_k_norm_b, s);
-                G.gemm(l.idx_gate, d.pxn, T, gb + r * ID, s);
-                const int64_t n_done = (r + T) / P, rem = (r + T) % P;
-                gpu::kpool_rows(kb, gb, l.idx_ape, l.pooled, (t0 - r) / P, (int) n_done, 0, (int) P, (int) ID, s);
-                if (rem) {
-                    ok(cudaMemcpyAsync(l.pend_k, kb + n_done * P * ID, (size_t) (rem * ID) * sizeof(float),
-                                       cudaMemcpyDeviceToDevice, d.stream), "pending keys");
-                    ok(cudaMemcpyAsync(l.pend_g, gb + n_done * P * ID, (size_t) (rem * ID) * sizeof(float),
-                                       cudaMemcpyDeviceToDevice, d.stream), "pending gates");
-                }
-            }
-
-            cublasHandle_t hb = (cublasHandle_t) G.cublas();
-            const float scale = 1.0f / std::sqrt((float) HK), one = 1.0f, zero = 0.0f;
-            if (!sparse) {
-                // causal attention over the latent cache: S = Q K^T * scale, f16 softmax, O = P K
-                const int n_ctx = (int) (t0 + T);
-                float* Sc = A.take<float>((size_t) (T * H) * (size_t) n_ctx);
-                uint16_t* P16 = A.take<uint16_t>((size_t) (T * H) * (size_t) n_ctx);
-                cb(cublasSetStream(hb, d.stream), "cublasSetStream");
-                cb(cublasGemmEx(hb, CUBLAS_OP_T, CUBLAS_OP_N, n_ctx, (int) (T * H), (int) KL, &scale, l.cache,
-                                CUDA_R_16F, (int) KL, q16, CUDA_R_16F, (int) KL, &zero, Sc, CUDA_R_32F, n_ctx,
-                                CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT), "attention scores");
-                gpu::causal_softmax_f16(Sc, P16, T, (int) H, n_ctx, t0, s);
-                cb(cublasGemmEx(hb, CUBLAS_OP_N, CUBLAS_OP_N, (int) KL, (int) (T * H), n_ctx, &one, l.cache,
-                                CUDA_R_16F, (int) KL, P16, CUDA_R_16F, n_ctx, &zero, lat, CUDA_R_32F, (int) KL,
-                                CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT), "attention values");
+                G.gemm(l.f_a, xn, ta, fa, s);
+                G.gemm(l.f_b, fa, ta, g, s);
+                gpu::kda_gate_rows(g, l.dt_b, l.a, ta, (int) H, (int) D, c.has_gate_lower_bound, c.kda_gate_lower_bound,
+                                   s);
+                G.gemm(l.beta, xn, ta, bta, s);
+                gpu::sigmoid_inplace(bta, (int) (ta * H), s);
+                gpu::l2_norm_heads(q, (int) (ta * H), (int) D, s);
+                gpu::l2_norm_heads(k, (int) (ta * H), (int) D, s);
+                gpu::kda_scan(l.S, q, k, v, g, bta, o, ta, (int) H, (int) D, s);
+                G.gemm(l.g_a, xn, ta, fa, s);
+                G.gemm(l.g_b, fa, ta, g2, s);
+                gpu::kda_out_gate(o, l.o_norm, g2, gated, (int) (ta * H), (int) D, c.rms_eps, s);
+                G.gemm(l.wo, gated, ta, y, s);
             } else {
-                const int64_t IH = c.indexer_n_head, ID = c.indexer_head_size, P = c.indexer_kpool;
-                const int MS = (int) I.max_sel;
+                const int64_t QL = c.q_lora_rank, KL = c.kv_lora_rank, HK = c.head_k_mla, HV = c.head_v_mla;
+                float* qr = A.take<float>((size_t) (ta * QL));
+                float* qm = A.take<float>((size_t) (ta * H * HK));
+                float* kv = A.take<float>((size_t) (ta * KL));
+                float* q_abs = A.take<float>((size_t) (ta * H * KL));
+                uint16_t* q16 = A.take<uint16_t>((size_t) (ta * H * KL));
+                float* lat = A.take<float>((size_t) (ta * H * KL));
+                float* heads = A.take<float>((size_t) (ta * H * HV));
+                G.gemm(l.q_a, xn, ta, qr, s);
+                gpu::rms_norm_rows(qr, qr, ta, (int) QL, c.rms_eps, l.q_a_norm, s);
+                G.gemm(l.q_b, qr, ta, qm, s);
+                G.gemm(l.kv_a, xn, ta, kv, s);
+                gpu::rms_norm_rows(kv, kv, ta, (int) KL, c.rms_eps, l.kv_a_norm, s);
+                gpu::store_f16_rows(kv, l.cache, tp, ta, (int) KL, s);
+                G.gemm_heads(l.k_b, (int) H, qm, (int) (H * HK), HK, ta, q_abs, (int) (H * KL), KL, s);
+                gpu::to_f16(q_abs, q16, ta * H * KL, s);
+
                 if (c.indexer_full[(size_t) il]) {
-                    // the selection (build_kpool_select), every query of the chunk at once: the pool scores
-                    // sum_h w[h] relu(q_h . pooled), head by head, then each query's top pools
-                    const int64_t NP = (t0 + T) / P;                // pools complete by the chunk's last token
-                    float* iq = A.take<float>((size_t) (T * IH * ID));
-                    float* wts = A.take<float>((size_t) (T * IH));
-                    float* acc = A.take<float>((size_t) (T * NP));
-                    float* dots = A.take<float>((size_t) (T * NP));
-                    G.gemm(l.idx_q_b, qr, T, iq, s);
-                    G.gemm(l.idx_proj, d.pxn, T, wts, s);
-                    gpu::scale(wts, (int) (T * IH), 1.0f / std::sqrt((float) (ID * IH)), s);
-                    cb(cublasSetStream(hb, d.stream), "cublasSetStream");
-                    for (int64_t h = 0; h < IH; ++h) {
-                        // dots [T][NP] = iq[:, h, :] pooled^T
-                        cb(cublasSgemm(hb, CUBLAS_OP_T, CUBLAS_OP_N, (int) NP, T, (int) ID, &one, l.pooled, (int) ID,
-                                       iq + h * ID, (int) (IH * ID), &zero, dots, (int) NP), "pool scores");
-                        gpu::pool_scores_accum(dots, wts, (int) h, (int) IH, acc, T, NP, h == 0, s);
+                    // the pooled keys later tokens' selections read: the pool being filled carries over chunks
+                    const int64_t ID = c.indexer_head_size, P = c.indexer_kpool, r = tp % P;
+                    float* ik = A.take<float>((size_t) (ta * ID));
+                    float* kb = A.take<float>((size_t) ((P + ta) * ID));
+                    float* gb = A.take<float>((size_t) ((P + ta) * ID));
+                    if (r) {
+                        ok(cudaMemcpyAsync(kb, l.pend_k, (size_t) (r * ID) * sizeof(float), cudaMemcpyDeviceToDevice,
+                                           d.stream), "pending keys");
+                        ok(cudaMemcpyAsync(gb, l.pend_g, (size_t) (r * ID) * sizeof(float), cudaMemcpyDeviceToDevice,
+                                           d.stream), "pending gates");
                     }
-                    gpu::topk_pools_rows(acc, NP, T, t0, (int) P, (int) (c.indexer_top_k / P), c.indexer_select_tail,
-                                         MS, d.sel_rows, d.n_sel, s);
-                    // a copy for the shared indexer layers on the other devices
-                    ok(cudaMemcpyAsync(I.h_sel_rows, d.sel_rows, (size_t) T * MS * sizeof(int32_t),
-                                       cudaMemcpyDeviceToHost, d.stream), "selection");
-                    ok(cudaMemcpyAsync(I.h_n_sel, d.n_sel, (size_t) T * sizeof(int32_t), cudaMemcpyDeviceToHost,
-                                       d.stream), "selection");
-                    ok(cudaStreamSynchronize(d.stream), "sync");
-                    d.sel_have = ++I.sel_version;
-                } else if (d.sel_have != I.sel_version) {
-                    // a shared indexer layer on another device than the full one: its selection from the host
-                    // (prefill() runs sparse chunks only when a full layer comes first)
-                    ok(cudaMemcpyAsync(d.sel_rows, I.h_sel_rows, (size_t) T * MS * sizeof(int32_t),
-                                       cudaMemcpyHostToDevice, d.stream), "selection");
-                    ok(cudaMemcpyAsync(d.n_sel, I.h_n_sel, (size_t) T * sizeof(int32_t), cudaMemcpyHostToDevice,
-                                       d.stream), "selection");
-                    ok(cudaStreamSynchronize(d.stream), "sync");    // before the next full layer refills them
-                    d.sel_have = I.sel_version;
+                    G.gemm(l.idx_k, xn, ta, ik, s);
+                    gpu::layer_norm_rows(ik, kb + r * ID, ta, (int) ID, c.norm_eps, l.idx_k_norm, l.idx_k_norm_b, s);
+                    G.gemm(l.idx_gate, xn, ta, gb + r * ID, s);
+                    const int64_t n_done = (r + ta) / P, rem = (r + ta) % P;
+                    gpu::kpool_rows(kb, gb, l.idx_ape, l.pooled, (tp - r) / P, (int) n_done, 0, (int) P, (int) ID, s);
+                    if (rem) {
+                        ok(cudaMemcpyAsync(l.pend_k, kb + n_done * P * ID, (size_t) (rem * ID) * sizeof(float),
+                                           cudaMemcpyDeviceToDevice, d.stream), "pending keys");
+                        ok(cudaMemcpyAsync(l.pend_g, gb + n_done * P * ID, (size_t) (rem * ID) * sizeof(float),
+                                           cudaMemcpyDeviceToDevice, d.stream), "pending gates");
+                    }
                 }
-                // attention over each query's own cells, nb queries at a time: gathered K, then the dense path's
-                // products batched per query
-                const size_t per_q = align256((size_t) MS * KL * 2) + align256((size_t) H * MS * sizeof(float)) +
-                                     align256((size_t) H * MS * 2);
-                const size_t room = A.cap > A.used + 3 * 256 ? A.cap - A.used - 3 * 256 : 0;
-                const int nb = (int) std::min<size_t>((size_t) T, room / per_q);
-                if (nb < 1) throw std::runtime_error("prompt chunk arena too small for sparse attention");
-                uint16_t* Kg = A.take<uint16_t>((size_t) nb * MS * KL);
-                float* Sc = A.take<float>((size_t) nb * H * MS);
-                uint16_t* P16 = A.take<uint16_t>((size_t) nb * H * MS);
-                cb(cublasSetStream(hb, d.stream), "cublasSetStream");
-                for (int b0 = 0; b0 < T; b0 += nb) {
-                    const int bn = std::min(nb, T - b0);
-                    gpu::gather_cells(l.cache, d.sel_rows + (size_t) b0 * MS, d.n_sel + b0, bn, MS, (int) KL, Kg, s);
-                    // S_b [H][MS] = q_b [H][KL] Kg_b^T * scale
-                    cb(cublasGemmStridedBatchedEx(hb, CUBLAS_OP_T, CUBLAS_OP_N, MS, (int) H, (int) KL, &scale, Kg,
-                                                  CUDA_R_16F, (int) KL, (long long) MS * KL,
-                                                  q16 + (size_t) b0 * H * KL, CUDA_R_16F, (int) KL, (long long) H * KL,
-                                                  &zero, Sc, CUDA_R_32F, MS, (long long) H * MS, bn,
-                                                  CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT),
-                       "sparse attention scores");
-                    gpu::sparse_softmax_f16(Sc, P16, d.n_sel + b0, bn, (int) H, MS, s);
-                    // O_b [H][KL] = P_b [H][MS] Kg_b
-                    cb(cublasGemmStridedBatchedEx(hb, CUBLAS_OP_N, CUBLAS_OP_N, (int) KL, (int) H, MS, &one, Kg,
-                                                  CUDA_R_16F, (int) KL, (long long) MS * KL, P16, CUDA_R_16F, MS,
-                                                  (long long) H * MS, &zero, lat + (size_t) b0 * H * KL, CUDA_R_32F,
-                                                  (int) KL, (long long) H * KL, bn, CUBLAS_COMPUTE_32F,
-                                                  CUBLAS_GEMM_DEFAULT),
-                       "sparse attention values");
+
+                cublasHandle_t hb = (cublasHandle_t) G.cublas();
+                const float scale = 1.0f / std::sqrt((float) HK), one = 1.0f, zero = 0.0f;
+                if (!sparse) {
+                    // causal attention over the latent cache: S = Q K^T * scale, f16 softmax, O = P K
+                    const int n_ctx = (int) (tp + ta);
+                    float* Sc = A.take<float>((size_t) (ta * H) * (size_t) n_ctx);
+                    uint16_t* P16 = A.take<uint16_t>((size_t) (ta * H) * (size_t) n_ctx);
+                    cb(cublasSetStream(hb, d.stream), "cublasSetStream");
+                    cb(cublasGemmEx(hb, CUBLAS_OP_T, CUBLAS_OP_N, n_ctx, (int) (ta * H), (int) KL, &scale, l.cache,
+                                    CUDA_R_16F, (int) KL, q16, CUDA_R_16F, (int) KL, &zero, Sc, CUDA_R_32F, n_ctx,
+                                    CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT), "attention scores");
+                    gpu::causal_softmax_f16(Sc, P16, ta, (int) H, n_ctx, tp, s);
+                    cb(cublasGemmEx(hb, CUBLAS_OP_N, CUBLAS_OP_N, (int) KL, (int) (ta * H), n_ctx, &one, l.cache,
+                                    CUDA_R_16F, (int) KL, P16, CUDA_R_16F, n_ctx, &zero, lat, CUDA_R_32F, (int) KL,
+                                    CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT), "attention values");
+                } else {
+                    const int64_t IH = c.indexer_n_head, ID = c.indexer_head_size, P = c.indexer_kpool;
+                    const int MS = (int) I.max_sel;
+                    if (c.indexer_full[(size_t) il]) {
+                        // the selection (build_kpool_select), every query of the rows at once: the pool scores
+                        // sum_h w[h] relu(q_h . pooled), head by head, then each query's top pools
+                        const int64_t NP = (tp + ta) / P;                // pools complete by the rows' last token
+                        float* iq = A.take<float>((size_t) (ta * IH * ID));
+                        float* wts = A.take<float>((size_t) (ta * IH));
+                        float* acc = A.take<float>((size_t) (ta * NP));
+                        float* dots = A.take<float>((size_t) (ta * NP));
+                        G.gemm(l.idx_q_b, qr, ta, iq, s);
+                        G.gemm(l.idx_proj, xn, ta, wts, s);
+                        gpu::scale(wts, (int) (ta * IH), 1.0f / std::sqrt((float) (ID * IH)), s);
+                        cb(cublasSetStream(hb, d.stream), "cublasSetStream");
+                        for (int64_t h = 0; h < IH; ++h) {
+                            // dots [ta][NP] = iq[:, h, :] pooled^T
+                            cb(cublasSgemm(hb, CUBLAS_OP_T, CUBLAS_OP_N, (int) NP, ta, (int) ID, &one, l.pooled,
+                                           (int) ID, iq + h * ID, (int) (IH * ID), &zero, dots, (int) NP),
+                               "pool scores");
+                            gpu::pool_scores_accum(dots, wts, (int) h, (int) IH, acc, ta, NP, h == 0, s);
+                        }
+                        gpu::topk_pools_rows(acc, NP, ta, tp, (int) P, (int) (c.indexer_top_k / P),
+                                             c.indexer_select_tail, MS, d.sel_rows + (size_t) a0 * MS, d.n_sel + a0, s);
+                    }
+                    // attention over each query's own cells, nb queries at a time: gathered K, then the dense path's
+                    // products batched per query
+                    const size_t per_q = align256((size_t) MS * KL * 2) + align256((size_t) H * MS * sizeof(float)) +
+                                         align256((size_t) H * MS * 2);
+                    const size_t room = A.cap > A.used + 3 * 256 ? A.cap - A.used - 3 * 256 : 0;
+                    const int nb = (int) std::min<size_t>((size_t) ta, room / per_q);
+                    if (nb < 1) throw std::runtime_error("prompt chunk arena too small for sparse attention");
+                    uint16_t* Kg = A.take<uint16_t>((size_t) nb * MS * KL);
+                    float* Sc = A.take<float>((size_t) nb * H * MS);
+                    uint16_t* P16 = A.take<uint16_t>((size_t) nb * H * MS);
+                    cb(cublasSetStream(hb, d.stream), "cublasSetStream");
+                    for (int b0 = 0; b0 < ta; b0 += nb) {
+                        const int bn = std::min(nb, ta - b0);
+                        gpu::gather_cells(l.cache, d.sel_rows + (size_t) (a0 + b0) * MS, d.n_sel + a0 + b0, bn, MS,
+                                          (int) KL, Kg, s);
+                        // S_b [H][MS] = q_b [H][KL] Kg_b^T * scale
+                        cb(cublasGemmStridedBatchedEx(hb, CUBLAS_OP_T, CUBLAS_OP_N, MS, (int) H, (int) KL, &scale, Kg,
+                                                      CUDA_R_16F, (int) KL, (long long) MS * KL,
+                                                      q16 + (size_t) b0 * H * KL, CUDA_R_16F, (int) KL,
+                                                      (long long) H * KL,
+                                                      &zero, Sc, CUDA_R_32F, MS, (long long) H * MS, bn,
+                                                      CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT),
+                           "sparse attention scores");
+                        gpu::sparse_softmax_f16(Sc, P16, d.n_sel + a0 + b0, bn, (int) H, MS, s);
+                        // O_b [H][KL] = P_b [H][MS] Kg_b
+                        cb(cublasGemmStridedBatchedEx(hb, CUBLAS_OP_N, CUBLAS_OP_N, (int) KL, (int) H, MS, &one, Kg,
+                                                      CUDA_R_16F, (int) KL, (long long) MS * KL, P16, CUDA_R_16F, MS,
+                                                      (long long) H * MS, &zero, lat + (size_t) b0 * H * KL,
+                                                      CUDA_R_32F,
+                                                      (int) KL, (long long) H * KL, bn, CUBLAS_COMPUTE_32F,
+                                                      CUBLAS_GEMM_DEFAULT),
+                           "sparse attention values");
+                    }
                 }
+                G.gemm_heads(l.v_b, (int) H, lat, (int) (H * KL), KL, ta, heads, (int) (H * HV), HV, s);
+                G.gemm(l.wo, heads, ta, y, s);
             }
-            G.gemm_heads(l.v_b, (int) H, lat, (int) (H * KL), KL, T, heads, (int) (H * HV), HV, s);
-            G.gemm(l.wo, heads, T, d.py, s);
+        }
+        if (mla && sparse && c.indexer_full[(size_t) il]) {
+            // the chunk's selection, for the shared indexer layers on the other devices
+            const int MS = (int) I.max_sel;
+            ok(cudaMemcpyAsync(I.h_sel_rows, d.sel_rows, (size_t) T * MS * sizeof(int32_t), cudaMemcpyDeviceToHost,
+                               d.stream), "selection");
+            ok(cudaMemcpyAsync(I.h_n_sel, d.n_sel, (size_t) T * sizeof(int32_t), cudaMemcpyDeviceToHost, d.stream),
+               "selection");
+            ok(cudaStreamSynchronize(d.stream), "sync");
+            d.sel_have = ++I.sel_version;
         }
         gpu::hc_post_rows(d.py, d.pR, d.ppc, d.pR2, T, (int) hc, (int) E, s);
         std::swap(d.pR, d.pR2);
 
-        // ---- FFN half
-        gpu::rms_norm_rows(d.pR, d.pflat, T, (int) (hc * E), c.rms_eps, nullptr, s);
-        G.gemm(l.hc_ffn_fn, d.pflat, T, d.pmixes, s);
-        gpu::hc_weights_rows(d.pmixes, l.hc_ffn_scale, l.hc_ffn_base, d.ppc, T, (int) hc, (int) c.hc_sinkhorn_iters,
-                             c.hc_eps, s);
-        gpu::hc_mix_rows(d.pR, d.ppc, d.px, T, (int) hc, (int) E, s);
-        gpu::rms_norm_rows(d.px, d.pxn, T, (int) E, c.rms_eps, l.ffn_norm, s);
+        // ---- FFN half: the mixing and a dense FFN Ta tokens at a time, the routed experts for the whole chunk
+        for (int a0 = 0; a0 < T; a0 += Ta) {
+            const int ta = std::min(Ta, T - a0);
+            const float* R = d.pR + (size_t) a0 * hc * E;
+            float* pc = d.ppc + (size_t) a0 * PCW;
+            float* xn = d.pxn + (size_t) a0 * E;
+            gpu::rms_norm_rows(R, d.pflat, ta, (int) (hc * E), c.rms_eps, nullptr, s);
+            G.gemm(l.hc_ffn_fn, d.pflat, ta, d.pmixes, s);
+            gpu::hc_weights_rows(d.pmixes, l.hc_ffn_scale, l.hc_ffn_base, pc, ta, (int) hc, (int) c.hc_sinkhorn_iters,
+                                 c.hc_eps, s);
+            gpu::hc_mix_rows(R, pc, d.px, ta, (int) hc, (int) E, s);
+            gpu::rms_norm_rows(d.px, xn, ta, (int) E, c.rms_eps, l.ffn_norm, s);
+            if (c.is_dense(il)) {
+                const int64_t F = c.n_ff;
+                Bump D{d.arena, d.arena_bytes};
+                float* fg = D.take<float>((size_t) (ta * F));
+                float* fu = D.take<float>((size_t) (ta * F));
+                float* fact = D.take<float>((size_t) (ta * F));
+                G.gemm(l.ffn_gate, xn, ta, fg, s);
+                G.gemm(l.ffn_up, xn, ta, fu, s);
+                gpu::swiglu(fg, fu, fact, (int) (ta * F), c.clamp_shexp[(size_t) il], s);
+                G.gemm(l.ffn_down, fact, ta, d.py + (size_t) a0 * E, s);
+            }
+        }
 
         Bump B{d.arena, d.arena_bytes};
-        if (c.is_dense(il)) {
-            const int64_t F = c.n_ff;
-            float* fg = B.take<float>((size_t) (T * F));
-            float* fu = B.take<float>((size_t) (T * F));
-            float* fact = B.take<float>((size_t) (T * F));
-            G.gemm(l.ffn_gate, d.pxn, T, fg, s);
-            G.gemm(l.ffn_up, d.pxn, T, fu, s);
-            gpu::swiglu(fg, fu, fact, (int) (T * F), c.clamp_shexp[(size_t) il], s);
-            G.gemm(l.ffn_down, fact, T, d.py, s);
-        } else {
+        if (!c.is_dense(il)) {
             const int KU = (int) c.n_expert_used;
             const int64_t F = c.n_ff_exp[(size_t) il], NE = c.n_expert;
             const int64_t FS = F * std::max<int64_t>(c.n_expert_shared, 1);

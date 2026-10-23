@@ -10,8 +10,9 @@
 # Needs gguf-py: PYTHONPATH=<llama.cpp>/gguf-py (or pip install gguf).
 #
 # For each model: strata-glm --check-cpu (GPU vs CPU reference, layer by layer), the prompt path (--prefill, in
-# chunks) against the CPU reference, the same with the experts page-locked and no VRAM cache, then the GPU's logits
-# against llama.cpp's. Last, conversation parking (tools/glm53_park_check.py).
+# chunks) against the CPU reference, the same 6 tokens at a time outside the routed experts and with the experts
+# page-locked and no VRAM cache, then the GPU's logits against llama.cpp's. Last, conversation parking
+# (tools/glm53_park_check.py).
 #
 # The GPU quantizes activations to q8_1 like llama.cpp's CUDA backend, so on quantized weights its logits differ from
 # the CPU's by more than float rounding: on napster-ai (2026-10-20, 36 seeds) by up to 3.2% of a row's largest
@@ -98,6 +99,14 @@ for m in glm5-next-moe v1 v1-bare q4_0 q8_0; do
         echo "prefill: $(grep check-prefill "$W/pp_$m.txt")"
     else
         echo "prefill FAILED:"; tail -8 "$W/pp_$m.txt"; fail=1
+    fi
+    # again with 6 of each chunk's 16 tokens at a time outside the routed experts (--prefill-rows): the attention,
+    # the pooled keys and the selection then cross pool boundaries inside a chunk
+    if "$SB/strata-glm" -m "$W/$m.gguf" --tokens-file "$W/ids.txt" --prefill --prefill-chunk 16 --prefill-rows 6 \
+            --check-cpu > "$W/rows_$m.txt" 2>&1; then
+        echo "prefill, 6 rows at a time: $(grep check-prefill "$W/rows_$m.txt")"
+    else
+        echo "prefill, 6 rows at a time FAILED:"; tail -8 "$W/rows_$m.txt"; fail=1
     fi
     # again with the experts page-locked (--pin-experts) and no VRAM cache: every expert of every chunk is copied in
     # from RAM by DMA (engine_prefill.cu), and the 4 decoded tokens run every expert on the CPU from the locked copy

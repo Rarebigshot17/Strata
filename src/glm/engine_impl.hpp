@@ -138,6 +138,7 @@ struct GpuEngine::Impl {
     uint8_t* hstage[2] = {nullptr, nullptr};     ///< pinned: an expert copied out of the mapped file
     std::vector<uint8_t> experts_pinned;         ///< per layer: its experts are page-locked (--pin-experts)
     size_t blob_max = 0;
+    int prefill_rows = 0;                        ///< a chunk's tokens at a time outside the routed experts
     std::vector<int32_t> h_ids_rows;
     std::vector<float> h_w_rows;
     int32_t *h_sel_rows = nullptr, *h_n_sel = nullptr;   ///< pinned: the last selection, for other devices

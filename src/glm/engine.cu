@@ -273,6 +273,12 @@ GpuEngine::GpuEngine(const Model& model, const EngineOptions& opt) : impl_(new I
         placement_.push_back(line);
     }
     placement_.push_back(I.cache->summary());
+    if (I.opt.prefill_chunk > 1) {
+        char line[160];
+        std::snprintf(line, sizeof line, "prompt chunks: %d tokens, %d at a time outside the routed experts",
+                      I.opt.prefill_chunk, I.prefill_rows);
+        placement_.push_back(line);
+    }
     reset();
 }
 
