@@ -117,6 +117,16 @@ struct DevCtx {
     uint8_t* dstage[2] = {nullptr, nullptr};
     cudaStream_t copy_stream = nullptr;
     cudaEvent_t ev_copied[2] = {nullptr, nullptr}, ev_free[2] = {nullptr, nullptr};
+    // --prefill-spread: as a helper, this card's share of another card's layer (its rows' tokens and weights, its
+    // partial sum); as the layer's card, the partial sums it receives (one per other card, by ctx index)
+    int sms = 0;                             ///< multiprocessors, for sharing the experts out
+    float* y_part = nullptr;
+    std::vector<float*> y_recv;
+    float* d_wrow = nullptr;
+    int32_t* h_idx = nullptr;                ///< pinned: the share's tokens, uploaded on this card's stream
+    float* h_wrow = nullptr;                 ///< pinned: their routing weights
+    cudaEvent_t ev_x = nullptr;              ///< recorded here when this card has sent its xn to the helpers
+    cudaEvent_t ev_y = nullptr;              ///< recorded here when this card's partial sum is on its way back
 };
 
 struct GpuEngine::Impl {
@@ -159,6 +169,7 @@ struct GpuEngine::Impl {
     int64_t prof_from = -1;
     int prof_left = 0;
     bool prof_on = false;
+    bool spread = false;                         ///< --prefill-spread with more than one card
 
     Impl(const Model& model, const EngineOptions& o) : m(model), c(model.config()), opt(o) {}
 };

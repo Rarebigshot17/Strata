@@ -16,6 +16,9 @@
 // --kv-in-ram keeps the MLA layers' f16 latent cache (11 KB a token for the 3-bit file) in page-locked host RAM,
 // with only the indexer's dense range (its first max_sel rows) in VRAM too; the VRAM it frees goes to the expert
 // cache. Each token's selected rows, and a prompt batch's, are read over PCIe.
+// --prefill-spread: with the experts page-locked (--pin-experts) and more than one card, a prompt chunk's streamed
+// experts of each layer are shared out over every card, not only the one that holds the layer; each card copies its
+// share in from RAM and sends back the weighted sum of its experts' outputs.
 #include "strata/glm/check.hpp"
 #include "strata/glm/cpu_ref.hpp"
 #include "strata/glm/engine.hpp"
@@ -110,6 +113,7 @@ int usage() {
                  "                  [--max-tokens N] [--vram-reserve GB] [--expert-profile PATH]\n"
                  "                  [--max-swaps N] [--cache-decay D] [--no-expert-cache] [--prefill] [--prefill-chunk N]\n"
                  "                  [--pin-experts [--pin-keep-free GB]] [--prefill-rows N] [--kv-in-ram]\n"
+                 "                  [--prefill-spread]\n"
                  "       strata-glm -m MODEL.gguf --serve [--ctx N] [--eos-ids A,B] [--park-mib N] [--no-warm]\n"
                  "                  [--checkpoint-min N] [same GPU and cache options]\n");
     return 2;
@@ -151,6 +155,7 @@ int main(int argc, char** argv) {
         else if (a == "--prefill-chunk" && (v = next())) opt.prefill_chunk = std::atoi(v);
         else if (a == "--prefill-rows" && (v = next())) opt.prefill_rows = std::atoi(v);
         else if (a == "--kv-in-ram") opt.kv_in_ram = true;
+        else if (a == "--prefill-spread") opt.prefill_spread = true;
         else if (a == "--eos-ids" && (v = next())) eos = parse_list<int32_t>(v);
         else if (a == "--park-mib" && (v = next())) so.park_bytes = (size_t) (std::max(0.0, std::atof(v)) * 1048576.0);
         else if (a == "--checkpoint-min" && (v = next())) so.checkpoint_min = std::atoll(v);

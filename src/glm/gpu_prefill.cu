@@ -462,6 +462,13 @@ __global__ void k_scatter_rows(const float* Y, const int32_t* slot, float* O, in
     O[(size_t) slot[i / n] * n + i % n] = Y[i];
 }
 
+__global__ void k_scatter_add_w(const float* Y, const int32_t* tok, const float* w, float* y, int64_t m, int n) {
+    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= m * n) return;
+    const int64_t r = i / n;
+    y[(size_t) tok[r] * n + i % n] += w[r] * Y[i];
+}
+
 __global__ void k_combine(const float* O, const float* w, const float* shared, float* y, int64_t T, int k, int n) {
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= T * n) return;
@@ -614,6 +621,12 @@ void gather_rows(const float* src, const int32_t* idx, float* X, int m, int n, v
 void scatter_rows(const float* Y, const int32_t* slot, float* O, int m, int n, void* stream) {
     k_scatter_rows<<<grid((int64_t) m * n, 256), 256, 0, S(stream)>>>(Y, slot, O, m, n);
     check("scatter_rows");
+}
+
+void scatter_add_w_rows(const float* Y, const int32_t* tok, const float* w, float* y, int m, int n, void* stream) {
+    if (m <= 0) return;
+    k_scatter_add_w<<<grid((int64_t) m * n, 256), 256, 0, S(stream)>>>(Y, tok, w, y, m, n);
+    check("scatter_add_w_rows");
 }
 
 void combine_experts(const float* O, const float* w, const float* shared, float* y, int T, int k, int n,

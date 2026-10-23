@@ -84,5 +84,8 @@ void scatter_rows(const float* Y, const int32_t* slot, float* O, int m, int n, v
 /// y[t] = sum_j w[t][j] * O[t][j] (j in routing order) + (shared ? shared[t] : 0)
 void combine_experts(const float* O, const float* w, const float* shared, float* y, int T, int k, int n,
                      void* stream);
+/// y[tok[i]] += w[i] * Y[i] for m rows of n: one expert's outputs into a card's partial sum (--prefill-spread).
+/// An expert's rows are different tokens, so the rows of one call never meet.
+void scatter_add_w_rows(const float* Y, const int32_t* tok, const float* w, float* y, int m, int n, void* stream);
 
 }  // namespace strata::glm::gpu
