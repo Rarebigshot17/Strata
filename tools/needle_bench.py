@@ -11,8 +11,11 @@ lengths, so the answer may run to --answer-tokens (300); a line whose answer was
     python tools/needle_bench.py --lengths 32k,128k --depths 10,50,90 --url http://127.0.0.1:8102
     python tools/needle_bench.py --lengths 8k,256k --decode-tokens 256 --out needles.json --api-key KEY
 
-The lengths are targets, 2% under so that "128k" fits a 128K context: the text is cut by characters, at about 3.2
-per token to start with and then at the rate each answer's real token count shows, and the line reports that count.
+The lengths are targets, 2% under so that "128k" fits a 128K context. With --gguf (the model's first shard) the text
+is cut to that many tokens by the model's own tokenizer (serve/'s, tools/strata_tokenizer.py; run the tool with the
+server's Python, .venv/bin/python, which has its `regex` module). Without it the text is cut by characters, at about
+3.2 per token to start with and then at the rate each answer's real token count shows (the first length can come out
+10% or more short), and the line reports the real count.
 A prompt the server refuses as too long for its context (it says how many tokens it has, before reading any) is cut
 to fit and sent again. A length the server's context cannot hold is skipped.
 
@@ -115,6 +118,7 @@ def main() -> int:
     ap.add_argument("--answer-tokens", type=int, default=300, help="the longest answer to the question")
     ap.add_argument("--decode-tokens", type=int, default=0, help="a summary turn of this many tokens after each length")
     ap.add_argument("--decode-turns", type=int, default=1, help="how many summary turns, each continuing the last")
+    ap.add_argument("--gguf", help="the model's first shard: size each text by the model's tokenizer")
     ap.add_argument("--timeout", type=float, default=6 * 3600, help="seconds to wait for one answer")
     ap.add_argument("--out", help="also write the results as JSON")
     a = ap.parse_args()
@@ -125,6 +129,11 @@ def main() -> int:
             ctx = int((json.loads(r.read()).get("engine") or {}).get("max_context") or 0)
     except (OSError, ValueError):
         ctx = 0
+    tok = None
+    if a.gguf:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from strata_tokenizer import Tokenizer
+        tok = Tokenizer.from_gguf(a.gguf)
     rnd = random.Random(7)
     cpt = CHARS_PER_TOKEN
     decode_turn = a.decode_tokens > 0
@@ -135,6 +144,14 @@ def main() -> int:
         if ctx and tokens + 200 > ctx:
             print(f"{L:>5}: skipped (the server's context is {ctx})")
             continue
+        if tok is not None:                                # the rate of this length's own text, to 0.5%
+            for _ in range(5):
+                text = haystack(int(tokens * cpt))
+                n = len(tok.encode(text + QUESTION))
+                cpt *= tokens / n
+                if abs(n - tokens) <= 0.005 * tokens:
+                    break
+            print(f"{L:>5}: {n:,} tokens of text by the model's tokenizer", flush=True)
         depths = [int(x) for x in a.depths.split(",")]
         for k, d in enumerate(depths):
             word = f"{rnd.choice(WORDS)}-{rnd.choice(WORDS)}-{rnd.randint(100, 999)}"
@@ -165,7 +182,7 @@ def main() -> int:
             msg, finish = out["choices"][0]["message"], out["choices"][0].get("finish_reason")
             answer, reasoning = msg.get("content") or "", msg.get("reasoning_content") or ""
             s = speeds(out)
-            if s["prompt_tokens"]:
+            if s["prompt_tokens"] and tok is None:
                 cpt = len(prompt) / s["prompt_tokens"]          # the next length is cut at this text's real rate
             ok = word in answer or word in reasoning
             found += ok
