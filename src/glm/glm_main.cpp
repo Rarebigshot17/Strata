@@ -3,14 +3,18 @@
 //   strata-glm -m MODEL.gguf --tokens-file IDS.txt [--out LOGITS.bin] [--ctx N] [--devices 0,1,2]
 //              [--split 24,12,10] [--threads N] [--check-cpu] [--max-tokens N]
 //              [--vram-reserve GB] [--expert-profile PATH] [--max-swaps N] [--no-expert-cache]
+//              [--pin-experts [--pin-keep-free GB]]
 //
 // --out writes the --dump-logits layout (tools/glm53_compare.py); with --prefill it holds one row, the logits after
 // the prompt. --check-cpu also runs the CPU reference on the same tokens and compares, per position, the residual
 // streams after every layer and the logits: the first layer where they part is where a kernel is wrong. Whether
 // the logits pass is check.hpp's rule, with the limits for the model's weights (quantized or float).
+// --pin-experts copies the routed experts into page-locked RAM before the engine starts (pinned_experts.hpp), as
+// long as MemAvailable stays above --pin-keep-free GB (16); the VRAM expert cache is filled from there.
 #include "strata/glm/check.hpp"
 #include "strata/glm/cpu_ref.hpp"
 #include "strata/glm/engine.hpp"
+#include "strata/glm/pinned_experts.hpp"
 #include "strata/glm/serve_loop.hpp"
 #include "strata/glm/serve_signals.hpp"
 
@@ -20,6 +24,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -59,6 +64,21 @@ bool quantized_weights(const strata::glm::Model& m) {
     return false;
 }
 
+/// --pin-experts: the experts into page-locked RAM, with a line on the progress and one on the result.
+std::unique_ptr<strata::glm::PinnedExperts> pin_experts(strata::glm::Model& model, int threads, double keep_gb) {
+    const auto t0 = std::chrono::steady_clock::now();
+    auto p = std::make_unique<strata::glm::PinnedExperts>(
+        model, threads, (size_t) (std::max(0.0, keep_gb) * 1073741824.0), [&](size_t done, size_t total) {
+            const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            std::fprintf(stderr, "pinning the experts: %.1f of %.1f GB (%.0f s, %.2f GB/s)\n", done / 1e9, total / 1e9,
+                         s, s > 0 ? done / 1e9 / s : 0.0);
+        });
+    std::fprintf(stderr, "experts in page-locked RAM: %d of %d MoE layers, %.1f GB%s%s\n", p->layers(),
+                 p->layers() + p->left(), p->bytes() / 1e9, p->left() ? "; the rest stay mapped: " : "",
+                 p->why().c_str());
+    return p;
+}
+
 struct GpuEvaluator : strata::glm::Evaluator {
     strata::glm::GpuEngine& e;
     explicit GpuEvaluator(strata::glm::GpuEngine& eng) : e(eng) {}
@@ -84,6 +104,7 @@ int usage() {
                  "                  [--devices 0,1,2] [--split 24,12,10] [--threads N] [--check-cpu]\n"
                  "                  [--max-tokens N] [--vram-reserve GB] [--expert-profile PATH]\n"
                  "                  [--max-swaps N] [--cache-decay D] [--no-expert-cache] [--prefill] [--prefill-chunk N]\n"
+                 "                  [--pin-experts [--pin-keep-free GB]]\n"
                  "       strata-glm -m MODEL.gguf --serve [--ctx N] [--eos-ids A,B] [--park-mib N] [--no-warm]\n"
                  "                  [--checkpoint-min N] [same GPU and cache options]\n");
     return 2;
@@ -94,7 +115,8 @@ int usage() {
 int main(int argc, char** argv) {
     std::string model_path, ids_path, out_path;
     strata::glm::EngineOptions opt;
-    bool check_cpu = false, serve = false, use_prefill = false, warm = true;
+    bool check_cpu = false, serve = false, use_prefill = false, warm = true, pin = false;
+    double pin_keep_gb = 16.0;
     long long max_tokens = 0;
     std::vector<int32_t> eos;
     strata::glm::ServeOptions so;
@@ -118,6 +140,8 @@ int main(int argc, char** argv) {
         else if (a == "--no-expert-cache") opt.cache.disabled = true;
         else if (a == "--serve") serve = true;
         else if (a == "--no-warm") warm = false;
+        else if (a == "--pin-experts") pin = true;
+        else if (a == "--pin-keep-free" && (v = next())) pin_keep_gb = std::atof(v);
         else if (a == "--prefill") use_prefill = true;
         else if (a == "--prefill-chunk" && (v = next())) opt.prefill_chunk = std::atoi(v);
         else if (a == "--eos-ids" && (v = next())) eos = parse_list<int32_t>(v);
@@ -129,13 +153,15 @@ int main(int argc, char** argv) {
         strata::glm::serve_signals_starting();   // ends with its server while it starts (serve_signals.hpp)
         try {
             strata::glm::Model model(model_path);
+            const int copy_threads = opt.cpu_threads > 0 ? std::min(opt.cpu_threads, 16) : 8;
+            std::unique_ptr<strata::glm::PinnedExperts> pinned;
+            if (pin) pinned = pin_experts(model, copy_threads, pin_keep_gb);   // before the cache fills from them
             strata::glm::GpuEngine eng(model, opt);
             for (const auto& line : eng.placement()) std::fprintf(stderr, "%s\n", line.c_str());
-            if (warm) {
+            if (warm && (!pinned || pinned->left() > 0)) {
                 // the experts into the page cache before READY, so the first prompt does not read them from disk
                 const auto w0 = std::chrono::steady_clock::now();
-                const int threads = opt.cpu_threads > 0 ? std::min(opt.cpu_threads, 16) : 8;
-                model.warm_experts(threads, [&](size_t done, size_t total) {
+                model.warm_experts(copy_threads, [&](size_t done, size_t total) {
                     const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - w0).count();
                     std::fprintf(stderr, "warming the experts: %.1f of %.1f GB (%.0f s, %.2f GB/s)\n", done / 1e9,
                                  total / 1e9, s, s > 0 ? done / 1e9 / s : 0.0);
@@ -176,6 +202,8 @@ int main(int argc, char** argv) {
         const auto& c = model.config();
         std::printf("model: %lld layers, n_embd %lld, vocab %lld, %lld experts top-%lld\n", (long long) c.n_layer,
                     (long long) c.n_embd, (long long) c.n_vocab, (long long) c.n_expert, (long long) c.n_expert_used);
+        std::unique_ptr<strata::glm::PinnedExperts> pinned;
+        if (pin) pinned = pin_experts(model, opt.cpu_threads > 0 ? std::min(opt.cpu_threads, 16) : 8, pin_keep_gb);
         strata::glm::GpuEngine eng(model, opt);
         for (const auto& line : eng.placement()) std::printf("%s\n", line.c_str());
         std::unique_ptr<strata::glm::CpuRef> ref;

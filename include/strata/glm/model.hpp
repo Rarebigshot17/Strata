@@ -147,6 +147,9 @@ public:
     /// the first prompt after a start would otherwise fault them in from disk while it runs. `progress(done,
     /// total)` is called every couple of seconds from the calling thread.
     void warm_experts(int threads, const std::function<void(size_t, size_t)>& progress) const;
+    /// Points layer `il`'s routed experts at a copy of the same bytes elsewhere (pinned_experts.hpp copies them into
+    /// page-locked RAM); everything that reads them through layer() then reads the copy, not the mapped file.
+    void move_experts(int64_t il, const void* gate, const void* up, const void* down);
 
 private:
     Tensor get(const std::string& name, std::vector<int64_t> shape, bool required = true) const;

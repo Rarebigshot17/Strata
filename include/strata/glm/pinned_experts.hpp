@@ -1,0 +1,48 @@
+// include/strata/glm/pinned_experts.hpp - the routed experts in page-locked RAM (strata-glm --pin-experts).
+//
+// The experts are mapped from the GGUF, so they live in the page cache, which CUDA cannot copy from directly: a copy
+// to a GPU goes through a staging buffer, and the prompt path's streaming (every expert a chunk uses that the VRAM
+// cache does not hold) copies each expert twice, the first time on the CPU. Here every MoE layer's experts are copied
+// once, at start, into page-locked memory that every GPU reads by DMA (cudaHostAllocPortable), and the model's expert
+// tensors are pointed at the copies (Model::move_experts): the CPU experts, the VRAM cache's copies and the prompt
+// path read them there. The VRAM cache stays the first place an expert runs from.
+//
+// The memory stays locked while the engine runs (about 110 GB for the 3-bit file): the rest of the PC can neither
+// use nor swap it. Layers are moved while MemAvailable stays above `keep_free` after each; the others stay mapped.
+// The copy reads every expert once, so it also does what the warm-up (Model::warm_experts) does.
+#pragma once
+
+#include "strata/glm/model.hpp"
+
+#include <cstddef>
+#include <functional>
+#include <string>
+#include <vector>
+
+namespace strata::glm {
+
+class PinnedExperts {
+public:
+    /// Copies the experts of the MoE layers, `threads` threads at a time, and points the model at the copies.
+    /// `progress(done, total)` every couple of seconds, from the calling thread.
+    PinnedExperts(Model& model, int threads, size_t keep_free, const std::function<void(size_t, size_t)>& progress);
+    ~PinnedExperts();
+    PinnedExperts(const PinnedExperts&) = delete;
+    PinnedExperts& operator=(const PinnedExperts&) = delete;
+
+    size_t bytes() const { return bytes_; }         ///< page-locked bytes held
+    int layers() const { return layers_; }          ///< MoE layers moved
+    int left() const { return left_; }              ///< MoE layers left mapped
+    const std::string& why() const { return why_; } ///< why the first of those was left, if any
+
+private:
+    std::vector<void*> blocks_;
+    size_t bytes_ = 0;
+    int layers_ = 0, left_ = 0;
+    std::string why_;
+};
+
+/// MemAvailable from /proc/meminfo in bytes, 0 when it cannot be read.
+size_t mem_available();
+
+}  // namespace strata::glm

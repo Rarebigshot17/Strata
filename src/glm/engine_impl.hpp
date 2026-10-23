@@ -136,6 +136,7 @@ struct GpuEngine::Impl {
     int64_t max_sel = 0, max_pools = 0;
     // prompt chunks
     uint8_t* hstage[2] = {nullptr, nullptr};     ///< pinned: an expert copied out of the mapped file
+    std::vector<uint8_t> experts_pinned;         ///< per layer: its experts are page-locked (--pin-experts)
     size_t blob_max = 0;
     std::vector<int32_t> h_ids_rows;
     std::vector<float> h_w_rows;

@@ -310,6 +310,13 @@ size_t Model::expert_bytes() const {
     return n;
 }
 
+void Model::move_experts(int64_t il, const void* gate, const void* up, const void* down) {
+    LayerWeights& w = layers_.at((size_t) il);
+    w.gate_exps.data = gate;
+    w.up_exps.data = up;
+    w.down_exps.data = down;
+}
+
 void Model::warm_experts(int threads, const std::function<void(size_t, size_t)>& progress) const {
     // pieces of 64 MiB, taken by the threads in file order (the disk reads ahead along each)
     const size_t piece = (size_t) 64 << 20;

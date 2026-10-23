@@ -3,8 +3,10 @@
 // The same computation as eval() token by token, batched: each product runs once for the chunk (gpu_gemm.hpp),
 // the KDA recurrence walks the chunk's tokens in one kernel, and MLA attends with two cuBLAS products over the
 // f16 latent cache. Every routed expert the chunk uses is computed once for all of its tokens on the GPU: from
-// the VRAM cache when it is there, otherwise streamed in from RAM through two pinned buffers while the previous
-// one computes (and kept in a free cache slot when there is one).
+// the VRAM cache when it is there, otherwise streamed in from RAM while the previous one computes (and kept in a
+// free cache slot when there is one). Mapped experts go through two pinned buffers, a CPU thread copying each one
+// out of the file first; page-locked ones (--pin-experts) are copied by DMA straight from RAM, the host only
+// queueing the copies.
 //
 // While the indexer still selects every pool (the context below top_k + kpool - 1 tokens) attention is plain
 // causal over the cache. Past that each query attends its own selection, made as the decode path makes it: the
@@ -93,10 +95,18 @@ void GpuEngine::setup_prefill() {
                        align256(T * KU * sizeof(int32_t)) + align256(T * KU * E * f) + 3 * align256(T * E * f) + 10 * 256;
     const size_t arena = std::max({kda, mla, ffn});
 
-    // the experts' blob, for the streaming buffers
+    // the experts' blob, for the streaming buffers; which layers' experts are page-locked (--pin-experts)
+    I.experts_pinned.assign((size_t) c.n_layer, 0);
     for (int64_t il = 0; il < c.n_layer; ++il) {
         if (c.is_dense(il)) continue;
         const LayerWeights& w = I.m.layer(il);
+        bool pinned = true;
+        for (const Tensor* t : {&w.gate_exps, &w.up_exps, &w.down_exps}) {
+            cudaPointerAttributes at{};
+            pinned = pinned && cudaPointerGetAttributes(&at, t->data) == cudaSuccess && at.type == cudaMemoryTypeHost;
+        }
+        (void) cudaGetLastError();   // a pointer CUDA does not know is no error to keep
+        I.experts_pinned[(size_t) il] = pinned ? 1 : 0;
         const size_t blob = w.gate_exps.row_bytes() * (size_t) w.gate_exps.ne[1] +
                             w.up_exps.row_bytes() * (size_t) w.up_exps.ne[1] +
                             w.down_exps.row_bytes() * (size_t) w.down_exps.ne[1];
@@ -502,15 +512,27 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
                         slot = I.cache->claim_free(il, (int) e);
                         staged = slot < 0;
                         base = staged ? d.dstage[b] : I.cache->slot_ptr(il, slot);
-                        if (staged) ok(cudaEventSynchronize(d.ev_free[b]), "staging free");
-                        ok(cudaEventSynchronize(d.ev_copied[b]), "pinned free");
-                        uint8_t* h = I.hstage[b];
                         const Tensor g = lw.gate_exps.slice2(e), u = lw.up_exps.slice2(e), dn = lw.down_exps.slice2(e);
-                        std::memcpy(h, g.data, es.up_off);
-                        std::memcpy(h + es.up_off, u.data, es.down_off - es.up_off);
-                        std::memcpy(h + es.down_off, dn.data, es.down.row_bytes * (size_t) es.down.n_out);
-                        ok(cudaMemcpyAsync(base, h, es.down_off + es.down.row_bytes * (size_t) es.down.n_out,
-                                           cudaMemcpyHostToDevice, d.copy_stream), "expert upload");
+                        const size_t db = es.down.row_bytes * (size_t) es.down.n_out;
+                        if (I.experts_pinned[(size_t) il]) {
+                            // page-locked: straight from RAM, after the expert that last used this buffer
+                            if (staged) ok(cudaStreamWaitEvent(d.copy_stream, d.ev_free[b], 0), "cudaStreamWaitEvent");
+                            ok(cudaMemcpyAsync(base, g.data, es.up_off, cudaMemcpyHostToDevice, d.copy_stream),
+                               "expert upload");
+                            ok(cudaMemcpyAsync(base + es.up_off, u.data, es.down_off - es.up_off,
+                                               cudaMemcpyHostToDevice, d.copy_stream), "expert upload");
+                            ok(cudaMemcpyAsync(base + es.down_off, dn.data, db, cudaMemcpyHostToDevice, d.copy_stream),
+                               "expert upload");
+                        } else {
+                            if (staged) ok(cudaEventSynchronize(d.ev_free[b]), "staging free");
+                            ok(cudaEventSynchronize(d.ev_copied[b]), "pinned free");
+                            uint8_t* h = I.hstage[b];
+                            std::memcpy(h, g.data, es.up_off);
+                            std::memcpy(h + es.up_off, u.data, es.down_off - es.up_off);
+                            std::memcpy(h + es.down_off, dn.data, db);
+                            ok(cudaMemcpyAsync(base, h, es.down_off + db, cudaMemcpyHostToDevice, d.copy_stream),
+                               "expert upload");
+                        }
                         ok(cudaEventRecord(d.ev_copied[b], d.copy_stream), "cudaEventRecord");
                         ok(cudaStreamWaitEvent(d.stream, d.ev_copied[b], 0), "cudaStreamWaitEvent");
                         streamed = true;
