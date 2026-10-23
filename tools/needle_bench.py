@@ -3,7 +3,9 @@
 A long text is built from files in this repository (its docs and source code, and the llama.cpp docs setup downloads
 into third_party/), a code word is hidden in it at a chosen depth, and the model is asked for it through the normal
 API (thinking off, greedy). One line per test: length, depth, found or not, prompt tokens, the engine's prompt and
-decode speeds (the answer's `timings`), time.
+decode speeds (the answer's `timings`), time. The code word counts as found in the answer or in its reasoning: it is
+random, so it can only come from the text. With thinking off the model can still reason in the answer first at long
+lengths, so the answer may run to --answer-tokens (300); a line whose answer was cut there says so.
 
     python tools/needle_bench.py                                  # 32K at depths 10/50/90, http://127.0.0.1:8101
     python tools/needle_bench.py --lengths 32k,128k --depths 10,50,90 --url http://127.0.0.1:8102
@@ -90,7 +92,8 @@ def speeds(out: dict) -> dict:
     """The answer's prompt tokens, how many of them the cache held, and the engine's own prompt and decode rates."""
     u, t = out.get("usage") or {}, out.get("timings") or {}
     return {"prompt_tokens": u.get("prompt_tokens"),
-            "cached": (u.get("prompt_tokens_details") or {}).get("cached_tokens"), "read": t.get("prompt_n"), "prompt_ms": t.get("prompt_ms"), "prompt_tok_s": t.get("prompt_per_second"),
+            "cached": (u.get("prompt_tokens_details") or {}).get("cached_tokens"), "read": t.get("prompt_n"),
+            "prompt_ms": t.get("prompt_ms"), "prompt_tok_s": t.get("prompt_per_second"),
             "decoded": t.get("predicted_n"), "decode_tok_s": t.get("predicted_per_second")}
 
 
@@ -107,6 +110,7 @@ def main() -> int:
     ap.add_argument("--api-key", default="")
     ap.add_argument("--lengths", default="32k", help="comma-separated, e.g. 1k,32k,128k,256k,512k")
     ap.add_argument("--depths", default="10,50,90", help="where the code word sits, percent of the text")
+    ap.add_argument("--answer-tokens", type=int, default=300, help="the longest answer to the question")
     ap.add_argument("--decode-tokens", type=int, default=0, help="a summary turn of this many tokens after each length")
     ap.add_argument("--timeout", type=float, default=6 * 3600, help="seconds to wait for one answer")
     ap.add_argument("--out", help="also write the results as JSON")
@@ -139,7 +143,7 @@ def main() -> int:
                 prompt = text[:cut] + needle + text[cut:] + QUESTION
                 messages = [{"role": "user", "content": prompt}]
                 try:
-                    out, secs = ask(a.url, a.api_key, messages, 40, a.timeout)
+                    out, secs = ask(a.url, a.api_key, messages, a.answer_tokens, a.timeout)
                     err = None
                 except urllib.error.HTTPError as e:
                     n = refused_tokens(e) if e.code == 400 else None
@@ -155,16 +159,19 @@ def main() -> int:
                 print(f"{L:>5} depth {d:>3}%: request failed ({err})", flush=True)
                 rows.append({"length": L, "depth": d, "error": str(err)})
                 continue
-            answer = out["choices"][0]["message"].get("content") or ""
+            msg, finish = out["choices"][0]["message"], out["choices"][0].get("finish_reason")
+            answer, reasoning = msg.get("content") or "", msg.get("reasoning_content") or ""
             s = speeds(out)
             if s["prompt_tokens"]:
                 cpt = len(prompt) / s["prompt_tokens"]          # the next length is cut at this text's real rate
-            ok = word in answer
+            ok = word in answer or word in reasoning
             found += ok
+            cut_off = " (the answer was cut at --answer-tokens)" if finish == "length" else ""
             print(f"{L:>5} depth {d:>3}%: {'FOUND' if ok else 'missed'}  ({s['prompt_tokens'] or 0:,} prompt tokens, "
-                  f"{rate(s)}, {secs:.0f} s)" + ("" if ok else f"  answer: {answer.strip()[:80]!r}"), flush=True)
-            rows.append({"length": L, "depth": d, **s, "seconds": round(secs, 1), "found": ok,
-                         "word": word, "answer": answer.strip()[:200]})
+                  f"{rate(s)}, {secs:.0f} s)" + ("" if ok else f"{cut_off}  answer ends: {answer.strip()[-80:]!r}"),
+                  flush=True)
+            rows.append({"length": L, "depth": d, **s, "seconds": round(secs, 1), "found": ok, "finish": finish,
+                         "word": word, "answer": answer.strip()[:600], "reasoning": reasoning.strip()[:600]})
             if decode_turn and k == len(depths) - 1:
                 messages += [{"role": "assistant", "content": answer}, {"role": "user", "content": SUMMARY}]
                 try:
