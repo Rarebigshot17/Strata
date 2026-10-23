@@ -377,7 +377,9 @@ void GpuEngine::setup_prefill() {
         }
     }
     // --prefill-spread: each card's pool for its share of a layer's streamed experts, sized by its link's part of
-    // all the links (with every card copying), a quarter more, at most every expert of a layer
+    // all the links (with every card copying) of all a layer's experts, 8 more, at most every expert of a layer: on
+    // napster-ai's links (5.7, 5.7 and 11.8 GB/s) 79, 79 and 155 experts of the largest layer's expert size, taken
+    // from the expert cache (the start logs the GB); experts beyond a pool are streamed after the routing as before
     if (I.spread && I.blob_max) {
         double all = 0;
         for (const auto& d : I.ctx) all += d.link_all;
@@ -385,7 +387,7 @@ void GpuEngine::setup_prefill() {
         for (auto& d : I.ctx) {
             ok(cudaSetDevice(d.id), "cudaSetDevice");
             const double part = all > 0 ? d.link_all / all : 1.0 / (double) I.ctx.size();
-            d.pf_slots = (int) std::min<int64_t>(NE, (int64_t) std::ceil(1.25 * part * (double) NE) + 4);
+            d.pf_slots = (int) std::min<int64_t>(NE, (int64_t) std::ceil(part * (double) NE) + 8);
             d.pf_pool = dalloc<uint8_t>((size_t) d.pf_slots * I.blob_max, &d.bytes);
             d.pf_ev.resize((size_t) d.pf_slots);
             for (auto& ev : d.pf_ev) ok(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming), "cudaEventCreate");
