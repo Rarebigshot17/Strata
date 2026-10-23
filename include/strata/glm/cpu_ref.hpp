@@ -49,9 +49,11 @@ private:
 };
 
 /// Per-token tensors written while evaluating, for bisecting against llama.cpp: the residual streams after every
-/// layer (`hc * n_embd` floats per layer).
+/// layer (`hc * n_embd` floats per layer), and (the CPU reference only) after every layer's attention, which
+/// llama.cpp's graph names hc_attn_post.
 struct Trace {
     std::vector<std::vector<float>> layer_out;
+    std::vector<std::vector<float>> attn_out;
 };
 
 class CpuRef {

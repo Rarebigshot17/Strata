@@ -3,8 +3,9 @@
 //   strata-glm-ref -m MODEL.gguf --tokens-file IDS.txt --out LOGITS.bin [--threads N] [--dump-layers PATH]
 //
 // LOGITS.bin uses the layout of `strata generate --dump-logits` and `llama-strata-ref --out`, one row per
-// position, so tools/glm53_compare.py compares it with llama.cpp's directly. --dump-layers writes, per position,
-// the residual streams after every layer: n_layer x hc x n_embd float32.
+// position, so tools/glm53_compare.py compares it with llama.cpp's directly. --dump-layers writes, per position and
+// layer, the residual streams after the layer's attention and after its FFN: n_layer x 2 x hc x n_embd float32, the
+// layout `llama-strata-ref --dump-layers` writes (tools/glm53_layers_compare.py compares the two).
 #include "strata/glm/cpu_ref.hpp"
 #include "strata/glm/serve_loop.hpp"
 
@@ -140,7 +141,10 @@ int main(int argc, char** argv) {
             const std::vector<float>& logits = ref.eval(ids[i], lay ? &trace : nullptr);
             std::fwrite(logits.data(), sizeof(float), logits.size(), out);
             if (lay)
-                for (const auto& r : trace.layer_out) std::fwrite(r.data(), sizeof(float), r.size(), lay);
+                for (size_t l = 0; l < trace.layer_out.size(); ++l) {
+                    std::fwrite(trace.attn_out[l].data(), sizeof(float), trace.attn_out[l].size(), lay);
+                    std::fwrite(trace.layer_out[l].data(), sizeof(float), trace.layer_out[l].size(), lay);
+                }
             if ((i + 1) % 16 == 0 || i + 1 == ids.size()) {
                 std::printf("position %zu/%zu\n", i + 1, ids.size());
                 std::fflush(stdout);

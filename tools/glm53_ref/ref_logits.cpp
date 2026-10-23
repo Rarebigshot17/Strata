@@ -8,6 +8,10 @@
 //   --out PATH      logits in the layout `strata generate --dump-logits` writes:
 //                   int32 n_vocab, int32 n_rows, then n_rows x n_vocab float32, one row per position
 //   --ids-out PATH  the token ids, comma separated, ready for `strata generate --tokens-file`
+//   --dump-layers PATH  per position, for every layer, the residual streams after the attention (the graph's
+//                   hc_attn_post) and after the FFN (l_out): 2 x hc x n_embd float32 per layer, the layout
+//                   `strata-glm-ref --dump-layers` writes (tools/glm53_layers_compare.py compares the two). Needs
+//                   -b 1 -ub 1, one position per decode.
 //
 // Input is either a prompt (-p TEXT or -f FILE, tokenized by llama.cpp) or --tokens-file PATH (ids separated by
 // commas or whitespace). Every other flag is llama.cpp's own (-m, -ngl, --n-cpu-moe, -c, -t, ...).
@@ -47,23 +51,59 @@ static bool read_ids(const std::string & path, std::vector<llama_token> & out) {
     return is.eof();
 }
 
+// --dump-layers: the current position's streams per layer, filled by the scheduler's eval callback
+struct layer_dump {
+    int32_t n_layer = 0;
+    std::vector<std::vector<float>> attn, out;   // [layer]: hc x n_embd after the attention / after the FFN
+    bool bad = false;                            // a tensor that is not contiguous f32
+};
+
+static bool layer_dump_cb(ggml_tensor * t, bool ask, void * user_data) {
+    auto * d = (layer_dump *) user_data;
+    int il = -1;
+    int which = -1;
+    char tail = 0;
+    if (sscanf(t->name, "hc_attn_post-%d%c", &il, &tail) == 1) {
+        which = 0;
+    } else if (sscanf(t->name, "l_out-%d%c", &il, &tail) == 1) {
+        which = 1;
+    }
+    if (ask) {
+        return which >= 0;
+    }
+    if (which < 0 || il < 0 || il >= d->n_layer) {
+        return true;
+    }
+    if (t->type != GGML_TYPE_F32 || !ggml_is_contiguous(t)) {
+        d->bad = true;
+        return true;
+    }
+    auto & v = (which == 0 ? d->attn : d->out)[(size_t) il];
+    v.resize((size_t) ggml_nelements(t));
+    ggml_backend_tensor_get(t, v.data(), 0, ggml_nbytes(t));
+    return true;
+}
+
 int main(int argc, char ** argv) {
     // Take our own flags out of argv; everything else goes to llama.cpp's parser.
     std::string out_path;
     std::string ids_out_path;
     std::string tokens_path;
+    std::string layers_path;
     std::vector<char *> rest = { argv[0] };
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if ((a == "--out" || a == "--ids-out" || a == "--tokens-file") && i + 1 < argc) {
             (a == "--out" ? out_path : a == "--ids-out" ? ids_out_path : tokens_path) = argv[++i];
+        } else if (a == "--dump-layers" && i + 1 < argc) {
+            layers_path = argv[++i];
         } else {
             rest.push_back(argv[i]);
         }
     }
     if (out_path.empty()) {
         fprintf(stderr, "usage: %s -m MODEL.gguf (-p TEXT | -f FILE | --tokens-file IDS) --out LOGITS.bin "
-                        "[--ids-out IDS.txt] [llama.cpp flags]\n", argv[0]);
+                        "[--ids-out IDS.txt] [--dump-layers LAYERS.bin] [llama.cpp flags]\n", argv[0]);
         return 2;
     }
 
@@ -71,6 +111,11 @@ int main(int argc, char ** argv) {
     common_init();
     if (!common_params_parse((int) rest.size(), rest.data(), params, LLAMA_EXAMPLE_COMMON)) {
         return 1;
+    }
+    layer_dump dump;
+    if (!layers_path.empty()) {
+        params.cb_eval = layer_dump_cb;
+        params.cb_eval_user_data = &dump;
     }
     llama_backend_init();
     llama_numa_init(params.numa);
@@ -117,6 +162,25 @@ int main(int argc, char ** argv) {
     const int32_t hdr[2] = { n_vocab, (int32_t) ids.size() };
     fwrite(hdr, sizeof(hdr), 1, out);
 
+    FILE * lay = nullptr;
+    if (!layers_path.empty()) {
+        if (llama_n_batch(ctx) != 1 || llama_n_ubatch(ctx) != 1) {
+            LOG_ERR("--dump-layers needs -b 1 -ub 1 (one position per decode)\n");
+            fclose(out);
+            return 1;
+        }
+        dump.n_layer = llama_model_n_layer(model);
+        dump.attn.resize((size_t) dump.n_layer);
+        dump.out.resize((size_t) dump.n_layer);
+        lay = fopen(layers_path.c_str(), "wb");
+        if (lay == nullptr) {
+            LOG_ERR("cannot write %s\n", layers_path.c_str());
+            fclose(out);
+            return 1;
+        }
+    }
+    int32_t dumped = -1;   // the layers each position had, the same for every position
+
     // Decode in chunks of n_batch with an output on every position, writing each chunk's rows as it finishes.
     const int32_t n_batch = (int32_t) llama_n_batch(ctx);
     for (int32_t off = 0; off < (int32_t) ids.size(); off += n_batch) {
@@ -138,9 +202,34 @@ int main(int argc, char ** argv) {
                 return 1;
             }
         }
+        if (lay != nullptr) {
+            // the layers the graph ran (the model's count can include an MTP block it does not run), in order
+            int32_t have = 0;
+            while (have < dump.n_layer && !dump.attn[(size_t) have].empty() && !dump.out[(size_t) have].empty()) {
+                ++have;
+            }
+            if (dump.bad || have == 0 || (dumped >= 0 && have != dumped)) {
+                LOG_ERR("--dump-layers: position %d gave %d layers (%s)\n", off, have,
+                        dump.bad ? "a stream tensor was not contiguous f32" : "expected the same count every time");
+                fclose(out);
+                fclose(lay);
+                return 1;
+            }
+            dumped = have;
+            for (int32_t il = 0; il < have; ++il) {
+                fwrite(dump.attn[(size_t) il].data(), sizeof(float), dump.attn[(size_t) il].size(), lay);
+                fwrite(dump.out[(size_t) il].data(), sizeof(float), dump.out[(size_t) il].size(), lay);
+                dump.attn[(size_t) il].clear();
+                dump.out[(size_t) il].clear();
+            }
+        }
         LOG_INF("positions %d-%d done\n", off, off + n - 1);
     }
     fclose(out);
+    if (lay != nullptr) {
+        fclose(lay);
+        LOG_INF("wrote %d layers' streams per position to %s\n", dumped, layers_path.c_str());
+    }
 
     if (!ids_out_path.empty()) {
         std::ofstream f(ids_out_path);
