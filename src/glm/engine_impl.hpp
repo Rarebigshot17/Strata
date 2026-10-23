@@ -127,6 +127,7 @@ struct DevCtx {
     float* h_wrow = nullptr;                 ///< pinned: their routing weights
     cudaEvent_t ev_x = nullptr;              ///< recorded here when this card has sent its xn to the helpers
     cudaEvent_t ev_y = nullptr;              ///< recorded here when this card's partial sum is on its way back
+    cudaEvent_t ev_help = nullptr;           ///< --decode-help: this card's share of a token's layer is back in RAM
 };
 
 struct GpuEngine::Impl {
@@ -144,9 +145,13 @@ struct GpuEngine::Impl {
     std::unique_ptr<ExpertCache> cache;
     std::vector<int32_t> miss_ids;
     std::vector<float> miss_w;
+    // --decode-help: the misses the GPUs take, and each card's share's sum in RAM (pinned, by ctx index)
+    std::vector<int32_t> help_ids;
+    std::vector<float> help_w;
+    std::vector<float*> h_yhelp;
     // STRATA_GLM_TIMING=1: where eval's time goes, printed when the engine ends (seconds, tokens)
     bool timing = false;
-    double t_eval = 0, t_route_wait = 0, t_cpu = 0, t_logits_wait = 0, t_maintain = 0;
+    double t_eval = 0, t_route_wait = 0, t_cpu = 0, t_logits_wait = 0, t_maintain = 0, t_help_wait = 0;
     int64_t t_tokens = 0;
     // host side
     float *h_x = nullptr, *h_w = nullptr, *h_yr = nullptr;

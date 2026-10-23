@@ -276,6 +276,20 @@ GpuEngine::GpuEngine(const Model& model, const EngineOptions& opt) : impl_(new I
     I.h_yr = halloc<float>((size_t) E);
     I.h_w = halloc<float>((size_t) c.n_expert_used);
     I.h_ids = halloc<int32_t>((size_t) c.n_expert_used);
+    if (opt.decode_help > 0) {
+        if (!I.blob_max || std::find(I.experts_pinned.begin(), I.experts_pinned.end(), 1) == I.experts_pinned.end()) {
+            std::fprintf(stderr, "--decode-help needs the experts page-locked (--pin-experts) and the prompt path's "
+                                 "buffers (--prefill-chunk 2 or more); off\n");
+            I.opt.decode_help = 0;
+        } else {
+            I.h_yhelp.assign(I.ctx.size(), nullptr);
+            for (size_t di = 0; di < I.ctx.size(); ++di) {
+                ok(cudaSetDevice(I.ctx[di].id), "cudaSetDevice");
+                ok(cudaEventCreateWithFlags(&I.ctx[di].ev_help, cudaEventDisableTiming), "cudaEventCreate");
+                I.h_yhelp[di] = halloc<float>((size_t) E);
+            }
+        }
+    }
     I.logits.resize((size_t) c.n_vocab);
     I.emb.resize((size_t) (hc * E));
 
@@ -337,9 +351,11 @@ GpuEngine::~GpuEngine() {
         const double n = (double) I.t_tokens, ms = 1e3 / n;
         std::fprintf(stderr,
                      "timing over %lld tokens, ms per token: eval %.2f = waiting for the GPU at routing %.2f + CPU "
-                     "experts %.2f + waiting for the logits %.2f + cache upkeep %.2f + the rest (launches, host) %.2f\n",
-                     (long long) I.t_tokens, I.t_eval * ms, I.t_route_wait * ms, I.t_cpu * ms, I.t_logits_wait * ms,
-                     I.t_maintain * ms, (I.t_eval - I.t_route_wait - I.t_cpu - I.t_logits_wait - I.t_maintain) * ms);
+                     "experts %.2f + waiting for the GPUs' share of them %.2f + waiting for the logits %.2f + cache "
+                     "upkeep %.2f + the rest (launches, host) %.2f\n",
+                     (long long) I.t_tokens, I.t_eval * ms, I.t_route_wait * ms, I.t_cpu * ms, I.t_help_wait * ms,
+                     I.t_logits_wait * ms, I.t_maintain * ms,
+                     (I.t_eval - I.t_route_wait - I.t_cpu - I.t_help_wait - I.t_logits_wait - I.t_maintain) * ms);
     }
     for (auto& d : impl_->ctx)
         if (d.stream) cudaStreamDestroy(d.stream);
@@ -713,12 +729,93 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
                     gpu::gemv(l.down_shexp, d.fact, d.ysh, d.q8, s);
                 }
             };
-            if (I.miss_ids.empty()) launch_gpu();
-            if (!I.miss_ids.empty()) {
-                const auto t_c = tclock::now();
-                I.experts->run(il, I.h_x, I.miss_ids.data(), I.miss_w.data(), (int) I.miss_ids.size(), I.h_yr,
-                               launch_gpu);
-                if (I.timing) I.t_cpu += sec(t_c);
+            // --decode-help (page-locked experts only): the last N misses go to the GPUs instead, the first to this
+            // card and the next ones to the others in turn; each is copied in from RAM by DMA into a staging buffer
+            // and computed there while the CPU computes the rest. This card adds its share into ygpu; another card
+            // sends the sum of its share back through RAM, added to the CPU's.
+            I.help_ids.clear();
+            I.help_w.clear();
+            if (I.opt.decode_help > 0 && (size_t) il < I.experts_pinned.size() && I.experts_pinned[(size_t) il] &&
+                I.cache->layer(il).cacheable)
+                while ((int) I.help_ids.size() < I.opt.decode_help && !I.miss_ids.empty()) {
+                    I.help_ids.push_back(I.miss_ids.back());
+                    I.help_w.push_back(I.miss_w.back());
+                    I.miss_ids.pop_back();
+                    I.miss_w.pop_back();
+                }
+            const size_t nd = I.ctx.size();
+            std::vector<char> helped(nd, 0);
+            bool other_cards = false;
+            if (!I.help_ids.empty()) {
+                launch_gpu();                                   // ygpu starts with the cached experts
+                const ExpertSlots& es = I.cache->layer(il);
+                const LayerWeights& lw = I.m.layer(il);
+                std::vector<int> hb(nd, 0);
+                for (size_t q = 0; q < I.help_ids.size(); ++q) {
+                    const size_t k = ((size_t) ci + q) % nd;
+                    DevCtx& h = I.ctx[k];
+                    ok(cudaSetDevice(h.id), "cudaSetDevice");
+                    void* hs = h.stream;
+                    if (!helped[k] && k != (size_t) ci) {      // this token's xn to the card, its sum from zero
+                        ok(cudaMemcpyAsync(h.xn, I.h_x, (size_t) E * sizeof(float), cudaMemcpyHostToDevice, h.stream),
+                           "x to a helper");
+                        ok(cudaMemsetAsync(h.ygpu, 0, (size_t) E * sizeof(float), h.stream), "memset");
+                        other_cards = true;
+                    }
+                    helped[k] = 1;
+                    const int e = I.help_ids[q];
+                    const int bb = hb[k];
+                    uint8_t* base = h.dstage[bb];
+                    const Tensor g = lw.gate_exps.slice2(e), u = lw.up_exps.slice2(e), dn = lw.down_exps.slice2(e);
+                    const size_t db = es.down.row_bytes * (size_t) es.down.n_out;
+                    ok(cudaStreamWaitEvent(h.copy_stream, h.ev_free[bb], 0), "cudaStreamWaitEvent");
+                    ok(cudaMemcpyAsync(base, g.data, es.up_off, cudaMemcpyHostToDevice, h.copy_stream), "expert");
+                    ok(cudaMemcpyAsync(base + es.up_off, u.data, es.down_off - es.up_off, cudaMemcpyHostToDevice,
+                                       h.copy_stream), "expert");
+                    ok(cudaMemcpyAsync(base + es.down_off, dn.data, db, cudaMemcpyHostToDevice, h.copy_stream),
+                       "expert");
+                    ok(cudaEventRecord(h.ev_copied[bb], h.copy_stream), "cudaEventRecord");
+                    ok(cudaStreamWaitEvent(h.stream, h.ev_copied[bb], 0), "cudaStreamWaitEvent");
+                    DevMatrix G = es.gate, U = es.up, Dn = es.down;
+                    G.w = base;
+                    U.w = base + es.up_off;
+                    Dn.w = base + es.down_off;
+                    gpu::gemv2(G, U, h.xn, h.fg, h.fu, h.q8, hs);
+                    gpu::swiglu(h.fg, h.fu, h.fact, (int) F, c.clamp_exp[(size_t) il], hs);
+                    gpu::gemv(Dn, h.fact, h.yexp, h.q8, hs);
+                    gpu::axpy(h.ygpu, h.yexp, I.help_w[q], (int) E, hs);
+                    ok(cudaEventRecord(h.ev_free[bb], h.stream), "cudaEventRecord");
+                    hb[k] ^= 1;
+                }
+                for (size_t k = 0; k < nd; ++k) {
+                    if (!helped[k] || k == (size_t) ci) continue;
+                    DevCtx& h = I.ctx[k];
+                    ok(cudaSetDevice(h.id), "cudaSetDevice");
+                    ok(cudaMemcpyAsync(I.h_yhelp[k], h.ygpu, (size_t) E * sizeof(float), cudaMemcpyDeviceToHost,
+                                       h.stream), "a helper's share back");
+                    ok(cudaEventRecord(h.ev_help, h.stream), "cudaEventRecord");
+                }
+                ok(cudaSetDevice(d.id), "cudaSetDevice");
+            }
+            if (I.miss_ids.empty() && I.help_ids.empty()) launch_gpu();
+            if (!I.miss_ids.empty() || other_cards) {
+                if (!I.miss_ids.empty()) {
+                    const auto t_c = tclock::now();
+                    I.experts->run(il, I.h_x, I.miss_ids.data(), I.miss_w.data(), (int) I.miss_ids.size(), I.h_yr,
+                                   I.help_ids.empty() ? std::function<void()>(launch_gpu) : std::function<void()>());
+                    if (I.timing) I.t_cpu += sec(t_c);
+                } else {
+                    std::fill(I.h_yr, I.h_yr + E, 0.0f);
+                }
+                if (other_cards) {
+                    const auto t_h = tclock::now();
+                    for (size_t k = 0; k < nd; ++k) {
+                        if (!helped[k] || k == (size_t) ci) continue;
+                        ok(cudaEventSynchronize(I.ctx[k].ev_help), "a helper's share");
+                        for (int64_t i = 0; i < E; ++i) I.h_yr[i] += I.h_yhelp[k][i];
+                    }
+                    if (I.timing) I.t_help_wait += sec(t_h);
+                }
                 ok(cudaMemcpyAsync(d.y, I.h_yr, (size_t) E * sizeof(float), cudaMemcpyHostToDevice, d.stream),
                    "experts");
             } else {

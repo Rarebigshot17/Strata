@@ -12,8 +12,9 @@
 # For each model: strata-glm --check-cpu (GPU vs CPU reference, layer by layer), the prompt path (--prefill, in
 # chunks) against the CPU reference, the same 6 tokens at a time outside the routed experts, with the latent cache
 # in host RAM (decode and prompt), with the experts page-locked and no VRAM cache, and that again with every card
-# sharing each layer's experts (--prefill-spread; the same as the run before on one card), then the GPU's logits
-# against llama.cpp's. Last, conversation parking (tools/glm53_park_check.py), also with the latent cache in host RAM.
+# sharing each layer's experts (--prefill-spread; the same as the run before on one card), decoding with the GPUs
+# taking 3 of each layer's missed experts from the CPU (--decode-help 3), then the GPU's logits against llama.cpp's.
+# Last, conversation parking (tools/glm53_park_check.py), also with the latent cache in host RAM.
 #
 # The GPU quantizes activations to q8_1 like llama.cpp's CUDA backend, so on quantized weights its logits differ from
 # the CPU's by more than float rounding: on napster-ai (2026-10-20, 36 seeds) by up to 3.2% of a row's largest
@@ -138,6 +139,16 @@ for m in glm5-next-moe v1 v1-bare q4_0 q8_0; do
         echo "prefill, experts on every card: $(grep check-prefill "$W/spread_$m.txt")"
     else
         echo "prefill, experts on every card FAILED:"; tail -8 "$W/spread_$m.txt"; fail=1
+    fi
+    # decoding with the GPUs taking a share of the CPU's experts: with no VRAM cache every expert is a miss, 3 of each
+    # layer's go to the cards (the layer's own, then the others) and the CPU computes the rest
+    if "$SB/strata-glm" -m "$W/$m.gguf" --tokens-file "$W/ids.txt" --check-cpu --pin-experts --pin-keep-free 0 \
+            --no-expert-cache --decode-help 3 > "$W/help_$m.txt" 2>&1; then
+        echo "decode, GPUs helping the CPU: $(grep -E "^check-cpu" "$W/help_$m.txt")"
+    else
+        echo "decode, GPUs helping the CPU FAILED:"
+        grep -E "layer .* differs|strata-glm:|CUDA" "$W/help_$m.txt" | head -6
+        grep -E "^check-cpu" "$W/help_$m.txt"; fail=1
     fi
     CUDA_VISIBLE_DEVICES= "$LB/bin/llama-strata-ref" -m "$W/$m.gguf" --tokens-file "$W/ids.txt" -c 256 -b 1 -ub 1 \
         -fa off -ctk f32 -ctv f32 --out "$W/ref_$m.bin" > "$W/ref_$m.txt" 2>&1

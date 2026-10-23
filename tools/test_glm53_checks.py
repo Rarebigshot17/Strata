@@ -80,6 +80,7 @@ STUBS = {
     "sb/strata-glm-ref": 'python3 "$FAKE/write_logits.py" "$out"\n',
     "sb/strata-glm": 'if gpu_full; then echo "strata-glm: cudaSetDevice: out of memory" >&2; exit 1; fi\n'
                      'case " $* " in\n'
+                     '  *" --decode-help "*) echo "check-cpu: top-1 agreement 40/40: PASS";;\n'
                      '  *" --pin-experts "*) echo "experts in page-locked RAM: 2 of 2 MoE layers, 0.1 GB" >&2\n'
                      '     echo "check-prefill: top-1 agreement 5/5: PASS";;\n'
                      '  *" --prefill "*) echo "check-prefill: top-1 agreement 5/5: PASS";;\n'
@@ -187,14 +188,16 @@ class Checks(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertEqual(out.count("vs llama.cpp: rows 40"), len(GPU_MODELS), out)
         # each model's runs: decode, the prompt path, it 6 rows at a time, both with the latent cache in RAM, and
-        # the prompt path with the experts page-locked, on one card and on every card
+        # the prompt path with the experts page-locked, on one card and on every card, and decoding with the GPUs
+        # helping the CPU
         for line in ("prefill: check-prefill: top-1 agreement 5/5: PASS",
                      "prefill, 6 rows at a time: check-prefill: top-1 agreement 5/5: PASS",
                      "latent cache in RAM: check-cpu: top-1 agreement 40/40: PASS",
                      "prefill, latent cache in RAM: check-prefill: top-1 agreement 5/5: PASS",
                      "prefill, experts page-locked: experts in page-locked RAM: 2 of 2 MoE layers, 0.1 GB; "
                      "check-prefill: top-1 agreement 5/5: PASS",
-                     "prefill, experts on every card: check-prefill: top-1 agreement 5/5: PASS"):
+                     "prefill, experts on every card: check-prefill: top-1 agreement 5/5: PASS",
+                     "decode, GPUs helping the CPU: check-cpu: top-1 agreement 40/40: PASS"):
             found = re.findall("^" + re.escape(line) + "$", out, re.M)
             self.assertEqual(len(found), len(GPU_MODELS), line + "\n" + out)
         self.assertEqual(out.count("check-prefill:"), 5 * len(GPU_MODELS), out)
