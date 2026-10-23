@@ -730,9 +730,9 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
                 }
             };
             // --decode-help (page-locked experts only): the last N misses go to the GPUs instead, the first to this
-            // card and the next ones to the others in turn; each is copied in from RAM by DMA into a staging buffer
-            // and computed there while the CPU computes the rest. This card adds its share into ygpu; another card
-            // sends the sum of its share back through RAM, added to the CPU's.
+            // card and the next ones to the others (other links to RAM first); each is copied in from RAM by DMA into
+            // a staging buffer and computed there while the CPU computes the rest. This card adds its share into
+            // ygpu; another card sends the sum of its share back through RAM, added to the CPU's.
             I.help_ids.clear();
             I.help_w.clear();
             if (I.opt.decode_help > 0 && (size_t) il < I.experts_pinned.size() && I.experts_pinned[(size_t) il] &&
@@ -752,7 +752,9 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
                 const LayerWeights& lw = I.m.layer(il);
                 std::vector<int> hb(nd, 0);
                 for (size_t q = 0; q < I.help_ids.size(); ++q) {
-                    const size_t k = ((size_t) ci + q) % nd;
+                    // this card, then the cards on other links to RAM, then the rest (measure_links)
+                    const size_t k = I.help_order.empty() ? ((size_t) ci + q) % nd
+                                                          : (size_t) I.help_order[(size_t) ci][q % nd];
                     DevCtx& h = I.ctx[k];
                     ok(cudaSetDevice(h.id), "cudaSetDevice");
                     void* hs = h.stream;

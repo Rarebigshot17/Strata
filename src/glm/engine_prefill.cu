@@ -66,9 +66,92 @@ constexpr size_t kAttnArena = (size_t) 512 << 20;
 // --kv-in-ram: the sparse attention's queries a batch, whose cells are read from host memory once (at most
 // kKvBatch * max_sel rows, 64 MiB of f16 at 2,051 cells of 512)
 constexpr int kKvBatch = 32;
-// --prefill-spread: an expert's fixed cost in rows (its weights copied in and dequantized whatever its rows), when
-// the streamed experts are shared out by load
+// --prefill-spread: an expert's fixed cost in rows (its weights dequantized whatever its rows), and a row's cost on
+// one multiprocessor (seconds; calculated from the 3090 Ti's 84: an expert of 57 rows in about 0.08 ms of products),
+// for sharing the streamed experts out by when each card would be done
 constexpr int64_t kExpertRows = 64;
+constexpr double kRowSmSeconds = 118e-6;
+// a chunk's rows and a helper's partial sum go card to card through RAM (no peer access on GeForce cards): about
+// 5.2 GB/s on napster-ai
+constexpr double kCardToCardGBs = 5.2;
+
+/// How fast page-locked RAM reaches each card, alone and with every card copying at once, and which cards share a
+/// link (two copying at once get little more than one alone). On napster-ai the 3090 Ti and the 3080 Ti share one
+/// (11.6 GB/s together, 11.4 alone) and the 3080 has its own (10.5 beside them); all three take 17.4 GB/s.
+void measure_links(std::vector<DevCtx>& ctx, const Model& model, const Config& c,
+                   const std::vector<uint8_t>& pinned, bool verbose,
+                   std::vector<std::vector<char>>& same_link) {
+    const size_t nd = ctx.size();
+    same_link.assign(nd, std::vector<char>(nd, 0));
+    for (auto& d : ctx) d.link_solo = d.link_all = 1.0;     // equal until measured
+    const uint8_t* src = nullptr;
+    size_t bytes = (size_t) 64 << 20;
+    for (int64_t il = 0; il < c.n_layer && !src; ++il)
+        if ((size_t) il < pinned.size() && pinned[(size_t) il]) {
+            const Tensor& g = model.layer(il).gate_exps;
+            src = static_cast<const uint8_t*>(g.data);
+            bytes = std::min(bytes, g.row_bytes() * (size_t) g.rows());
+        }
+    for (auto& d : ctx) bytes = std::min(bytes, d.arena_bytes);
+    if (!src || bytes < ((size_t) 4 << 20)) return;           // too little to time (the small check models)
+    std::vector<cudaEvent_t> a(nd), z(nd);
+    for (size_t k = 0; k < nd; ++k) {
+        ok(cudaSetDevice(ctx[k].id), "cudaSetDevice");
+        ok(cudaEventCreate(&a[k]), "cudaEventCreate");
+        ok(cudaEventCreate(&z[k]), "cudaEventCreate");
+    }
+    // copies `bytes` to each card in `which` at once; returns each one's GB/s
+    const auto run = [&](const std::vector<size_t>& which) {
+        std::vector<double> gbs(nd, 0.0);
+        for (int rep = 0; rep < 2; ++rep) {                  // the first one warms up
+            for (size_t k : which) {
+                DevCtx& d = ctx[k];
+                ok(cudaSetDevice(d.id), "cudaSetDevice");
+                ok(cudaEventRecord(a[k], d.copy_stream), "cudaEventRecord");
+                ok(cudaMemcpyAsync(d.arena, src, bytes, cudaMemcpyHostToDevice, d.copy_stream), "link test");
+                ok(cudaEventRecord(z[k], d.copy_stream), "cudaEventRecord");
+            }
+            for (size_t k : which) {
+                ok(cudaEventSynchronize(z[k]), "link test");
+                float ms = 0;
+                ok(cudaEventElapsedTime(&ms, a[k], z[k]), "cudaEventElapsedTime");
+                gbs[k] = ms > 0 ? (double) bytes / (ms * 1e6) : 1.0;
+            }
+        }
+        return gbs;
+    };
+    std::vector<size_t> all;
+    for (size_t k = 0; k < nd; ++k) {
+        ctx[k].link_solo = run({k})[k];
+        all.push_back(k);
+    }
+    const std::vector<double> together = run(all);
+    for (size_t k = 0; k < nd; ++k) ctx[k].link_all = together[k];
+    for (size_t i = 0; i < nd; ++i)
+        for (size_t j = i + 1; j < nd; ++j) {
+            const std::vector<double> g = run({i, j});
+            const bool shared = g[i] + g[j] < 1.35 * std::max(ctx[i].link_solo, ctx[j].link_solo);
+            same_link[i][j] = same_link[j][i] = shared ? 1 : 0;
+        }
+    for (size_t k = 0; k < nd; ++k) {
+        ok(cudaSetDevice(ctx[k].id), "cudaSetDevice");
+        ok(cudaEventDestroy(a[k]), "cudaEventDestroy");
+        ok(cudaEventDestroy(z[k]), "cudaEventDestroy");
+    }
+    if (verbose) {
+        std::string line = "links RAM -> card, GB/s alone / with every card:";
+        for (size_t k = 0; k < nd; ++k) {
+            char buf[80];
+            std::snprintf(buf, sizeof buf, " GPU %d %.1f / %.1f;", ctx[k].id, ctx[k].link_solo, ctx[k].link_all);
+            line += buf;
+        }
+        for (size_t i = 0; i < nd; ++i)
+            for (size_t j = i + 1; j < nd; ++j)
+                if (same_link[i][j]) line += " GPU " + std::to_string(ctx[i].id) + " and GPU " +
+                                               std::to_string(ctx[j].id) + " share one;";
+        std::fprintf(stderr, "%s\n", line.c_str());
+    }
+}
 
 }  // namespace
 
@@ -222,6 +305,8 @@ void GpuEngine::setup_prefill() {
             d.h_wrow = halloc<float>((size_t) (T * KU));
             ok(cudaEventCreateWithFlags(&d.ev_x, cudaEventDisableTiming), "cudaEventCreate");
             ok(cudaEventCreateWithFlags(&d.ev_y, cudaEventDisableTiming), "cudaEventCreate");
+            ok(cudaEventCreateWithFlags(&d.ev_xready, cudaEventDisableTiming), "cudaEventCreate");
+            ok(cudaStreamCreateWithFlags(&d.xfer, cudaStreamNonBlocking), "cudaStreamCreate");
             for (size_t k = 0; k < nd; ++k) {
                 int can = 0;
                 if (k == di || cudaDeviceCanAccessPeer(&can, d.id, I.ctx[k].id) != cudaSuccess || !can) continue;
@@ -235,6 +320,24 @@ void GpuEngine::setup_prefill() {
     }
     I.h_sel_rows = halloc<int32_t>((size_t) (T * MS));
     I.h_n_sel = halloc<int32_t>((size_t) T);
+    // the links to RAM, for sharing experts out (--prefill-spread, --decode-help); each card's helpers for a decoded
+    // token: itself first, then the cards on other links (the fastest first), then the rest
+    if ((I.spread || I.opt.decode_help > 0) && I.ctx.size() > 1 && I.blob_max) {
+        measure_links(I.ctx, I.m, I.c, I.experts_pinned, I.opt.verbose, I.same_link);
+        const size_t nd = I.ctx.size();
+        I.help_order.assign(nd, {});
+        for (size_t ci = 0; ci < nd; ++ci) {
+            std::vector<int> others;
+            for (size_t k = 0; k < nd; ++k)
+                if (k != ci) others.push_back((int) k);
+            std::stable_sort(others.begin(), others.end(), [&](int x, int y) {
+                if (I.same_link[ci][(size_t) x] != I.same_link[ci][(size_t) y]) return !I.same_link[ci][(size_t) x];
+                return I.ctx[(size_t) x].link_solo > I.ctx[(size_t) y].link_solo;
+            });
+            I.help_order[ci].push_back((int) ci);
+            I.help_order[ci].insert(I.help_order[ci].end(), others.begin(), others.end());
+        }
+    }
     if (const char* pv = std::getenv("STRATA_GLM_PROFILE")) {
         long long from = -1;
         int n = 0;
@@ -657,35 +760,58 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
                 std::vector<int> dev_of((size_t) NE, ci);
                 std::vector<int> helpers;
                 if (I.spread && I.experts_pinned[(size_t) il]) {
-                    std::vector<double> load(I.ctx.size(), 0.0);
+                    // each card's copying (bytes over its link with every card copying) and computing (rows over
+                    // its multiprocessors) run side by side, so it is done at the later of the two; a helper also
+                    // takes the chunk's rows and gives back its sum, card to card through RAM. Each streamed expert,
+                    // the biggest first, goes where it would be done soonest.
+                    const size_t nd = I.ctx.size();
+                    const double blob = (double) (es.down_off + es.down.row_bytes * (size_t) es.down.n_out);
+                    const double xfer_s = 2.0 * (double) (T * E) * sizeof(float) / (kCardToCardGBs * 1e9);
+                    std::vector<double> copy_s(nd, 0.0), comp_s(nd, 0.0);
+                    std::vector<char> used(nd, 0);
+                    used[(size_t) ci] = 1;
                     std::vector<int64_t> streamed;
                     for (int64_t e = 0; e < NE; ++e) {
                         const int64_t mc = off[(size_t) e + 1] - off[(size_t) e];
                         if (mc == 0) continue;
-                        if (I.cache->slot(il, (int) e) >= 0) load[(size_t) ci] += (double) (mc + kExpertRows);
+                        if (I.cache->slot(il, (int) e) >= 0)
+                            comp_s[(size_t) ci] += (double) (mc + kExpertRows) * kRowSmSeconds / d.sms;
                         else streamed.push_back(e);
                     }
                     std::stable_sort(streamed.begin(), streamed.end(), [&](int64_t x, int64_t y) {
                         return off[(size_t) x + 1] - off[(size_t) x] > off[(size_t) y + 1] - off[(size_t) y];
                     });
                     for (int64_t e : streamed) {
-                        const double w = (double) (off[(size_t) e + 1] - off[(size_t) e] + kExpertRows);
+                        const double rows = (double) (off[(size_t) e + 1] - off[(size_t) e] + kExpertRows);
                         size_t best = (size_t) ci;
-                        for (size_t k = 0; k < I.ctx.size(); ++k)
-                            if ((load[k] + w) / I.ctx[k].sms < (load[best] + w) / I.ctx[best].sms) best = k;
+                        double best_t = 1e30;
+                        for (size_t k = 0; k < nd; ++k) {
+                            const DevCtx& h = I.ctx[k];
+                            const double cp = copy_s[k] + blob / (h.link_all * 1e9) + (used[k] ? 0.0 : xfer_s);
+                            const double t = std::max(cp, comp_s[k] + rows * kRowSmSeconds / h.sms);
+                            if (t < best_t) {
+                                best_t = t;
+                                best = k;
+                            }
+                        }
+                        copy_s[best] += blob / (I.ctx[best].link_all * 1e9) + (used[best] ? 0.0 : xfer_s);
+                        comp_s[best] += rows * kRowSmSeconds / I.ctx[best].sms;
+                        used[best] = 1;
                         dev_of[(size_t) e] = (int) best;
-                        load[best] += w;
                     }
-                    for (size_t k = 0; k < I.ctx.size(); ++k)
-                        if ((int) k != ci && load[k] > 0) helpers.push_back((int) k);
+                    for (size_t k = 0; k < nd; ++k)
+                        if ((int) k != ci && used[k]) helpers.push_back((int) k);
                 }
                 if (!helpers.empty()) {
                     NvtxRange r_help("routed experts: the other cards' shares");
-                    // the chunk's rows to each helper (card to card where they have peer access, else through RAM)
+                    // the chunk's rows to each helper (card to card where they have peer access, else through RAM),
+                    // on a stream of their own so this card's experts start at once
+                    ok(cudaEventRecord(d.ev_xready, d.stream), "cudaEventRecord");
+                    ok(cudaStreamWaitEvent(d.xfer, d.ev_xready, 0), "cudaStreamWaitEvent");
                     for (int k : helpers)
                         ok(cudaMemcpyPeerAsync(I.ctx[(size_t) k].pxn, I.ctx[(size_t) k].id, d.pxn, d.id,
-                                               (size_t) (T * E) * sizeof(float), d.stream), "rows to a helper");
-                    ok(cudaEventRecord(d.ev_x, d.stream), "cudaEventRecord");
+                                               (size_t) (T * E) * sizeof(float), d.xfer), "rows to a helper");
+                    ok(cudaEventRecord(d.ev_x, d.xfer), "cudaEventRecord");
                     for (int k : helpers) {
                         DevCtx& h = I.ctx[(size_t) k];
                         ok(cudaSetDevice(h.id), "cudaSetDevice");

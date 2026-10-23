@@ -128,6 +128,10 @@ struct DevCtx {
     cudaEvent_t ev_x = nullptr;              ///< recorded here when this card has sent its xn to the helpers
     cudaEvent_t ev_y = nullptr;              ///< recorded here when this card's partial sum is on its way back
     cudaEvent_t ev_help = nullptr;           ///< --decode-help: this card's share of a token's layer is back in RAM
+    cudaStream_t xfer = nullptr;             ///< --prefill-spread: sends the chunk's rows to the helpers
+    cudaEvent_t ev_xready = nullptr;         ///< the rows are ready on this card's stream
+    // copying from page-locked RAM to this card (GB/s): alone, and with every card copying at once
+    double link_solo = 0, link_all = 0;
 };
 
 struct GpuEngine::Impl {
@@ -175,6 +179,8 @@ struct GpuEngine::Impl {
     int prof_left = 0;
     bool prof_on = false;
     bool spread = false;                         ///< --prefill-spread with more than one card
+    std::vector<std::vector<char>> same_link;    ///< cards that share one link to RAM (measure_links)
+    std::vector<std::vector<int>> help_order;    ///< per card: the cards that help it, its own first (--decode-help)
 
     Impl(const Model& model, const EngineOptions& o) : m(model), c(model.config()), opt(o) {}
 };
