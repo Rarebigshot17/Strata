@@ -765,16 +765,20 @@ const std::vector<float>& CpuRef::eval(int32_t token, Trace* trace) {
     for (int64_t h = 0; h < hc; ++h) std::memcpy(R.data() + h * E, emb.data(), (size_t) E * sizeof(float));
 
     std::vector<float> x((size_t) E), xn((size_t) E), yv((size_t) E), post((size_t) hc), comb((size_t) (hc * hc));
-    if (trace) {
-        trace->layer_out.clear();
-        trace->attn_out.clear();
-    }
+    if (trace)
+        for (auto* v : {&trace->layer_out, &trace->attn_out, &trace->hc_attn_pre, &trace->attn_norm, &trace->hc_ffn_pre,
+                        &trace->ffn_norm, &trace->ffn_out})
+            v->clear();
     for (int64_t il = 0; il < c_.n_layer; ++il) {
         ticks_.fetch_add(1, std::memory_order_relaxed);
         const LayerWeights& w = m_.layer(il);
         const LayerState& s = *st_[(size_t) il];
         hc_pre(w.hc_attn_fn, w.hc_attn_scale, w.hc_attn_base, R.data(), x.data(), post.data(), comb.data());
         rms_norm(x.data(), xn.data(), E, c_.rms_eps, s.attn_norm.data());
+        if (trace) {
+            trace->hc_attn_pre.push_back(x);
+            trace->attn_norm.push_back(xn);
+        }
         if (c_.is_kda(il)) kda_layer(il, xn.data(), yv.data());
         else mla_layer(il, xn.data(), yv.data());
         hc_post(yv.data(), R.data(), post.data(), comb.data());
@@ -783,6 +787,11 @@ const std::vector<float>& CpuRef::eval(int32_t token, Trace* trace) {
         hc_pre(w.hc_ffn_fn, w.hc_ffn_scale, w.hc_ffn_base, R.data(), x.data(), post.data(), comb.data());
         rms_norm(x.data(), xn.data(), E, c_.rms_eps, s.ffn_norm.data());
         ffn(il, xn.data(), yv.data());
+        if (trace) {
+            trace->hc_ffn_pre.push_back(x);
+            trace->ffn_norm.push_back(xn);
+            trace->ffn_out.push_back(yv);
+        }
         hc_post(yv.data(), R.data(), post.data(), comb.data());
         if (trace) trace->layer_out.push_back(R);
     }

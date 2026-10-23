@@ -1,11 +1,14 @@
 // src/glm/ref_main.cpp - strata-glm-ref: GLM-5.3-Flash logits from the CPU reference (cpu_ref.hpp).
 //
-//   strata-glm-ref -m MODEL.gguf --tokens-file IDS.txt --out LOGITS.bin [--threads N] [--dump-layers PATH]
+//   strata-glm-ref -m MODEL.gguf --tokens-file IDS.txt --out LOGITS.bin [--threads N] [--dump-layers PATH
+//                  [--dump-names a,b]]
 //
 // LOGITS.bin uses the layout of `strata generate --dump-logits` and `llama-strata-ref --out`, one row per
 // position, so tools/glm53_compare.py compares it with llama.cpp's directly. --dump-layers writes, per position and
-// layer, the residual streams after the layer's attention and after its FFN: n_layer x 2 x hc x n_embd float32, the
-// layout `llama-strata-ref --dump-layers` writes (tools/glm53_layers_compare.py compares the two).
+// layer, the points --dump-names lists, by the names llama.cpp's graph gives them (default hc_attn_post,l_out: the
+// residual streams after the layer's attention and after its FFN, hc x n_embd float32 each; also hc_attn_pre,
+// attn_norm, hc_ffn_pre, ffn_norm, ffn_out, n_embd each), the layout `llama-strata-ref --dump-layers` writes with
+// the same names (tools/glm53_layers_compare.py compares the two).
 #include "strata/glm/cpu_ref.hpp"
 #include "strata/glm/serve_loop.hpp"
 
@@ -18,6 +21,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -60,7 +64,7 @@ std::vector<int32_t> parse_ids_list(const std::string& s) {
 int usage() {
     std::fprintf(stderr,
                  "usage: strata-glm-ref -m MODEL.gguf --tokens-file IDS.txt --out LOGITS.bin\n"
-                 "                      [--threads N] [--dump-layers PATH] [--max-tokens N]\n"
+                 "                      [--threads N] [--dump-layers PATH [--dump-names a,b]] [--max-tokens N]\n"
                  "       strata-glm-ref -m MODEL.gguf --serve [--ctx N] [--eos-ids A,B] [--threads N]\n"
                  "                      [--park-mib N] [--checkpoint-min N] [--no-warm]\n");
     return 2;
@@ -69,7 +73,7 @@ int usage() {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string model_path, ids_path, out_path, layers_path;
+    std::string model_path, ids_path, out_path, layers_path, dump_names = "hc_attn_post,l_out";
     int threads = strata::glm::ThreadPool::physical_cores();
     long long max_tokens = 0, ctx = 4096;
     bool serve = false;
@@ -83,6 +87,7 @@ int main(int argc, char** argv) {
         else if (a == "--tokens-file" && (v = next())) ids_path = v;
         else if (a == "--out" && (v = next())) out_path = v;
         else if (a == "--dump-layers" && (v = next())) layers_path = v;
+        else if (a == "--dump-names" && (v = next())) dump_names = v;
         else if ((a == "--threads" || a == "-t") && (v = next())) threads = std::atoi(v);
         else if (a == "--max-tokens" && (v = next())) max_tokens = std::atoll(v);
         else if (a == "--serve") serve = true;
@@ -137,14 +142,31 @@ int main(int argc, char** argv) {
         const int32_t hdr[2] = {(int32_t) c.n_vocab, (int32_t) ids.size()};
         std::fwrite(hdr, sizeof hdr, 1, out);
         strata::glm::Trace trace;
+        // --dump-names, by llama.cpp's graph names, in the order given
+        const std::pair<const char*, const std::vector<std::vector<float>>*> known[] = {
+            {"hc_attn_pre", &trace.hc_attn_pre}, {"attn_norm", &trace.attn_norm}, {"hc_attn_post", &trace.attn_out},
+            {"hc_ffn_pre", &trace.hc_ffn_pre},   {"ffn_norm", &trace.ffn_norm},   {"ffn_out", &trace.ffn_out},
+            {"l_out", &trace.layer_out}};
+        std::vector<const std::vector<std::vector<float>>*> points;
+        for (size_t at = 0; at <= dump_names.size();) {
+            const size_t end = std::min(dump_names.find(',', at), dump_names.size());
+            const std::string name = dump_names.substr(at, end - at);
+            at = end + 1;
+            if (name.empty()) continue;
+            const auto* hit = std::find_if(std::begin(known), std::end(known),
+                                           [&](const auto& k) { return name == k.first; });
+            if (hit == std::end(known)) {
+                std::fprintf(stderr, "--dump-names: unknown point %s\n", name.c_str());
+                return 1;
+            }
+            points.push_back(hit->second);
+        }
         for (size_t i = 0; i < ids.size(); ++i) {
             const std::vector<float>& logits = ref.eval(ids[i], lay ? &trace : nullptr);
             std::fwrite(logits.data(), sizeof(float), logits.size(), out);
             if (lay)
-                for (size_t l = 0; l < trace.layer_out.size(); ++l) {
-                    std::fwrite(trace.attn_out[l].data(), sizeof(float), trace.attn_out[l].size(), lay);
-                    std::fwrite(trace.layer_out[l].data(), sizeof(float), trace.layer_out[l].size(), lay);
-                }
+                for (size_t l = 0; l < trace.layer_out.size(); ++l)
+                    for (const auto* pts : points) std::fwrite((*pts)[l].data(), sizeof(float), (*pts)[l].size(), lay);
             if ((i + 1) % 16 == 0 || i + 1 == ids.size()) {
                 std::printf("position %zu/%zu\n", i + 1, ids.size());
                 std::fflush(stdout);
