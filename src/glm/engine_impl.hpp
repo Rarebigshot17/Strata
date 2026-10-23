@@ -86,6 +86,8 @@ struct DevCtx {
     float *qr = nullptr, *qm = nullptr, *kv = nullptr, *q_abs = nullptr, *lat = nullptr, *heads = nullptr,
           *scores = nullptr, *iq = nullptr, *ik = nullptr, *wts = nullptr, *pscore = nullptr;
     int32_t* sel = nullptr;
+    int32_t* n_sel1 = nullptr;               ///< the selection's length as the GPU counted it (topk_pools_rows)
+    uint64_t dec_sel_have = 0;               ///< which full indexer layer's selection `sel` holds (dec_sel_version)
     uint16_t* kvsel = nullptr;               ///< --kv-in-ram: the selected rows, read from host memory
     int32_t* iota = nullptr;                 ///< 0, 1, ..., max_sel-1: kvsel's rows as a selection
     float *fg = nullptr, *fu = nullptr, *fact = nullptr, *logits_e = nullptr, *wexp = nullptr, *ysh = nullptr,
@@ -137,9 +139,10 @@ struct GpuEngine::Impl {
     double t_eval = 0, t_route_wait = 0, t_cpu = 0, t_logits_wait = 0, t_maintain = 0;
     int64_t t_tokens = 0;
     // host side
-    float *h_x = nullptr, *h_w = nullptr, *h_yr = nullptr, *h_pscore = nullptr;
+    float *h_x = nullptr, *h_w = nullptr, *h_yr = nullptr;
     int32_t* h_ids = nullptr;
-    std::vector<int32_t> sel_host;
+    uint64_t dec_sel_version = 0;            ///< counts the full indexer layers' selections, one token at a time
+    int dec_sel_ctx = 0;                     ///< the device of the last one
     std::vector<float> logits, emb;
     int64_t max_sel = 0, max_pools = 0;
     // prompt chunks

@@ -135,6 +135,7 @@ GpuEngine::GpuEngine(const Model& model, const EngineOptions& opt) : impl_(new I
         d.heads = dalloc<float>((size_t) (maxH * c.head_v_mla), b);
         d.scores = dalloc<float>((size_t) (maxH * I.max_sel), b);
         d.sel = dalloc<int32_t>((size_t) I.max_sel, b);
+        d.n_sel1 = dalloc<int32_t>(1, b);
         if (opt.kv_in_ram) {
             d.kvsel = dalloc<uint16_t>((size_t) (I.max_sel * c.kv_lora_rank), b);
             d.iota = dalloc<int32_t>((size_t) I.max_sel, b);
@@ -275,7 +276,6 @@ GpuEngine::GpuEngine(const Model& model, const EngineOptions& opt) : impl_(new I
     I.h_yr = halloc<float>((size_t) E);
     I.h_w = halloc<float>((size_t) c.n_expert_used);
     I.h_ids = halloc<int32_t>((size_t) c.n_expert_used);
-    I.h_pscore = halloc<float>((size_t) I.max_pools);
     I.logits.resize((size_t) c.n_vocab);
     I.emb.resize((size_t) (hc * E));
 
@@ -343,8 +343,7 @@ GpuEngine::~GpuEngine() {
     }
     for (auto& d : impl_->ctx)
         if (d.stream) cudaStreamDestroy(d.stream);
-    for (void* p : {(void*) impl_->h_x, (void*) impl_->h_yr, (void*) impl_->h_w, (void*) impl_->h_ids,
-                    (void*) impl_->h_pscore})
+    for (void* p : {(void*) impl_->h_x, (void*) impl_->h_yr, (void*) impl_->h_w, (void*) impl_->h_ids})
         if (p) cudaFreeHost(p);
     for (void* p : impl_->kv_host) cudaFreeHost(p);
 }
@@ -600,31 +599,32 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
                 gpu::gemv(l.idx_gate, d.xn, l.pend_g + (t % P) * ID, d.q8, s);
                 if ((t + 1) % P == 0)
                     gpu::kpool(l.pend_k, l.pend_g, l.idx_ape, l.pooled + (t / P) * ID, (int) P, (int) ID, s);
+                // the n_top best of the nv complete pools on the GPU (gpu_prefill.hpp's topk_pools_rows, as the prompt
+                // path selects: ties to the lower pool, cells in pool order, then the tail), so the host neither
+                // waits for the scores nor sorts them: one sort of (t+1)/4 pools for each of the 11 layers with an
+                // indexer of their own took most of a token's time at 458K tokens of context (napster-ai)
                 const int64_t nv = (t + 1) / P, n_top = c.indexer_top_k / P;
-                std::vector<int64_t> pools((size_t) nv);
-                std::iota(pools.begin(), pools.end(), 0);
                 if (nv > n_top) {
                     gpu::gemv(l.idx_proj, d.xn, d.wts, d.q8, s);
                     gpu::scale(d.wts, (int) IH, 1.0f / std::sqrt((float) (ID * IH)), s);
                     gpu::kpool_scores(d.iq, l.pooled, d.wts, d.pscore, (int) nv, (int) IH, (int) ID, s);
-                    ok(cudaMemcpyAsync(I.h_pscore, d.pscore, (size_t) nv * sizeof(float), cudaMemcpyDeviceToHost,
-                                       d.stream), "scores");
-                    ok(cudaStreamSynchronize(d.stream), "sync");
-                    const float* sc = I.h_pscore;
-                    std::stable_sort(pools.begin(), pools.end(), [&](int64_t a, int64_t b) { return sc[a] > sc[b]; });
-                    pools.resize((size_t) n_top);
                 }
-                I.sel_host.clear();
-                for (int64_t p : pools)
-                    for (int64_t mm = 0; mm < P; ++mm) I.sel_host.push_back((int32_t) (p * P + mm));
-                if (c.indexer_select_tail)
-                    for (int64_t kk = 0; kk < (t + 1) % P; ++kk) I.sel_host.push_back((int32_t) (t - kk));
+                gpu::topk_pools_rows(d.pscore, std::max<int64_t>(nv, 1), 1, t, (int) P, (int) n_top,
+                                     c.indexer_select_tail, (int) I.max_sel, d.sel, d.n_sel1, s);
+                d.dec_sel_have = ++I.dec_sel_version;
+                I.dec_sel_ctx = ci;
+            } else if (d.dec_sel_have != I.dec_sel_version) {
+                // a shared indexer layer on another device than the last full one: its selection from there (that
+                // device's stream finished when the layers moved on from it)
+                const DevCtx& from = I.ctx[(size_t) I.dec_sel_ctx];
+                ok(cudaMemcpyPeerAsync(d.sel, d.id, from.sel, from.id, (size_t) I.max_sel * sizeof(int32_t), d.stream),
+                   "selection");
+                d.dec_sel_have = I.dec_sel_version;
             }
-            const int n_sel = (int) I.sel_host.size();
+            // the cells selected: every one up to t while the pools fit in n_top, else n_top pools, and the tail
+            const int64_t P = c.indexer_kpool, nv = (t + 1) / P, n_top = std::max<int64_t>(c.indexer_top_k / P, 0);
+            const int n_sel = (int) (std::min(nv, n_top) * P + (c.indexer_select_tail ? (t + 1) % P : 0));
             if (n_sel == 0 || n_sel > I.max_sel) throw std::runtime_error("indexer selection of an unexpected size");
-            ok(cudaMemcpyAsync(d.sel, I.sel_host.data(), (size_t) n_sel * sizeof(int32_t), cudaMemcpyHostToDevice,
-                               d.stream), "selection");
-            // pageable source: the copy is complete when cudaMemcpyAsync returns, so sel_host may change after
 
             // --kv-in-ram: the selected rows read from host memory into kvsel, then attended in order; in the
             // dense range every selected cell is in the VRAM head
