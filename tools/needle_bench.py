@@ -119,9 +119,25 @@ def main() -> int:
     ap.add_argument("--decode-tokens", type=int, default=0, help="a summary turn of this many tokens after each length")
     ap.add_argument("--decode-turns", type=int, default=1, help="how many summary turns, each continuing the last")
     ap.add_argument("--gguf", help="the model's first shard: size each text by the model's tokenizer")
+    ap.add_argument("--ids-out", help="with --gguf and one length: write the text's token ids there (for strata-glm "
+                                      "--tokens-file) and stop, no server needed")
     ap.add_argument("--timeout", type=float, default=6 * 3600, help="seconds to wait for one answer")
     ap.add_argument("--out", help="also write the results as JSON")
     a = ap.parse_args()
+    if a.ids_out:
+        if not a.gguf or "," in a.lengths:
+            ap.error("--ids-out takes --gguf and one length")
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from strata_tokenizer import Tokenizer
+        tok = Tokenizer.from_gguf(a.gguf)
+        L = a.lengths
+        n = int(float(L.lower().rstrip("k")) * 1024) if L.lower().endswith("k") else int(L)
+        ids = tok.encode(haystack(int(n * 4.5)))       # more than enough text: no text runs above 4.5 chars a token
+        if len(ids) < n:
+            ids = tok.encode(haystack(int(n * 9)))
+        Path(a.ids_out).write_text(" ".join(str(i) for i in ids[:n]) + "\n", encoding="utf-8")
+        print(f"wrote {min(n, len(ids)):,} token ids to {a.ids_out}")
+        return 0
     try:
         req = urllib.request.Request(a.url.rstrip("/") + "/metrics",
                                      headers={"Authorization": "Bearer " + a.api_key} if a.api_key else {})

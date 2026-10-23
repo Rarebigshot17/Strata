@@ -17,14 +17,18 @@
 
 #include "strata/glm/gpu_kernels.hpp"
 #include "strata/glm/gpu_prefill.hpp"
+#include "strata/glm/nvtx.hpp"
 
 #include "ggml.h"
 
 #include <cublas_v2.h>
+#include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -196,6 +200,17 @@ void GpuEngine::setup_prefill() {
         for (auto& h : I.hstage) h = halloc<uint8_t>(I.blob_max);
     I.h_sel_rows = halloc<int32_t>((size_t) (T * MS));
     I.h_n_sel = halloc<int32_t>((size_t) T);
+    if (const char* pv = std::getenv("STRATA_GLM_PROFILE")) {
+        long long from = -1;
+        int n = 0;
+        if (std::sscanf(pv, "%lld,%d", &from, &n) == 2 && from >= 0 && n > 0) {
+            I.prof_from = from;
+            I.prof_left = n;
+            std::fprintf(stderr, "STRATA_GLM_PROFILE: recording %d prompt chunk(s) from position %lld\n", n, from);
+        } else {
+            std::fprintf(stderr, "STRATA_GLM_PROFILE=%s: expected FROM,N (a position and a number of chunks)\n", pv);
+        }
+    }
 }
 
 const std::vector<float>& GpuEngine::prefill(const int32_t* ids, int64_t n,
@@ -239,6 +254,13 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
     const Model& m = I.m;
     const int64_t E = c.n_embd, hc = c.hc, t0 = pos_;
     if (t0 + T > I.opt.max_ctx) throw std::runtime_error("the sequence is longer than the context (--ctx)");
+    if (I.prof_left > 0 && !I.prof_on && t0 >= I.prof_from) {
+        ok(cudaProfilerStart(), "cudaProfilerStart");
+        I.prof_on = true;
+    }
+    char rname[64];
+    std::snprintf(rname, sizeof rname, "chunk %lld+%d", (long long) t0, T);
+    NvtxRange r_chunk(rname);
     I.cache->drain();   // the decode's queued expert copies land before this chunk claims free slots
 
     // ---- embeddings, dequantized on the host, copied into every stream
@@ -262,6 +284,7 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
         ticks_.fetch_add(1, std::memory_order_relaxed);
         const int ci = I.ctx_of_layer[(size_t) il];
         if (ci != cur) {
+            NvtxRange r_peer("to the next card");
             DevCtx& from = I.ctx[(size_t) cur];
             DevCtx& to = I.ctx[(size_t) ci];
             ok(cudaSetDevice(from.id), "cudaSetDevice");
@@ -281,6 +304,8 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
         const int64_t PCW = 2 * hc + hc * hc;           // a token's mHC weights (ppc)
         const int Ta = I.prefill_rows;
         const bool mla = !c.is_kda(il);
+        std::snprintf(rname, sizeof rname, "L%lld %s", (long long) il, mla ? "MLA" : "KDA");
+        nvtx_push(rname);                                   // the attention half, popped before the FFN half
         if (mla && sparse && !c.indexer_full[(size_t) il] && d.sel_have != I.sel_version) {
             // a shared indexer layer on another device than the full one: the chunk's selection from the host
             // (prefill() runs sparse chunks only when a full layer comes first)
@@ -486,8 +511,11 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
         }
         gpu::hc_post_rows(d.py, d.pR, d.ppc, d.pR2, T, (int) hc, (int) E, s);
         std::swap(d.pR, d.pR2);
+        nvtx_pop();
 
         // ---- FFN half: the mixing and a dense FFN Ta tokens at a time, the routed experts for the whole chunk
+        std::snprintf(rname, sizeof rname, "L%lld FFN", (long long) il);
+        NvtxRange r_ffn(rname);
         for (int a0 = 0; a0 < T; a0 += Ta) {
             const int ta = std::min(Ta, T - a0);
             const float* R = d.pR + (size_t) a0 * hc * E;
@@ -541,7 +569,10 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
                 gpu::swiglu(fg, fu, fact, (int) (T * FS), c.clamp_shexp[(size_t) il], s);
                 G.gemm(l.down_shexp, fact, T, ysh, s);
             }
-            ok(cudaStreamSynchronize(d.stream), "sync");
+            {
+                NvtxRange r_route("routing: wait for the GPU");
+                ok(cudaStreamSynchronize(d.stream), "sync");
+            }
             for (int t = 0; t < T; ++t) I.cache->record(il, I.h_ids_rows.data() + (size_t) t * KU, KU);
 
             // the tokens of each expert, and where each result goes (token * KU + its place in the routing)
@@ -576,6 +607,7 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
                 ok(cudaMemcpy(d.py, out.data(), out.size() * sizeof(float), cudaMemcpyHostToDevice), "experts");
                 if (c.n_expert_shared > 0) gpu::add(d.py, ysh, (int) (T * E), s);
             } else {
+                NvtxRange r_exp("routed experts: queue");
                 int b = 0;
                 const LayerWeights& lw = m.layer(il);
                 for (int64_t e = 0; e < NE; ++e) {
@@ -603,6 +635,7 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
                             ok(cudaMemcpyAsync(base + es.down_off, dn.data, db, cudaMemcpyHostToDevice, d.copy_stream),
                                "expert upload");
                         } else {
+                            NvtxRange r_stage("expert: wait, copy out of the file");
                             if (staged) ok(cudaEventSynchronize(d.ev_free[b]), "staging free");
                             ok(cudaEventSynchronize(d.ev_copied[b]), "pinned free");
                             uint8_t* h = I.hstage[b];
@@ -645,12 +678,20 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
     gpu::gemv(I.output, d.xn, d.out_logits, d.q8, d.stream);
     ok(cudaMemcpyAsync(I.logits.data(), d.out_logits, (size_t) c.n_vocab * sizeof(float), cudaMemcpyDeviceToHost,
                        d.stream), "logits");
-    for (auto& dc : I.ctx) {
-        ok(cudaSetDevice(dc.id), "cudaSetDevice");
-        ok(cudaStreamSynchronize(dc.stream), "sync");
+    {
+        NvtxRange r_end("chunk end: wait for every card");
+        for (auto& dc : I.ctx) {
+            ok(cudaSetDevice(dc.id), "cudaSetDevice");
+            ok(cudaStreamSynchronize(dc.stream), "sync");
+        }
     }
     I.cache->maintain();
     pos_ += T;
+    if (I.prof_on && --I.prof_left == 0) {
+        ok(cudaProfilerStop(), "cudaProfilerStop");
+        I.prof_on = false;
+        std::fprintf(stderr, "STRATA_GLM_PROFILE: stopped after the chunk at %lld\n", (long long) t0);
+    }
     return true;
 }
 

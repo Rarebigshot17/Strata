@@ -155,6 +155,10 @@ struct GpuEngine::Impl {
     std::vector<float> h_w_rows;
     int32_t *h_sel_rows = nullptr, *h_n_sel = nullptr;   ///< pinned: the last selection, for other devices
     uint64_t sel_version = 0;                            ///< counts the full indexer layers' selections
+    // STRATA_GLM_PROFILE=FROM,N (nvtx.hpp): the chunks recorded by a profiler started and stopped from here
+    int64_t prof_from = -1;
+    int prof_left = 0;
+    bool prof_on = false;
 
     Impl(const Model& model, const EngineOptions& o) : m(model), c(model.config()), opt(o) {}
 };
