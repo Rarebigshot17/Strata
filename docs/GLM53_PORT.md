@@ -36,9 +36,96 @@ run each unless it says otherwise:
   the shards already in the page cache; the warm-up read 103.6 of the experts' 109.9 GB at 1.67 GB/s. A start
   straight after a reboot (every expert read from the SSDs) was not timed. The layers went 0-22, 23-34 and 35-44
   (with the output head) to the three cards, and the expert cache took 31.1 GB (3,422 experts over 42 layers).
-- **Not run yet on the real model:** a context longer than about 2,000 tokens (so the indexer's selection of pools
-  has not been compared), long agent sessions, several clients at once, the prompt path's speed beyond short
-  prompts, the 4-bit file, the systemd unit and the Docker image.
+- **Not run yet on the real model:** a comparison with llama.cpp past about 2,000 tokens (64K-token prompts have run
+  for speed, below, but the indexer's selection of pools has not been compared), long agent sessions, several
+  clients at once, the 4-bit file, the systemd unit and the Docker image.
+
+**Speed on napster-ai, 2026-10-23/24.** Measured with the 3-bit file on the same machine as above (driver
+580.95.05, CUDA 13.2). "Decode" is tokens/s one at a time through the server, from its `timings`, on three prompts
+at temperature 0 and 400 tokens each: (a) "Write a Python function that parses ISO 8601 dates, with tests." (28
+tokens), (b) "Explain how a CPU cache works to a beginner." (23 tokens) and (c) a 1,971-token text to summarize. The
+server ran with `--ctx 524288 --park-mib 8192 --kv-in-ram --pin-experts --prefill-spread` and the live expert profile
+unless a line says otherwise. Each run once. The engine's own lines come from `STRATA_GLM_TIMING=1`.
+
+**What changed on this branch, and what it bought**
+
+- **Experts in page-locked RAM (`--pin-experts`).** The routed experts are copied into locked RAM at start (109.9 GB
+  in 102 to 136 s), so the GPUs read them by DMA without the page cache in between, and a prompt chunk can be large:
+  with them, prompts read at 117 tokens/s in 1,024-token chunks, 195 in 2,048 and 281 in 4,096 (2026-10-23).
+- **A bug that only showed with locked experts, fixed in `f99ccb4`.** With the experts locked and the expert cache
+  swapping, 1 to 4 of 8 tool-call replies came out wrong (`{"citycity":"Paris"}`). Every cached expert read back equal
+  to RAM (`STRATA_GLM_VERIFY=1`), and the fault went away when a token's swaps finished before the next token ran
+  (`STRATA_GLM_SYNC_SWAPS=1`). The cause was not the cache: the engine's streams are non-blocking, so they never wait
+  for the legacy stream, and the token's embedding (`cudaMemcpy` from pageable memory) and the hand-over between
+  cards (`cudaMemcpyPeer`) were copied there. Both can return before the data lands; a swap's 9.1 MB copy from locked
+  RAM on the same link made them land late, and the next card read the last token's data. They are now
+  `cudaMemcpyAsync`/`cudaMemcpyPeerAsync` on the stream that reads them, as are the prompt path's routing tables.
+  After it: 24 of 24 replies right with the experts locked and swaps on, and 8 of 8 with `--decode-help 3`.
+- **Every card on each prompt chunk (`--prefill-spread`).** The streamed experts of a layer are shared out over the
+  three cards by their links to RAM, and copied in while the layer's attention runs. The copy-ahead first overlapped
+  the kernels 3 to 5% of its time: a card's copies from RAM run about in the order they become ready, and the
+  helpers' partial sums queued behind a gigabyte of it. `9cea018` frees the pool only after the sums are in. At
+  8,192-token chunks the overlap rose to 26 to 40%, and 64K tokens read at 331.3 tokens/s before and 378.0 after
+  (chunks at 40K-57K: 364 to 370 before, 418 to 426 after). With the buffers lent (below), 64K tokens read at 379.6
+  tokens/s in 4,096-token chunks and 398.7 in 8,192 (`3b28a95`; 289.9 at 4,096 before the fix, `a184fed`).
+- **Decode graphs (on by default, `--no-decode-graphs`).** A decoded token made about 3,550 kernel launches
+  (nsys, 50 tokens). Each layer's launches up to the routing are now captured once as a CUDA graph and replayed.
+  The launches mostly overlapped the GPU's own work, so the gain is small: 15.59 to 15.83 tokens/s (+1.6%, three
+  alternating runs each, 300 tokens at `--ctx 8192`), with the logits of all 300 tokens bitwise the same.
+- **More swaps per token (`--max-swaps`).** Swapping reads RAM the CPU's experts need (the CPU's time per expert rose
+  about 17% from 8 to 64 swaps a token), but each step up took more experts off the CPU than it cost:
+
+  | `--max-swaps` | (a) | (b) | (c) | ms per token | experts per layer on the CPU |
+  | --- | --- | --- | --- | --- | --- |
+  | 8 | 13.8 | 14.1 | 13.6 | 71.9 | 4.12 |
+  | 16 | 14.1 | 14.4 | 13.8 | 70.6 | 3.76 |
+  | 32 (no graphs) | 14.3 | 14.1 | 13.7 | 71.0 | 3.50 |
+  | 64 | 16.3 | 15.0 | 14.1 | 66.0 | 3.02 |
+  | 128 | 15.7 | 14.7 | 14.5 | 66.6 | 3.15 |
+
+  The cache asked for about 50 swaps a token, so from 64 up the cap barely binds: 64 is the default now (it was 32).
+
+- **The prompt buffers lent to the expert cache (on by default, `--no-lend-prompt-buffers`).** A reply does not use
+  the prompt path's buffers (the chunk's streams, the arena, the copy-ahead pools): between prompts they hold more
+  expert slots, laid out one expert after another. A prompt of 64 tokens or more takes them back and their experts
+  leave the cache; the first token of the reply gives them back empty, and the reply's misses fill them from RAM.
+  A shorter prompt runs token by token and keeps them. At 4,096-token chunks the cache grew from 23.21 to 31.24 GB
+  (8.04 GB of it lent), the experts a layer left to the CPU went from 3.15 to 2.67, and decoding went from 15.1 /
+  15.2 / 14.4 to 17.7 / 17.6 / 16.0 tokens/s (`--max-swaps 64`, graphs on, the same build), (c) taking the buffers
+  back and still faster. The 1,971-token prompt read at 319.5 and 322.6 tokens/s. 24 of 24 tool-call replies were
+  right with it, each a 163-token prompt that took the buffers back.
+
+**Tried and not kept**
+
+- **The GPUs taking some of the CPU's experts (`--decode-help N`).** Each helped expert is first copied over PCIe 3.0
+  (0.8 to 1.6 ms for 9.1 MB, calculated from the links' measured rates), and that copy sits ahead of the next layer
+  on its card. Decode at 4,096-token chunks: 14.3 / 14.1 / 13.7 without, 11.8 / 12.1 / 11.6 with 1, 11.9 / 11.9 /
+  11.5 with 2, 10.6 / 10.4 / 10.0 with 3. It stays off (default 0).
+- **8,192-token prompt chunks** read prompts faster but leave 5.5 GB less VRAM for the expert cache (17.7 against 23.2
+  GB): decode 13.2 / 12.9 / 12.4 against 14.3 / 14.1 / 13.7 at 4,096 (`8794f16`, 32 swaps, no graphs). With the
+  buffers lent the two caches come out within 0.9 GB (30.33 and 31.24 GB) and decode the same (17.5 / 17.6 / 16.3 at
+  8,192), but the 1,971-token prompt read at 285.3 tokens/s against 322.6: during a prompt chunk 8,192 keeps less
+  cache of its own. On a 64K-token prompt 8,192 is 5% faster (398.7 against 379.6 tokens/s, both lent). The live
+  server keeps 4,096: the same decode, 13% faster on a 2K prompt, and less cache to fill again after each prompt.
+- **MTP drafting: measured, not built.** GLM-5.3-Flash has one MTP layer (block 45), which this engine does not load.
+  llama.cpp (`a0e6dc7`, `--spec-type draft-mtp`, experts on the CPU) drafting one token on the same file accepted 89%,
+  85% and 96% of the drafts on prompts (a), (b), (c) at temperature 0, and 83%, 76% and 95% at temperature 1.0 with
+  top_p 0.95 (about 210 drafts each); two and three drafted tokens on (a) gave 2.62 and 2.87 tokens per pass. Here a
+  pass over a token and its draft reads the experts of both: two tokens in a row route 13.84 experts per layer
+  together against 8 for one, and 4.81 of them miss the cache against 2.67 (the live settings). Calculated from the
+  live timing (41 ms of CPU experts, 14 ms on the GPUs, 6 ms of host work a token): a pass would take about 102 ms
+  with the MTP layer, against 61 ms for one token, so it pays above about 68% acceptance, and at the acceptance
+  measured would decode about 6% to 18% faster. Building it means a decode path of two tokens at once that can take
+  back the second (the KDA state, the latent cache and the indexer's pools), the MTP layer itself, and checking the
+  draft in the serve loop.
+
+**Where a decoded token's time goes now** (the live settings: 4,096-token chunks, the buffers lent, 64 swaps, graphs;
+prompts (a)-(c) and 24 tool calls): about 61 ms, of which 41 ms are the CPU's experts (2.67 a layer of 9.1 MB each,
+read at about 25 GB/s: about 80% of the 39.5 GB/s the RAM reads, less the 8.7 GB/s the cache's copies take,
+calculated), 14 ms waiting for the GPUs' part of each layer (the attention half and the router: about 14 ms of
+kernels a token in nsys, 40% of it the Q6_K matrix kernel), and 6 ms of host work. The cards are idle 70 to 80% of a
+decoded token (nsys, 50 tokens). The next gains are in fewer experts on the CPU (a larger cache, a smaller quant) and
+in the GPU kernels of the attention half; the RAM bandwidth caps the rest.
 
 The small-model checks before that (2026-10-20 and 2026-10-22):
 
