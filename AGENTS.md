@@ -5,7 +5,8 @@ in RAM, the most used ones are cached in VRAM, and the CPU computes the rest. It
 the CPU reference `strata-glm-ref`), a Python server with OpenAI-, Anthropic- and Responses-compatible APIs and a
 web app (`serve/`), and an installer (`setup.py`, started by `./setup.sh`). It is a fork of
 [Niko1221/Strata](https://github.com/Niko1221/Strata), which ran Qwen3.8-Flash-Next. The Qwen engine, AMD (HIP),
-the Windows launchers, vision, batching, replicas, MTP drafting, the speed projection and slot save/restore are gone.
+the Windows launchers, vision, batching, replicas, the speed projection and slot save/restore are gone, and so is the
+Qwen engine's MTP drafting (the GLM engine has its own, `--mtp`, off by default).
 
 **The real model has run** on napster-ai (2026-10-22/23: the 3-bit file on a Xeon E5-2699 v4, 184 GiB of RAM, an
 RTX 3090 Ti 24 GB + RTX 3080 Ti 12 GB + RTX 3080 10 GB, sm_86). It answers correctly through the server, predicts
@@ -75,7 +76,8 @@ None of these needs a GPU or a model download, except where it says so.
   - `tools/glm53_park_check.py ENGINE -m MODEL.gguf`: conversation parking and checkpoints against fresh runs.
   - `tools/glm53_server_check.sh LLAMA_DIR ENGINE`: `serve/server.py` end to end on the engine.
   - `tools/glm53_gpu_check.sh LLAMA_BUILD_DIR STRATA_BUILD_DIR`: the GPU engine. **Needs an NVIDIA GPU** with
-    2 GiB free on each visible card. It passed on napster-ai on 2026-10-20 (three runs at `fa74d8a`).
+    2 GiB free on each visible card. It passed on napster-ai on 2026-10-20 (three runs at `fa74d8a`) and on
+    2026-10-24 at `6664fe6`, with the MTP layer's checks (108 checks).
 - **The server without an engine:** `python3 serve/server.py` starts it with the mock engine (a fixed answer) on
   port 8101. `--engine strata --config strata-glm-<size>.json` runs the real one.
 

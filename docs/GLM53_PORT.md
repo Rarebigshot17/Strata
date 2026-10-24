@@ -400,10 +400,14 @@ cause. So `strata-glm --mtp --check-cpu` lists the positions where the CPU had t
 (`MTP near ties`), and the GPU check's comparison with llama.cpp leaves out a listed row only when it is off by itself
 (`glm53_compare.py --tie-rows`: its KL or difference over the limit), names it, and fails with more than a quarter of
 the rows left out. A GPU tie as above is a near tie too (on one Q4_0 model, position 19 of 40 was 0.653 off
-llama.cpp's and the other rows at most 0.0197). A pass
-over a token and its draft (`--check-pairs`) is held to more than the rule: every row bitwise the same as one token
-at a time, with the expert cache warmed and then kept as it is; and `--check-generate` decodes with and without
-drafts and asks for the same tokens.
+llama.cpp's and the other rows at most 0.0197). A row left out there is still held to the rule against the CPU
+reference by check-mtp in the same run, unless the GPU took other cells there too. On napster-ai (2026-10-24, at
+`6664fe6`): on the saved Q8_0 model, 11 of 40 positions were near ties, position 31 was left out and the other 39
+rows were at most 0.0171 off (relative); in a whole GPU check (108 checks, all PASS), 8 to 10 of the 40 positions
+were near ties in five models and none in glm5-next-moe, and one row was left out (Q8_0, position 15). A pass over
+a token and its draft (`--check-pairs`) is held to more than the rule: every row bitwise the same as one token at a
+time, with the expert cache warmed and then kept as it is; and `--check-generate` decodes with and without drafts
+and asks for the same tokens.
 
 ## What to run on napster-ai
 
@@ -474,7 +478,8 @@ from the Strata folder.
    when it fails and rounds the mean KL to 0.00000. The limits are 0.05 on q4_0 and q8_0 and 0.005 on the three F32
    models, and 1e-5 for the mean KL. Expect up to about 0.03 on q4_0 (0.04 against llama.cpp), less on q8_0, and
    0.001 or less on the F32 models. Top-1 agreement below 40/40 on q4_0 is rounding and passes ("Checking against
-   llama.cpp"). The last line is the parking check's. It passed three runs on napster-ai at `fa74d8a`. The small
+   llama.cpp"). The last line is the parking check's. It passed three runs on napster-ai at `fa74d8a`, and one at
+   `6664fe6` with the MTP layer's checks (2026-10-24). The small
    models have two layers, so they use two cards (there: the RTX 3090 Ti and the RTX 3080); to run them on the
    RTX 3080 Ti as well, run the script once more with `CUDA_VISIBLE_DEVICES=1` in front.
 

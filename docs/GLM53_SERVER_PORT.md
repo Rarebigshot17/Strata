@@ -64,8 +64,10 @@ request -> GEN <max_new> [cp=<n>] [end=<id,...>] [logit_bias=id:bias,...] [tempe
         <- HB                            the engine is working (a long prompt chunk): after 3 s without a line,
                                          only while it makes progress
         <- T <id>                        each generated token; an end-of-turn id is printed, then DONE stop
-        <- DONE <gen> <prompt> <prompt_ms> <decode_ms> <stop|length|cancel|nonfinite> 0 0 <reused> <hits>
-                <lookups> 0 0 0.0 <read> 0        (hits/lookups: the expert cache during decode)
+        <- DONE <gen> <prompt> <prompt_ms> <decode_ms> <stop|length|cancel|nonfinite> <drafts> <taken> <reused>
+                <hits> <lookups> 0 0 0.0 <read> 0 (hits/lookups: the expert cache during decode; drafts/taken:
+                                         the MTP block's drafts and those that were the next token, 0 0
+                                         without --mtp)
         <- ERR <reason>                  the request was refused (a malformed line, a sampling value the sampler
                                          cannot use, an id outside the vocabulary, a prompt that does not fit);
                                          no DONE follows
