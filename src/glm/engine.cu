@@ -549,7 +549,11 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
         for (int64_t h = 1; h < hc; ++h) std::memcpy(I.emb.data() + h * E, I.emb.data(), (size_t) E * sizeof(float));
         DevCtx& d0 = I.ctx[(size_t) I.ctx_of_layer[0]];
         ok(cudaSetDevice(d0.id), "cudaSetDevice");
-        ok(cudaMemcpy(d0.R, I.emb.data(), (size_t) (hc * E) * sizeof(float), cudaMemcpyHostToDevice), "embedding");
+        // on the first layer's stream: the engine's streams are non-blocking, so their kernels do not wait for a copy
+        // on the legacy stream, and a cudaMemcpy from pageable memory can return before its DMA has landed (with an
+        // expert swap's copy holding the link, the first layer then read the last token's streams)
+        ok(cudaMemcpyAsync(d0.R, I.emb.data(), (size_t) (hc * E) * sizeof(float), cudaMemcpyHostToDevice, d0.stream),
+           "embedding");
     }
     if (trace) trace->layer_out.clear();
 
@@ -562,7 +566,9 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
             DevCtx& to = I.ctx[(size_t) ci];
             ok(cudaSetDevice(from.id), "cudaSetDevice");
             ok(cudaStreamSynchronize(from.stream), "sync");
-            ok(cudaMemcpyPeer(to.R, to.id, from.R, from.id, (size_t) (hc * E) * sizeof(float)), "cudaMemcpyPeer");
+            // on the next device's stream (cudaMemcpyPeer returns before the copy is done, on the legacy stream)
+            ok(cudaMemcpyPeerAsync(to.R, to.id, from.R, from.id, (size_t) (hc * E) * sizeof(float), to.stream),
+               "cudaMemcpyPeerAsync");
             cur = ci;
         }
         DevCtx& d = I.ctx[(size_t) ci];

@@ -478,7 +478,10 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
         }
         DevCtx& d0 = I.ctx[(size_t) I.ctx_of_layer[0]];
         ok(cudaSetDevice(d0.id), "cudaSetDevice");
-        ok(cudaMemcpy(d0.pR, emb.data(), emb.size() * sizeof(float), cudaMemcpyHostToDevice), "embeddings");
+        // on the stream, as eval's (the engine's streams do not wait for the legacy stream); a pageable source is
+        // staged before the call returns, so `emb` may go
+        ok(cudaMemcpyAsync(d0.pR, emb.data(), emb.size() * sizeof(float), cudaMemcpyHostToDevice, d0.stream),
+           "embeddings");
     }
 
     int cur = I.ctx_of_layer[0];
@@ -491,7 +494,8 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
             DevCtx& to = I.ctx[(size_t) ci];
             ok(cudaSetDevice(from.id), "cudaSetDevice");
             ok(cudaStreamSynchronize(from.stream), "sync");
-            ok(cudaMemcpyPeer(to.pR, to.id, from.pR, from.id, (size_t) (T * hc * E) * sizeof(float)), "peer copy");
+            ok(cudaMemcpyPeerAsync(to.pR, to.id, from.pR, from.id, (size_t) (T * hc * E) * sizeof(float), to.stream),
+               "peer copy");
             cur = ci;
         }
         DevCtx& d = I.ctx[(size_t) ci];
@@ -851,9 +855,12 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
                 slot_all.insert(slot_all.end(), slot_of[(size_t) e].begin(), slot_of[(size_t) e].end());
             }
             off[(size_t) NE] = (int64_t) idx_all.size();
-            ok(cudaMemcpy(d.d_idx, idx_all.data(), idx_all.size() * sizeof(int32_t), cudaMemcpyHostToDevice), "idx");
-            ok(cudaMemcpy(d.d_slot, slot_all.data(), slot_all.size() * sizeof(int32_t), cudaMemcpyHostToDevice),
-               "slots");
+            // on the stream that reads them (with the copy-ahead's experts on the link, a legacy-stream copy could
+            // still be in flight when the gathers start)
+            ok(cudaMemcpyAsync(d.d_idx, idx_all.data(), idx_all.size() * sizeof(int32_t), cudaMemcpyHostToDevice,
+                               d.stream), "idx");
+            ok(cudaMemcpyAsync(d.d_slot, slot_all.data(), slot_all.size() * sizeof(int32_t), cudaMemcpyHostToDevice,
+                               d.stream), "slots");
 
             const ExpertSlots& es = I.cache->layer(il);
             if (!es.cacheable) {
@@ -864,7 +871,8 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
                 for (int t = 0; t < T; ++t)
                     I.experts->run(il, xh.data() + (size_t) t * E, I.h_ids_rows.data() + (size_t) t * KU,
                                    wh.data() + (size_t) t * KU, KU, out.data() + (size_t) t * E);
-                ok(cudaMemcpy(d.py, out.data(), out.size() * sizeof(float), cudaMemcpyHostToDevice), "experts");
+                ok(cudaMemcpyAsync(d.py, out.data(), out.size() * sizeof(float), cudaMemcpyHostToDevice, d.stream),
+                   "experts");
                 if (c.n_expert_shared > 0) gpu::add(d.py, ysh, (int) (T * E), s);
             } else {
                 NvtxRange r_exp("routed experts: queue");
