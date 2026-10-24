@@ -95,6 +95,14 @@ unless a line says otherwise. Each run once. The engine's own lines come from `S
   back and still faster. The 1,971-token prompt read at 319.5 and 322.6 tokens/s. 24 of 24 tool-call replies were
   right with it, each a 163-token prompt that took the buffers back.
 
+**The live server since 2026-10-24** runs `glm53-flash` at `d3ecdc9` with `--ctx 524288 --park-mib 8192
+--prefill-chunk 4096 --pin-experts --prefill-spread --kv-in-ram` (the decode graphs, the lent buffers and 64 swaps are
+defaults now); it was ready 415 s after it started. On it, `tools/needle_bench.py --lengths 530613 --depths 50
+--answer-tokens 300 --decode-tokens 256 --decode-turns 3` put a code word halfway into 519,266 tokens of text: the
+521,227-token prompt read at 269.8 tokens/s (32.2 minutes; 256K tokens read at 88.7 tokens/s before this branch's
+builds), the answer was the code word exactly, and three 256-token summaries at 521K tokens of context decoded at
+11.1, 12.8 and 12.3 tokens/s, each reading only its own few new tokens (the rest came from the cache).
+
 **Tried and not kept**
 
 - **The GPUs taking some of the CPU's experts (`--decode-help N`).** Each helped expert is first copied over PCIe 3.0
