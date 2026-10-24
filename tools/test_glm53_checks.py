@@ -81,6 +81,10 @@ STUBS = {
     "sb/strata-glm": 'if gpu_full; then echo "strata-glm: cudaSetDevice: out of memory" >&2; exit 1; fi\n'
                      'case " $* " in\n'
                      '  *" --decode-help "*) echo "check-cpu: top-1 agreement 40/40: PASS";;\n'
+                     # FAKE_GRAPH_FAILS: a layer's capture failed, so it ran op by op (and passed)
+                     '  *" --decode-graphs "*) if [ "$FAKE_GRAPH_FAILS" = 1 ]; then\n'
+                     '         echo "decode graphs: layer 1 runs without a graph (its capture failed: x)" >&2; fi\n'
+                     '     echo "check-cpu: top-1 agreement 40/40: PASS";;\n'
                      '  *" --pin-experts "*) echo "experts in page-locked RAM: 2 of 2 MoE layers, 0.1 GB" >&2\n'
                      '     echo "check-prefill: top-1 agreement 5/5: PASS";;\n'
                      '  *" --prefill "*) echo "check-prefill: top-1 agreement 5/5: PASS";;\n'
@@ -188,8 +192,8 @@ class Checks(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertEqual(out.count("vs llama.cpp: rows 40"), len(GPU_MODELS), out)
         # each model's runs: decode, the prompt path, it 6 rows at a time, both with the latent cache in RAM, and
-        # the prompt path with the experts page-locked, on one card and on every card, and decoding with the GPUs
-        # helping the CPU
+        # the prompt path with the experts page-locked, on one card and on every card, decoding with the GPUs
+        # helping the CPU, and decoding with CUDA graphs
         for line in ("prefill: check-prefill: top-1 agreement 5/5: PASS",
                      "prefill, 6 rows at a time: check-prefill: top-1 agreement 5/5: PASS",
                      "latent cache in RAM: check-cpu: top-1 agreement 40/40: PASS",
@@ -197,12 +201,20 @@ class Checks(unittest.TestCase):
                      "prefill, experts page-locked: experts in page-locked RAM: 2 of 2 MoE layers, 0.1 GB; "
                      "check-prefill: top-1 agreement 5/5: PASS",
                      "prefill, experts on every card: check-prefill: top-1 agreement 5/5: PASS",
-                     "decode, GPUs helping the CPU: check-cpu: top-1 agreement 40/40: PASS"):
+                     "decode, GPUs helping the CPU: check-cpu: top-1 agreement 40/40: PASS",
+                     "decode, CUDA graphs: check-cpu: top-1 agreement 40/40: PASS"):
             found = re.findall("^" + re.escape(line) + "$", out, re.M)
             self.assertEqual(len(found), len(GPU_MODELS), line + "\n" + out)
         self.assertEqual(out.count("check-prefill:"), 5 * len(GPU_MODELS), out)
         self.assertIn("parking: 6 turns, all PASS", out)
         self.assertNotIn("Traceback", out)
+
+    def test_gpu_check_fails_when_a_layer_runs_without_its_graph(self):
+        # the check-cpu line passes, but a layer fell back to launching op by op: --decode-graphs was not tested there
+        rc, out = self.run_script("glm53_gpu_check.sh", FAKE_SMI="0, 23900\\n", FAKE_GRAPH_FAILS="1")
+        self.assertNotEqual(rc, 0, out)
+        self.assertEqual(out.count("decode, CUDA graphs FAILED:"), len(GPU_MODELS), out)
+        self.assertIn("decode graphs: layer 1 runs without a graph", out)
 
     def test_gpu_check_shows_each_models_result_after_many_layer_lines(self):
         # strata-glm prints a line for every position where a layer parts from the CPU; the check-cpu line after

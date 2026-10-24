@@ -31,6 +31,7 @@ struct EngineOptions {
     bool kv_in_ram = false;          ///< the f16 latent cache in page-locked host RAM, not VRAM (--kv-in-ram)
     bool prefill_spread = false;     ///< a chunk's streamed experts computed on every card (--prefill-spread)
     int decode_help = 0;             ///< a token's missed experts per layer the GPUs take from the CPU (--decode-help)
+    bool decode_graphs = false;      ///< a decoded token's fixed runs of ops as one CUDA graph per layer (--decode-graphs)
     ExpertCacheOptions cache;
 };
 

@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -274,6 +275,7 @@ GpuEngine::GpuEngine(const Model& model, const EngineOptions& opt) : impl_(new I
     I.pool = std::make_unique<ThreadPool>(threads);
     I.timing = std::getenv("STRATA_GLM_TIMING") && std::atoi(std::getenv("STRATA_GLM_TIMING")) > 0;
     if (I.timing) I.prev_ids.assign((size_t) (c.n_layer * c.n_expert_used), -1);
+    I.dg.assign((size_t) c.n_layer, DecodeGraph{});
     if (const char* pv = std::getenv("STRATA_GLM_PROFILE_EVAL")) {
         long long from = -1;
         int n = 0;
@@ -388,6 +390,11 @@ GpuEngine::~GpuEngine() {
                      (long long) I.cache->swaps_queued(), (long long) I.cache->fills_queued(),
                      I.cache->lookups() ? 100.0 * (double) I.cache->hits() / (double) I.cache->lookups() : 0.0);
     }
+    for (auto& g : impl_->dg)
+        if (g.exec) cudaGraphExecDestroy(g.exec);
+    if (impl_->graph_recaptures > 0)
+        std::fprintf(stderr, "decode graphs: captured again %lld times (the residual buffers had moved)\n",
+                     (long long) impl_->graph_recaptures);
     for (auto& d : impl_->ctx)
         if (d.stream) cudaStreamDestroy(d.stream);
     for (void* p : {(void*) impl_->h_x, (void*) impl_->h_yr, (void*) impl_->h_w, (void*) impl_->h_ids})
@@ -580,6 +587,61 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
     }
     if (trace) trace->layer_out.clear();
 
+    // --decode-graphs: `body` launches a fixed run of a layer's ops onto d's stream, the same every token (no
+    // position in it, every buffer at a fixed address). The first time it is captured as a CUDA graph and launched;
+    // after that only the graph is launched, one call into the driver for the run instead of one per op, and the
+    // host's swaps of the residual buffers in it are done again by hand. Without the option, or for a layer whose
+    // capture failed, the body runs as it is.
+    const auto decode_segment = [&](DevCtx& d, DecodeGraph& g, int64_t il, const std::function<void()>& body) {
+        if (!I.opt.decode_graphs || g.failed) {
+            body();
+            return;
+        }
+        if (g.exec && (d.R != g.R_in || d.R2 != g.R2_in)) {
+            // a graph reads the residual buffers it was captured with; the engine keeps them in place token after
+            // token, so this is not expected, but a new capture keeps it right
+            cudaGraphExecDestroy(g.exec);
+            g.exec = nullptr;
+            ++I.graph_recaptures;
+        }
+        if (!g.exec) {
+            g.R_in = d.R;
+            g.R2_in = d.R2;
+            cudaGraph_t gr = nullptr;
+            std::string why;
+            ok(cudaStreamBeginCapture(d.stream, cudaStreamCaptureModeThreadLocal), "cudaStreamBeginCapture");
+            try {
+                body();
+            } catch (const std::exception& ex) {
+                why = ex.what();
+            }
+            const cudaError_t e = cudaStreamEndCapture(d.stream, &gr);
+            if (why.empty() && e != cudaSuccess) why = cudaGetErrorString(e);
+            if (why.empty() && cudaGraphInstantiateWithFlags(&g.exec, gr, 0) != cudaSuccess) {
+                why = cudaGetErrorString(cudaGetLastError());
+                g.exec = nullptr;
+            }
+            if (gr) cudaGraphDestroy(gr);
+            if (!why.empty()) {
+                // run this layer without a graph from now on: from the same buffers, op by op
+                cudaGetLastError();
+                g.failed = true;
+                std::fprintf(stderr, "decode graphs: layer %lld runs without a graph (its capture failed: %s)\n",
+                             (long long) il, why.c_str());
+                d.R = g.R_in;
+                d.R2 = g.R2_in;
+                body();
+                return;
+            }
+            g.R_out = d.R;
+            g.R2_out = d.R2;
+        } else {
+            d.R = g.R_out;
+            d.R2 = g.R2_out;
+        }
+        ok(cudaGraphLaunch(g.exec, d.stream), "cudaGraphLaunch");
+    };
+
     int cur = I.ctx_of_layer[0];
     for (int64_t il = 0; il < c.n_layer; ++il) {
         ticks_.fetch_add(1, std::memory_order_relaxed);
@@ -600,17 +662,22 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
         void* s = d.stream;
         const int64_t H = c.n_head[(size_t) il];
 
-        // ---- attention half: hc_pre, attn_norm, the mixer, hc_post
-        nvtx_push(I.nv_attn[(size_t) il].c_str());
-        gpu::rms_norm(d.R, d.flat, (int) (hc * E), c.rms_eps, nullptr, s);
-        gpu::gemv(l.hc_attn_fn, d.flat, d.mixes, d.q8, s);
-        gpu::hc_weights(d.mixes, l.hc_attn_scale, l.hc_attn_base, d.pc, (int) hc, (int) c.hc_sinkhorn_iters,
-                        c.hc_eps, s);
-        gpu::hc_mix(d.R, d.pc, d.x, (int) hc, (int) E, s);
-        gpu::rms_norm(d.x, d.xn, (int) E, c.rms_eps, l.attn_norm, s);
-
-        if (c.is_kda(il)) {
-            // ---- kda_layer
+        // ---- the layer's work up to the routing (on a dense layer, all of it): the attention half (hc_pre,
+        // attn_norm, the mixer, hc_post), then the FFN half's hc_pre and ffn_norm, and the router with its results
+        // copied to the host, or the dense FFN and its hc_post. With --decode-graphs a part that does not depend on
+        // the position runs as one CUDA graph per layer (decode_segment): a KDA layer's from its start, an MLA
+        // layer's (whose attention takes the position) from the FFN half on.
+        const bool dense = c.is_dense(il);
+        const int KU = (int) c.n_expert_used;
+        const auto attn_head = [&] {
+            gpu::rms_norm(d.R, d.flat, (int) (hc * E), c.rms_eps, nullptr, s);
+            gpu::gemv(l.hc_attn_fn, d.flat, d.mixes, d.q8, s);
+            gpu::hc_weights(d.mixes, l.hc_attn_scale, l.hc_attn_base, d.pc, (int) hc, (int) c.hc_sinkhorn_iters,
+                            c.hc_eps, s);
+            gpu::hc_mix(d.R, d.pc, d.x, (int) hc, (int) E, s);
+            gpu::rms_norm(d.x, d.xn, (int) E, c.rms_eps, l.attn_norm, s);
+        };
+        const auto kda_mixer = [&] {
             const int64_t D = c.kda_head_dim, DI = H * D, K = c.ssm_d_conv;
             float* outs[3] = {d.q, d.k, d.v};
             const DevMatrix* proj[3] = {&l.wq, &l.wk, &l.wv};
@@ -630,8 +697,49 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
             gpu::gemv(l.g_b, d.fa, d.g2, d.q8, s);
             gpu::kda_out_gate(d.o, l.o_norm, d.g2, d.gated, (int) H, (int) D, c.rms_eps, s);
             gpu::gemv(l.wo, d.gated, d.y, d.q8, s);
+        };
+        const auto attn_tail = [&] {
+            gpu::hc_post(d.y, d.R, d.pc, d.R2, (int) hc, (int) E, s);
+            std::swap(d.R, d.R2);
+        };
+        const auto ffn_head = [&] {
+            gpu::rms_norm(d.R, d.flat, (int) (hc * E), c.rms_eps, nullptr, s);
+            gpu::gemv(l.hc_ffn_fn, d.flat, d.mixes, d.q8, s);
+            gpu::hc_weights(d.mixes, l.hc_ffn_scale, l.hc_ffn_base, d.pc, (int) hc, (int) c.hc_sinkhorn_iters, c.hc_eps,
+                            s);
+            gpu::hc_mix(d.R, d.pc, d.x, (int) hc, (int) E, s);
+            gpu::rms_norm(d.x, d.xn, (int) E, c.rms_eps, l.ffn_norm, s);
+            if (dense) {
+                const int64_t F = c.n_ff;
+                gpu::gemv2(l.ffn_gate, l.ffn_up, d.xn, d.fg, d.fu, d.q8, s);
+                gpu::swiglu(d.fg, d.fu, d.fact, (int) F, c.clamp_shexp[(size_t) il], s);
+                gpu::gemv(l.ffn_down, d.fact, d.y, d.q8, s);
+                gpu::hc_post(d.y, d.R, d.pc, d.R2, (int) hc, (int) E, s);
+                std::swap(d.R, d.R2);
+            } else {
+                gpu::gemv(l.gate_inp, d.xn, d.logits_e, d.q8, s);
+                gpu::route(d.logits_e, l.exp_probs_b, (int) c.n_expert, KU, c.expert_gating_func,
+                           c.expert_weights_norm, c.expert_weights_scale, d.ids, d.wexp, s);
+                ok(cudaMemcpyAsync(I.h_x, d.xn, (size_t) E * sizeof(float), cudaMemcpyDeviceToHost, d.stream), "x");
+                ok(cudaMemcpyAsync(I.h_ids, d.ids, (size_t) KU * sizeof(int32_t), cudaMemcpyDeviceToHost, d.stream),
+                   "ids");
+                ok(cudaMemcpyAsync(I.h_w, d.wexp, (size_t) KU * sizeof(float), cudaMemcpyDeviceToHost, d.stream), "w");
+            }
+        };
+
+        nvtx_push(I.nv_attn[(size_t) il].c_str());
+        if (c.is_kda(il)) {
+            decode_segment(d, I.dg[(size_t) il], il, [&] {
+                attn_head();
+                kda_mixer();
+                attn_tail();
+                ffn_head();
+            });
+            nvtx_pop();
         } else {
-            // ---- mla_layer
+            // ---- mla_layer, which takes the position (the cache row, the pools, the selection), so it is launched
+            // op by op
+            attn_head();
             const int64_t QL = c.q_lora_rank, KL = c.kv_lora_rank, HK = c.head_k_mla, HV = c.head_v_mla;
             gpu::gemv(l.q_a, d.xn, d.qr, d.q8, s);
             gpu::rms_norm(d.qr, d.qr, (int) QL, c.rms_eps, l.q_a_norm, s);
@@ -704,33 +812,12 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
                     gpu::gemv(l.v_b.rows(h * HV, HV), d.lat + h * KL, d.heads + h * HV, d.q8, s);
             }
             gpu::gemv(l.wo, d.heads, d.y, d.q8, s);
+            attn_tail();
+            nvtx_pop();
+            decode_segment(d, I.dg[(size_t) il], il, ffn_head);
         }
-        gpu::hc_post(d.y, d.R, d.pc, d.R2, (int) hc, (int) E, s);
-        std::swap(d.R, d.R2);
-        nvtx_pop();
-
-        // ---- FFN half: hc_pre, ffn_norm, dense FFN or MoE, hc_post
         NvtxRange r_ffn(I.nv_ffn[(size_t) il].c_str());
-        gpu::rms_norm(d.R, d.flat, (int) (hc * E), c.rms_eps, nullptr, s);
-        gpu::gemv(l.hc_ffn_fn, d.flat, d.mixes, d.q8, s);
-        gpu::hc_weights(d.mixes, l.hc_ffn_scale, l.hc_ffn_base, d.pc, (int) hc, (int) c.hc_sinkhorn_iters, c.hc_eps,
-                        s);
-        gpu::hc_mix(d.R, d.pc, d.x, (int) hc, (int) E, s);
-        gpu::rms_norm(d.x, d.xn, (int) E, c.rms_eps, l.ffn_norm, s);
-
-        if (c.is_dense(il)) {
-            const int64_t F = c.n_ff;
-            gpu::gemv2(l.ffn_gate, l.ffn_up, d.xn, d.fg, d.fu, d.q8, s);
-            gpu::swiglu(d.fg, d.fu, d.fact, (int) F, c.clamp_shexp[(size_t) il], s);
-            gpu::gemv(l.ffn_down, d.fact, d.y, d.q8, s);
-        } else {
-            const int KU = (int) c.n_expert_used;
-            gpu::gemv(l.gate_inp, d.xn, d.logits_e, d.q8, s);
-            gpu::route(d.logits_e, l.exp_probs_b, (int) c.n_expert, KU, c.expert_gating_func, c.expert_weights_norm,
-                       c.expert_weights_scale, d.ids, d.wexp, s);
-            ok(cudaMemcpyAsync(I.h_x, d.xn, (size_t) E * sizeof(float), cudaMemcpyDeviceToHost, d.stream), "x");
-            ok(cudaMemcpyAsync(I.h_ids, d.ids, (size_t) KU * sizeof(int32_t), cudaMemcpyDeviceToHost, d.stream), "ids");
-            ok(cudaMemcpyAsync(I.h_w, d.wexp, (size_t) KU * sizeof(float), cudaMemcpyDeviceToHost, d.stream), "w");
+        if (!dense) {
             const auto t_rw = tclock::now();
             {
                 NvtxRange r_rw("routing: wait for the GPU");
@@ -890,9 +977,9 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
             }
             gpu::add(d.y, d.ygpu, (int) E, s);
             if (c.n_expert_shared > 0) gpu::add(d.y, d.ysh, (int) E, s);
+            gpu::hc_post(d.y, d.R, d.pc, d.R2, (int) hc, (int) E, s);
+            std::swap(d.R, d.R2);
         }
-        gpu::hc_post(d.y, d.R, d.pc, d.R2, (int) hc, (int) E, s);
-        std::swap(d.R, d.R2);
 
         if (trace) {
             std::vector<float> r((size_t) (hc * E));

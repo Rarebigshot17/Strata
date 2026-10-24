@@ -75,6 +75,14 @@ struct DevLayer {
     size_t bytes = 0;
 };
 
+/// --decode-graphs: one layer's fixed run of ops as an instantiated CUDA graph, and the residual buffers it reads and
+/// leaves (eval's decode_segment).
+struct DecodeGraph {
+    cudaGraphExec_t exec = nullptr;
+    float *R_in = nullptr, *R2_in = nullptr, *R_out = nullptr, *R2_out = nullptr;
+    bool failed = false;                     ///< the capture failed: the layer runs op by op
+};
+
 /// Scratch on one device, sized for the largest layer it may run.
 struct DevCtx {
     int id = 0;
@@ -193,6 +201,9 @@ struct GpuEngine::Impl {
     int64_t prof_eval_from = -1;
     int prof_eval_left = 0;
     std::vector<std::string> nv_attn, nv_ffn;
+    // --decode-graphs: per layer
+    std::vector<DecodeGraph> dg;
+    int64_t graph_recaptures = 0;
     bool spread = false;                         ///< --prefill-spread with more than one card
     std::vector<std::vector<char>> same_link;    ///< cards that share one link to RAM (measure_links)
     std::vector<std::vector<int>> help_order;    ///< per card: the cards that help it, its own first (--decode-help)

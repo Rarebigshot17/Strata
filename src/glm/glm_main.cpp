@@ -22,6 +22,9 @@
 // --decode-help N: with the experts page-locked, of each decoded token's experts a layer's cache misses, up to N are
 // computed on the GPUs instead of the CPU (the first on the layer's card, the next ones on the others), each copied
 // in from RAM while the CPU computes the rest.
+// --decode-graphs: each layer's ops up to the routing that do not depend on the position (a KDA layer's attention
+// half and the router, an MLA layer's from its FFN half on; a dense layer's all) are captured as a CUDA graph at the
+// first decoded token and launched as one from then on, instead of one call into the driver per op.
 #include "strata/glm/check.hpp"
 #include "strata/glm/cpu_ref.hpp"
 #include "strata/glm/engine.hpp"
@@ -116,7 +119,7 @@ int usage() {
                  "                  [--max-tokens N] [--vram-reserve GB] [--expert-profile PATH]\n"
                  "                  [--max-swaps N] [--cache-decay D] [--no-expert-cache] [--prefill] [--prefill-chunk N]\n"
                  "                  [--pin-experts [--pin-keep-free GB]] [--prefill-rows N] [--kv-in-ram]\n"
-                 "                  [--prefill-spread] [--decode-help N]\n"
+                 "                  [--prefill-spread] [--decode-help N] [--decode-graphs]\n"
                  "       strata-glm -m MODEL.gguf --serve [--ctx N] [--eos-ids A,B] [--park-mib N] [--no-warm]\n"
                  "                  [--checkpoint-min N] [same GPU and cache options]\n");
     return 2;
@@ -160,6 +163,7 @@ int main(int argc, char** argv) {
         else if (a == "--kv-in-ram") opt.kv_in_ram = true;
         else if (a == "--prefill-spread") opt.prefill_spread = true;
         else if (a == "--decode-help" && (v = next())) opt.decode_help = std::max(0, std::atoi(v));
+        else if (a == "--decode-graphs") opt.decode_graphs = true;
         else if (a == "--eos-ids" && (v = next())) eos = parse_list<int32_t>(v);
         else if (a == "--park-mib" && (v = next())) so.park_bytes = (size_t) (std::max(0.0, std::atof(v)) * 1048576.0);
         else if (a == "--checkpoint-min" && (v = next())) so.checkpoint_min = std::atoll(v);
