@@ -169,14 +169,14 @@ below.
 | Experts | 288 per layer, top 8, sigmoid routing with bias, x2.5 scale, 1 shared expert, layers 0-2 dense, SwiGLU clamp 10 | 512, top 10, softmax routing, gated shared expert, every layer MoE |
 | Vocab | 154,880 | 248,320 |
 | Context | 1,048,576 | 262,144 |
-| Extras | 1 MTP layer (not used); thinking on by default | MTP layer, n-gram table, vision |
+| Extras | 1 MTP layer (drafts the next token with `--mtp`); thinking on by default | MTP layer, n-gram table, vision |
 
 ## Memory on napster-ai
 
 The routed experts are about 304B parameters (288 experts x 3 matrices x 4096 x 2048 x 42 MoE layers). The sizes
 below come from napster-ai on 2026-10-20: the downloads from the repository's listing, the 3-bit experts from
 `tools/glm53_inspect.py` on the 3-bit file: 109.9 GB of routed experts in the 45 layers the engine runs, 7.7 GB of
-everything else (on the GPUs), and 2.8 GB for the MTP layer (`blk.45`), which the engine does not load. (The
+everything else (on the GPUs), and 2.8 GB for the MTP layer (`blk.45`), which the engine loads only with `--mtp`. (The
 inspector's first run counted 112.5 GB of experts and 7.9 GB of the rest, with the MTP layer in them.) The 4-bit
 experts are not measured: they are derived as its download less the 3-bit file's 7.7 GB and 2.8 GB, which takes the
 4-bit file's other tensors and MTP layer as the same size as the 3-bit's (if they are bigger, its experts are
@@ -245,7 +245,7 @@ Every piece is checked against llama.cpp, which has run GLM-5.3-Flash since its 
 | M3 | Experts: all in RAM (the mapped GGUF), VRAM cache of the most used, CPU for the rest; the warm-up that reads them into the page cache before READY | run on the real 3-bit file (napster-ai, 2026-10-22/23): 31.1 GB of experts in VRAM at 131,072 tokens of context, the cache follows the conversation (`--cache-decay 0.95`, `--max-swaps 32`, copies in the background); 14.3 to 17.7 tokens/s through the server with 56% to 70% of the experts used read from VRAM | logits unchanged; tokens/s |
 | M4 | Prompt processing: batched projections, chunked KDA, batched MLA (causal below 2,051 tokens of context, each query's own selection past that), experts streamed through VRAM | written; on small random models (napster-ai, 2026-10-20, chunks of 16 tokens) it matched the CPU reference within the CUDA rounding; on the real file it read the server's short prompts (up to 163 tokens), its speed beyond that not measured | prompt tokens/s; logits unchanged |
 | M5 | Server: Strata's full server (`serve/server.py`: OpenAI, Anthropic and Responses APIs, the web app, MCP, structured output, metrics) on the GLM engine, with GLM's chat template, tool calls (`<arg_key>`/`<arg_value>`) and thinking on or off | ported and reviewed ([GLM53_SERVER_PORT.md](GLM53_SERVER_PORT.md)); tested on the CPU engine (`tools/glm53_server_check.sh`, the Python tests); on the real file (napster-ai, 2026-10-22) it answered a chat, a question with thinking off and a tool call correctly; Open WebUI and the agents not tried yet | Open WebUI and an agent work end to end (step 8) |
-| M6 | Several clients: conversation parking and checkpoints | written, checked on the CPU engine (`tools/glm53_park_check.py`); batching and MTP drafting dropped | speed for 1, 2 and 4 clients |
+| M6 | Several clients: conversation parking and checkpoints | written, checked on the CPU engine (`tools/glm53_park_check.py`); batching dropped; MTP drafting dropped here and built later (`--mtp`, 2026-10-24, "Speed on napster-ai") | speed for 1, 2 and 4 clients |
 | M7 | Remove the Qwen engine and HIP; docs | done: the Qwen engine, HIP and the Qwen docs are removed; the docs describe GLM-5.3-Flash | |
 
 ### Several clients on one engine
@@ -293,8 +293,13 @@ from what the plan took in these:
 - `attention.indexer.kpool_select_tail` is missing. llama.cpp then selects the incomplete tail pool (its default is
   true), and so does the engine. The small test models always carry the key (llama.cpp's model saver writes it), so
   the checks could not see which default the engine took.
-- `block_count` is 46 with `nextn_predict_layers` 1: `blk.45` is the MTP layer. The engine runs the 45 layers before
-  it and does not load it, so its Q2_K experts, the only Q2_K tensors in the file, need no kernel.
+- `block_count` is 46 with `nextn_predict_layers` 1: `blk.45` is the MTP layer (29 tensors, 2.80 GB, 2.62 GB of it
+  the routed experts). The engine runs the 45 layers before it, and loads the MTP layer only with `--mtp`. Its routed
+  experts, Q2_K (gate and up, the only Q2_K tensors in the file) and Q3_K (down), run on the CPU with ggml's dot
+  products and are never in the VRAM cache, so they need no GPU kernel. It has a `shared_head_norm` of its own and no
+  `shared_head_head` or `embed_tokens`, so its head is `output.weight` and its embedding `token_embd.weight`. The file
+  sets `attention.indexer.index_share_mtp`, which llama.cpp (`a0e6dc7`) does not read: its MTP layer runs an indexer
+  of its own over its own keys, and so does this engine (napster-ai's GGUF header, 2026-10-24).
 - The routed experts of the 45 layers are not IQ3_XXS throughout, as the plan took them: they are IQ2_S (gate and up,
   63.5 GB) and IQ3_S (down, 42.6 GB), with 3.9 GB of IQ4_XS. The GPU kernels take each. The MTP layer's experts are Q2_K
   and Q3_K. The inspector counted 109.9 GB of the 45 layers' experts, 7.7 GB of everything else and 2.8 GB for the MTP
@@ -360,6 +365,27 @@ and 1.7238 nats per token (paired difference -0.0028, 95% interval -0.0137 to +0
 Step 7 sees no selection difference: up to 2,051 tokens of context the indexer selects every pool, so the precision
 of its keys cannot change what is selected, and step 6's text is shorter. Step 6 runs llama.cpp with its default f16
 cache, which keeps the latent as Strata does.
+
+**The MTP layer** (`--mtp`) is checked the same way. llama.cpp's small test models have none, so
+`tools/glm53_add_mtp.py` adds one to each (an MLA layer with its own indexer and routed experts, and the NextN
+tensors, random), and v1-heads also carries the optional ones (its own head norm, head and embedding).
+`llama-strata-ref --mtp-out` writes llama.cpp's MTP head's logits at every position, fed the token there and the
+trunk's hidden state before it, as `--spec-type draft-mtp` drafts; `strata-glm-ref --mtp-out` and `strata-glm --mtp
+--mtp-out` write the CPU reference's and the GPU's. The CPU reference matched llama.cpp within the rule: worst relative
+differences 0.00034 (F32), 0.000305 (v1 and v1-bare), 0.000343 (v1-heads), 0.014 (Q4_0) and 0.017 (Q8_0), every
+top-1 the same but one tie (llama.cpp's CPU build, an x86 machine with AVX-512, 2026-10-24). In the GPU check on
+napster-ai (2026-10-24) the GPU's MTP logits matched llama.cpp's within at most 0.00046 on the float models, 0.023
+to 0.027 on Q4_0 and 0.014 to 0.015 on Q8_0 (two runs, each with new random models).
+
+The MTP layer's indexer meets the same near ties as the trunk's, and the GPU's q8_1 rounding can order two pools the
+other way. On one Q4_0 model, at position 43, the CPU had pool 5 at 0.005085 and pool 0 at 0.005041, the GPU 0.004979
+and 0.004983, so the two attended different cells and the logits differed by 0.355 (`STRATA_GLM_SEL_DEBUG=1` prints
+both sides' selections). The GPU's pool scores differed from the CPU's by up to 4.0% at the positions printed. So
+check-mtp counts a position where the two took other cells, on scores the CPU had within 10% of each other, as a tie,
+prints it and leaves it out of the rule; more than a quarter of the rows as ties fails. A pass over a token and its
+draft (`--check-pairs`) is held to more than the rule: every row bitwise the same as one token at a time, with the
+expert cache warmed and then kept as it is; and `--check-generate` decodes with and without drafts and asks for the
+same tokens.
 
 ## What to run on napster-ai
 
@@ -449,7 +475,8 @@ from the Strata folder.
    ```
 
    The inspector flags an expert type the GPU kernels cannot read only where a layer the engine runs uses it; the MTP
-   layer (the last block, `blk.45` in the 3-bit file) is listed apart, since Strata does not load it. In the layers the
+   layer (the last block, `blk.45` in the 3-bit file) is listed apart: Strata loads it only with `--mtp`, and its
+   experts run on the CPU. In the layers the
    engine runs, the 3-bit file's experts are IQ2_S, IQ3_S and IQ4_XS (its inspector output on napster-ai), and the
    kernels take each; its Q2_K and Q3_K experts are only in the MTP layer. On 192 GB (188 GiB reported) the 4-bit file
    leaves about 52 GiB of RAM beside its experts and the 3-bit file about 86 GiB (calculated from the figures in "Memory

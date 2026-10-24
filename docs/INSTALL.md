@@ -45,8 +45,9 @@ Setup lists the repository's files when it runs and takes the shards of the size
 Where these figures come from (they are written into `setup.py`): the downloads are the repository's listing, read on
 napster-ai on 2026-10-20. The 3-bit experts are what `tools/glm53_inspect.py` counted in the real 3-bit file there,
 for the 45 layers the engine runs; beside them the file holds 7.7 GB of other tensors (they go to the GPUs) and the
-MTP layer's 2.8 GB, which the engine does not load. The 4-bit experts are not measured: they are derived as its
-download less those 7.7 and 2.8 GB. The RAM columns are calculated from these. The downloads and the disk are in GB (10^9 bytes); the RAM is in GiB (2^30 bytes), as Linux
+MTP layer's 2.8 GB, which the engine loads only with `--mtp`. The 4-bit experts are not measured: they are derived
+as its download less those 7.7 and 2.8 GB. The RAM columns are calculated from these. The downloads and the disk are
+in GB (10^9 bytes); the RAM is in GiB (2^30 bytes), as Linux
 reports it, and setup compares the experts with it in GiB. A good fit leaves 40 GiB or more beside the experts, for
 Linux, the server and parked conversations. Below 12 GiB left, the OS would read experts from the disk, so setup
 stops unless you insist (`--model NAME --yes`). Setup reads the RAM from `/proc/meminfo` (the number `free -g`
@@ -396,8 +397,9 @@ server adds `--serve`, `--split` from the config's `split` key, and `--eos-ids` 
 | `--eos-ids a,b,c` | The tokens that end a turn. The server adds them. | Set by the server |
 
 What each option does inside the engine: [HOW_IT_WORKS.md](HOW_IT_WORKS.md). `strata-glm` also has a check mode
-(`--tokens-file`, `--out`, `--check-cpu`, `--prefill`, `--max-tokens`) used by the GLM checks in `tools/`; those
-options are not for the run config. The CPU reference `strata-glm-ref` takes `-m`, `--ctx`, `--eos-ids`, `--threads`,
+(`--tokens-file`, `--out`, `--check-cpu`, `--prefill`, `--max-tokens`, and with `--mtp` also `--check-pairs`,
+`--mtp-out`, `--check-generate` and `--bench-generate`) used by the GLM checks in `tools/`; those options are not
+for the run config. The CPU reference `strata-glm-ref` takes `-m`, `--ctx`, `--eos-ids`, `--threads`,
 `--park-mib` and `--checkpoint-min` (and ignores `--no-warm`); it runs the whole model on the CPU, one token at a
 time, and is meant for the checks.
 

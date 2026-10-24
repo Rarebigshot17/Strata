@@ -105,7 +105,7 @@ The 4-bit size is closer to the full model. How much better its answers are is n
 
 These are setup's own figures. The downloads are the repository's listing (2026-10-20). The 3-bit experts are what
 `tools/glm53_inspect.py` counted in the real file on napster-ai for the 45 layers the engine runs. The file holds
-7.7 GB of other tensors (on the GPUs) and 2.8 GB for the MTP layer, which the engine does not load. The 4-bit
+7.7 GB of other tensors (on the GPUs) and 2.8 GB for the MTP layer, which the engine loads only with `--mtp`. The 4-bit
 experts are not measured: they are its download less those 7.7 and 2.8 GB. Setup reads the real file sizes from the
 repository before it downloads. When it takes `UD-Q4_K_XL` (199.7 GB) instead of `UD-IQ4_XS`, it works out that
 file's experts as the same share of its size and says what that leaves.

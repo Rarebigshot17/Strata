@@ -504,9 +504,10 @@ int main(int argc, char** argv) {
                     }
                 const double nt = (double) runs * std::max(N - 1, 1);
                 std::printf("bench-generate: %d rounds of %zu prompts, %d tokens each: one token at a time %.2f ms a "
-                            "token, with drafts %.2f ms a token (%.1f%% faster; %lld drafts, %.1f%% taken, a draft "
+                            "token, with drafts %.2f ms a token (%.1f%% %s; %lld drafts, %.1f%% taken, a draft "
                             "%.2f ms, a pass %.2f ms); %d of %d replies the same\n", bench_rounds, prompts.size(), N,
-                            1e3 * s_one / nt, 1e3 * s_two / nt, 100.0 * (s_one / s_two - 1.0), (long long) drafts,
+                            1e3 * s_one / nt, 1e3 * s_two / nt, 100.0 * std::fabs(s_one / s_two - 1.0),
+                            s_one >= s_two ? "faster" : "slower", (long long) drafts,
                             100.0 * (double) taken / (double) std::max<int64_t>(drafts, 1),
                             1e3 * s_draft / (double) std::max<int64_t>(drafts, 1),
                             1e3 * s_pass / (double) std::max<int64_t>(drafts, 1), same_n, runs);
