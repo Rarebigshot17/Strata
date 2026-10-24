@@ -34,7 +34,7 @@ namespace strata::glm {
 
 struct ExpertCacheOptions {
     double vram_reserve_gb = 1.0;   ///< left free on each device after the cache
-    int max_swaps_per_token = 32;   ///< experts copied in per token, all layers together
+    int max_swaps_per_token = 64;   ///< experts copied in per token, all layers together (64 > 32: see expert_cache.cu)
     double decay = 0.95;            ///< per-token decay of the use scores
     std::string profile;            ///< scores file: loaded at start, written by save_profile()
     bool disabled = false;

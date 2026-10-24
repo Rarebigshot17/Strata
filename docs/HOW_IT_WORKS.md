@@ -30,8 +30,8 @@ The same in technical terms:
 - **The expert cache:** every expert has a use score that halves over about 14 tokens (`--cache-decay`, 0.95 per
   token). While the model writes an answer it keeps coming back to a small set of experts, so the cache follows
   the conversation: a missed expert takes a free slot, or replaces a cached one whose score is clearly lower. At
-  most 32 experts are copied in per token (`--max-swaps`), on a thread of their own while decoding goes on; a
-  copy still running counts against the next token's 32. The new expert takes its slot at the first token after
+  most 64 experts are copied in per token (`--max-swaps`), on a thread of their own while decoding goes on; a
+  copy still running counts against the next token's 64. The new expert takes its slot at the first token after
   its copy is done.
   `--expert-profile FILE` saves the scores when the engine leaves its request loop (the server's `QUIT`, or the
   server's end of the pipe closing) and loads them at the next start, so the cache starts full. Every ordinary stop

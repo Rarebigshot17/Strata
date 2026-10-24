@@ -376,7 +376,11 @@ void ExpertCache::maintain() {
     // the starting layer rotates, so a cap reached early in the loop does not always favour the first layers
     int swaps = 0, fills = 0;
     // copies still queued or running count against this token's swaps, so the copy thread never falls behind by
-    // more than a token's worth (a backlog leaves evicted slots empty while it waits)
+    // more than a token's worth (a backlog leaves evicted slots empty while it waits). The cap (--max-swaps) is 64:
+    // on napster-ai (2026-10-24, the 3-bit file, page-locked experts) the cache asked for about 50 swaps a token, and
+    // decoding three 400-token answers took 71.9, 70.6 and 66.0 ms a token at 8, 16 and 64 (71.0 at 32 without the
+    // decode graphs, worth about 1 ms), and 66.6 at 128, the same as 64: the CPU's experts a little slower for the
+    // RAM the copies read, but fewer of them
     {
         std::lock_guard<std::mutex> lk(mu_);
         swaps = std::min<int>((int) todo_.size() + busy_, opt_.max_swaps_per_token);
