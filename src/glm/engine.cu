@@ -8,9 +8,11 @@
 #include "engine_impl.hpp"
 #include "strata/glm/gpu_kernels.hpp"
 #include "strata/glm/gpu_prefill.hpp"
+#include "strata/glm/nvtx.hpp"
 
 #include "ggml.h"
 
+#include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
 
 #include <algorithm>
@@ -272,6 +274,23 @@ GpuEngine::GpuEngine(const Model& model, const EngineOptions& opt) : impl_(new I
     I.pool = std::make_unique<ThreadPool>(threads);
     I.timing = std::getenv("STRATA_GLM_TIMING") && std::atoi(std::getenv("STRATA_GLM_TIMING")) > 0;
     if (I.timing) I.prev_ids.assign((size_t) (c.n_layer * c.n_expert_used), -1);
+    if (const char* pv = std::getenv("STRATA_GLM_PROFILE_EVAL")) {
+        long long from = -1;
+        int n = 0;
+        if (std::sscanf(pv, "%lld,%d", &from, &n) == 2 && from >= 0 && n > 0) {
+            I.prof_eval_from = from;
+            I.prof_eval_left = n;
+            std::fprintf(stderr, "STRATA_GLM_PROFILE_EVAL: recording %d decoded token(s) from position %lld\n", n,
+                         from);
+        } else {
+            std::fprintf(stderr, "STRATA_GLM_PROFILE_EVAL=%s: expected FROM,N (a position and a number of tokens)\n",
+                         pv);
+        }
+    }
+    for (int64_t il = 0; il < c.n_layer; ++il) {
+        I.nv_attn.push_back("L" + std::to_string(il) + (c.is_kda(il) ? " KDA" : " MLA"));
+        I.nv_ffn.push_back("L" + std::to_string(il) + " FFN");
+    }
     I.experts = std::make_unique<CpuExperts>(model, *I.pool);
     I.h_x = halloc<float>((size_t) E);
     I.h_yr = halloc<float>((size_t) E);
@@ -539,6 +558,10 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
     if (token < 0 || token >= c.n_vocab) throw std::runtime_error("token id outside the vocabulary");
     using tclock = std::chrono::steady_clock;
     const auto sec = [](tclock::time_point a) { return std::chrono::duration<double>(tclock::now() - a).count(); };
+    if (I.prof_eval_left > 0 && !I.prof_on && t >= I.prof_eval_from) {
+        ok(cudaProfilerStart(), "cudaProfilerStart");
+        I.prof_on = true;
+    }
     const auto t_eval0 = tclock::now();
 
     // ---- embedding (hc_init), dequantized on the host
@@ -578,6 +601,7 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
         const int64_t H = c.n_head[(size_t) il];
 
         // ---- attention half: hc_pre, attn_norm, the mixer, hc_post
+        nvtx_push(I.nv_attn[(size_t) il].c_str());
         gpu::rms_norm(d.R, d.flat, (int) (hc * E), c.rms_eps, nullptr, s);
         gpu::gemv(l.hc_attn_fn, d.flat, d.mixes, d.q8, s);
         gpu::hc_weights(d.mixes, l.hc_attn_scale, l.hc_attn_base, d.pc, (int) hc, (int) c.hc_sinkhorn_iters,
@@ -683,8 +707,10 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
         }
         gpu::hc_post(d.y, d.R, d.pc, d.R2, (int) hc, (int) E, s);
         std::swap(d.R, d.R2);
+        nvtx_pop();
 
         // ---- FFN half: hc_pre, ffn_norm, dense FFN or MoE, hc_post
+        NvtxRange r_ffn(I.nv_ffn[(size_t) il].c_str());
         gpu::rms_norm(d.R, d.flat, (int) (hc * E), c.rms_eps, nullptr, s);
         gpu::gemv(l.hc_ffn_fn, d.flat, d.mixes, d.q8, s);
         gpu::hc_weights(d.mixes, l.hc_ffn_scale, l.hc_ffn_base, d.pc, (int) hc, (int) c.hc_sinkhorn_iters, c.hc_eps,
@@ -706,7 +732,10 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
             ok(cudaMemcpyAsync(I.h_ids, d.ids, (size_t) KU * sizeof(int32_t), cudaMemcpyDeviceToHost, d.stream), "ids");
             ok(cudaMemcpyAsync(I.h_w, d.wexp, (size_t) KU * sizeof(float), cudaMemcpyDeviceToHost, d.stream), "w");
             const auto t_rw = tclock::now();
-            ok(cudaStreamSynchronize(d.stream), "sync");
+            {
+                NvtxRange r_rw("routing: wait for the GPU");
+                ok(cudaStreamSynchronize(d.stream), "sync");
+            }
             if (I.timing) I.t_route_wait += sec(t_rw);
             I.cache->record(il, I.h_ids, KU);
             // the cached experts on the GPU, in routing order; the rest go to the CPU
@@ -838,6 +867,7 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
             if (!I.miss_ids.empty() || other_cards) {
                 if (!I.miss_ids.empty()) {
                     const auto t_c = tclock::now();
+                    NvtxRange r_cpu("CPU experts");
                     I.experts->run(il, I.h_x, I.miss_ids.data(), I.miss_w.data(), (int) I.miss_ids.size(), I.h_yr,
                                    I.help_ids.empty() ? std::function<void()>(launch_gpu) : std::function<void()>());
                     if (I.timing) I.t_cpu += sec(t_c);
@@ -890,6 +920,11 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
         I.t_maintain += sec(t_m);
         I.t_eval += sec(t_eval0);
         ++I.t_tokens;
+    }
+    if (I.prof_on && I.prof_eval_left > 0 && --I.prof_eval_left == 0) {
+        ok(cudaProfilerStop(), "cudaProfilerStop");
+        I.prof_on = false;
+        std::fprintf(stderr, "STRATA_GLM_PROFILE_EVAL: stopped after the token at %lld\n", (long long) t);
     }
     ++pos_;
     return I.logits;

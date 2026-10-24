@@ -11,8 +11,9 @@ between cards ran, how much of the copying from RAM overlapped its kernels, and 
 long 0, 1, 2 or 3 cards were computing at once, the prompt chunks (the engine's NVTX ranges "chunk POS+T"), each
 card's kernel time by the part of the engine that launched it (the innermost NVTX range open on the launching thread,
 found through the launch call's correlation id: a layer's attention half, its routed experts, another card's experts
-on a helper thread, the rest of its FFN half) and the kernels that took the most time on each card. Standard library
-only.
+on a helper thread, the rest of its FFN half), the host's calls into the CUDA runtime by count and time, and the
+kernels that took the most time on each card. Standard library only. STRATA_GLM_PROFILE_EVAL=FROM,N records N
+decoded tokens instead of prompt chunks.
 """
 from __future__ import annotations
 
@@ -86,7 +87,8 @@ def phase_of(name: str | None, main_thread: bool) -> str:
         return "other" if main_thread else "routed experts, another card's layer"
     if re.fullmatch(r"L\d+ (MLA|KDA)", name):
         return "attention half"
-    if name.startswith("routed experts: queue"):
+    if name.startswith("routed experts: queue") or name == "CPU experts":
+        # the prompt path's own experts; in a decoded token, the cached experts launched while the CPU computes
         return "routed experts, its own layer"
     if re.fullmatch(r"L\d+ FFN", name) or name.startswith("routing:"):
         return "FFN half, the rest"
@@ -256,6 +258,18 @@ def main() -> int:
             row = [total(merge(ph[d].get(name, []))) / 1e9 for d in devices]
             if any(row):
                 print(f"  {name:<38}" + "".join(f"  {v:9.3f}" for v in row))
+
+    # the host's calls into the CUDA runtime (launches, copies, waits): where the host time between kernels goes
+    if has_table(db, "CUPTI_ACTIVITY_KIND_RUNTIME") and "nameId" in columns(db, "CUPTI_ACTIVITY_KIND_RUNTIME"):
+        calls: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+        for nid, s_, e_ in db.execute("SELECT nameId, start, end FROM CUPTI_ACTIVITY_KIND_RUNTIME"):
+            c = calls[re.sub(r"_v\d+$", "", name_of(nid, ids))]
+            c[0] += 1
+            c[1] += e_ - s_
+        if calls:
+            print("\nhost calls into the CUDA runtime (all threads):")
+            for name, (count, ns) in sorted(calls.items(), key=lambda x: -x[1][1])[:a.top]:
+                print(f"  {ns / 1e9:8.3f} s  x{count:<8} {ns / count / 1e3:8.1f} us each  {name}")
 
     for d in devices:
         print(f"\nCUDA device {d}: the kernels that took the most time")

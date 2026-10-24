@@ -189,6 +189,10 @@ struct GpuEngine::Impl {
     int64_t prof_from = -1;
     int prof_left = 0;
     bool prof_on = false;
+    // STRATA_GLM_PROFILE_EVAL=FROM,N: the same for N tokens decoded from position FROM, and eval's ranges' names
+    int64_t prof_eval_from = -1;
+    int prof_eval_left = 0;
+    std::vector<std::string> nv_attn, nv_ffn;
     bool spread = false;                         ///< --prefill-spread with more than one card
     std::vector<std::vector<char>> same_link;    ///< cards that share one link to RAM (measure_links)
     std::vector<std::vector<int>> help_order;    ///< per card: the cards that help it, its own first (--decode-help)
