@@ -376,6 +376,15 @@ server adds `--serve`, `--split` from the config's `split` key, and `--eos-ids` 
 | `--cache-decay D` | How fast the expert cache forgets: each token multiplies every expert's use score by D. | 0.95 (measured on napster-ai, UD-IQ3_XXS, four chat prompts after the first: 15.1-15.9 tokens/s and 67-69% of the experts in VRAM, against 12.4-12.8 tokens/s and 35-38% with 0.999 and 8 swaps on the same build) |
 | `--no-expert-cache` | No VRAM expert cache. | Off |
 | `--prefill-chunk N` | Prompt tokens read at once. 0 = one at a time. | 256 |
+| `--prefill-rows N` | Of each prompt chunk, the tokens run at a time outside the routed experts. | 0 = as many as fit 512 MiB of buffers, at most 512 |
+| `--pin-experts` | Copies the routed experts into page-locked RAM at start, so the GPUs read them by DMA (prompt chunks, the cache's copies) without the page cache in between. Needs RAM for all of them beside everything else (109.9 GB for the 3-bit file); it stops at `--pin-keep-free`. | Off (napster-ai: 109.9 GB locked in 102 to 136 s) |
+| `--pin-keep-free GB` | With `--pin-experts`: no more locking once the RAM still available would fall below this. | 16 |
+| `--kv-in-ram` | The MLA layers' latent cache in page-locked host RAM (11 KB a token for the 3-bit file), the indexer's dense range in VRAM too; the VRAM it frees goes to the expert cache. Each token's selected rows are read over PCIe. | Off |
+| `--prefill-spread` | With `--pin-experts` and more than one GPU: each layer's streamed experts in a prompt chunk are shared out over every card by its link to RAM, and copied in while the layer's attention runs. | Off (napster-ai, a 64K-token prompt in 8,192-token chunks: 378 tokens/s) |
+| `--decode-help N` | With `--pin-experts`: up to N of the experts a layer misses in a decoded token are computed on the GPUs instead of the CPU. | 0 (napster-ai, PCIe 3.0: slower at 1, 2 and 3) |
+| `--no-decode-graphs` | Launches a decoded token's ops one by one instead of one CUDA graph per layer. The same values. | Graphs (napster-ai: 1.6% faster) |
+| `--no-lend-prompt-buffers` | Keeps the prompt path's buffers for prompts alone. By default they hold more expert-cache slots between prompts, and a prompt of `--lend-min-prompt` tokens or more takes them back (their experts are copied in again as decoding needs them). | Lent (napster-ai: the cache 23.2 to 31.2 GB, decoding 11% to 17% faster) |
+| `--lend-min-prompt N` | With the buffers lent: a shorter prompt runs token by token and leaves the cache as it is. | 64 |
 | `--threads N` (`-t N`) | CPU threads for the experts computed on the CPU. The warm-up uses at most 16 of them (8 when this is 0). | 0 = one per CPU core (measured on napster-ai, Xeon E5-2699 v4, UD-IQ3_XXS, 205 tokens one at a time: 22 threads 10.0 tokens/s, all 44 hardware threads 6.8) |
 | `--devices 0,1,2` | CUDA device numbers, in layer order. Use `gpu` instead: it sets which cards CUDA shows the engine and in which order, and these numbers would count among those. | Every visible device |
 | `--split w,w,w` | Each device's share of the layers. The config's `split` key gives the same. | Each card's free VRAM at start |

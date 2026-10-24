@@ -37,6 +37,10 @@ The same in technical terms:
   server's end of the pipe closing) and loads them at the next start, so the cache starts full. Every ordinary stop
   of the server (Ctrl+C, closing its terminal, SIGTERM) ends the engine with `QUIT`; an engine that is killed ends
   without saving them ([TROUBLESHOOTING.md](TROUBLESHOOTING.md) has the details). Setup puts one in the run config.
+  Between prompts the cache also holds experts in the prompt path's buffers (the chunk's working memory, which a
+  reply does not use): a prompt of 64 tokens or more takes the buffers back and those experts leave the cache, and
+  the first token of the reply gives them back empty, to be filled again as the reply misses experts
+  (`--no-lend-prompt-buffers` turns this off; a shorter prompt runs token by token and keeps them).
 - **RAM:** every routed expert stays in the GGUF file, mapped into memory. At 3-bit that is 109.9 GB (counted in the
   real file), at 4-bit about 146 GB (derived from its download, not measured). The CPU computes the experts the cache
   doesn't hold, in place, while the GPU computes the shared expert. Before the server says it is ready, the engine
