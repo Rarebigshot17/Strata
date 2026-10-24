@@ -129,6 +129,15 @@ struct LayerWeights {
     Tensor gate_shexp, up_shexp, down_shexp;
 };
 
+/// The MTP block's own tensors (llama.cpp's NextN: `blk.<n_layer>.nextn.*`). Its attention and FFN are a LayerWeights
+/// like a trunk layer's (MLA with its own indexer, routed experts and the shared expert; no mHC). The optional ones
+/// fall back to the trunk's: shared_head_norm to output_norm, shared_head_head to output, embed_tokens to token_embd.
+struct NextnWeights {
+    Tensor eh_proj;                   ///< [2 * n_embd, n_embd]: the normed embedding and hidden state, concatenated
+    Tensor enorm, hnorm;              ///< [n_embd]
+    Tensor shared_head_norm, shared_head_head, embed_tokens;   ///< optional
+};
+
 /// A GLM-5.3-Flash GGUF, mapped. Construction reads the configuration and resolves every tensor the forward pass
 /// needs, and throws with the tensor's name and the expected shape when one is missing or has another shape.
 class Model {
@@ -136,7 +145,11 @@ public:
     explicit Model(const std::string& first_shard);
 
     const Config& config() const { return cfg_; }
+    /// Layer `il` of the trunk, or with il == config().n_layer the MTP block (when has_mtp()).
     const LayerWeights& layer(int64_t il) const { return layers_[(size_t) il]; }
+    /// The file carries the MTP block (nextn_predict_layers >= 1 and its tensors): layer(n_layer) and nextn().
+    bool has_mtp() const { return has_mtp_; }
+    const NextnWeights& nextn() const { return nextn_; }
     const Tensor& tok_embd() const { return tok_embd_; }
     const Tensor& output_norm() const { return output_norm_; }
     const Tensor& output() const { return output_; }
@@ -160,6 +173,8 @@ private:
     Config cfg_;
     std::vector<LayerWeights> layers_;
     Tensor tok_embd_, output_norm_, output_;
+    bool has_mtp_ = false;
+    NextnWeights nextn_;
 };
 
 }  // namespace strata::glm

@@ -1,14 +1,16 @@
 // src/glm/ref_main.cpp - strata-glm-ref: GLM-5.3-Flash logits from the CPU reference (cpu_ref.hpp).
 //
 //   strata-glm-ref -m MODEL.gguf --tokens-file IDS.txt --out LOGITS.bin [--threads N] [--dump-layers PATH
-//                  [--dump-names a,b]]
+//                  [--dump-names a,b]] [--mtp-out MTP.bin]
 //
 // LOGITS.bin uses the layout of `strata generate --dump-logits` and `llama-strata-ref --out`, one row per
 // position, so tools/glm53_compare.py compares it with llama.cpp's directly. --dump-layers writes, per position and
 // layer, the points --dump-names lists, by the names llama.cpp's graph gives them (default hc_attn_post,l_out: the
 // residual streams after the layer's attention and after its FFN, hc x n_embd float32 each; also hc_attn_pre,
 // attn_norm, hc_ffn_pre, ffn_norm, ffn_out, n_embd each), the layout `llama-strata-ref --dump-layers` writes with
-// the same names (tools/glm53_layers_compare.py compares the two).
+// the same names (tools/glm53_layers_compare.py compares the two). --mtp-out writes the MTP block's logits at every
+// position p, fed the token at p and the trunk's hidden state at p-1 (zeros at 0), in the same layout as
+// `llama-strata-ref --mtp-out`.
 #include "strata/glm/cpu_ref.hpp"
 #include "strata/glm/serve_loop.hpp"
 
@@ -65,6 +67,7 @@ int usage() {
     std::fprintf(stderr,
                  "usage: strata-glm-ref -m MODEL.gguf --tokens-file IDS.txt --out LOGITS.bin\n"
                  "                      [--threads N] [--dump-layers PATH [--dump-names a,b]] [--max-tokens N]\n"
+                 "                      [--mtp-out MTP.bin]\n"
                  "       strata-glm-ref -m MODEL.gguf --serve [--ctx N] [--eos-ids A,B] [--threads N]\n"
                  "                      [--park-mib N] [--checkpoint-min N] [--no-warm]\n");
     return 2;
@@ -73,7 +76,7 @@ int usage() {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string model_path, ids_path, out_path, layers_path, dump_names = "hc_attn_post,l_out";
+    std::string model_path, ids_path, out_path, layers_path, mtp_path, dump_names = "hc_attn_post,l_out";
     int threads = strata::glm::ThreadPool::physical_cores();
     long long max_tokens = 0, ctx = 4096;
     bool serve = false;
@@ -88,6 +91,7 @@ int main(int argc, char** argv) {
         else if (a == "--out" && (v = next())) out_path = v;
         else if (a == "--dump-layers" && (v = next())) layers_path = v;
         else if (a == "--dump-names" && (v = next())) dump_names = v;
+        else if (a == "--mtp-out" && (v = next())) mtp_path = v;
         else if ((a == "--threads" || a == "-t") && (v = next())) threads = std::atoi(v);
         else if (a == "--max-tokens" && (v = next())) max_tokens = std::atoll(v);
         else if (a == "--serve") serve = true;
@@ -133,14 +137,21 @@ int main(int argc, char** argv) {
         strata::glm::CpuRef ref(model, (int64_t) ids.size(), threads);
         const auto t1 = std::chrono::steady_clock::now();
 
+        if (!mtp_path.empty() && !model.has_mtp()) {
+            std::fprintf(stderr, "--mtp-out: the model has no MTP block\n");
+            return 1;
+        }
         FILE* out = std::fopen(out_path.c_str(), "wb");
         FILE* lay = layers_path.empty() ? nullptr : std::fopen(layers_path.c_str(), "wb");
-        if (!out || (!layers_path.empty() && !lay)) {
+        FILE* mout = mtp_path.empty() ? nullptr : std::fopen(mtp_path.c_str(), "wb");
+        if (!out || (!layers_path.empty() && !lay) || (!mtp_path.empty() && !mout)) {
             std::fprintf(stderr, "cannot write the output files\n");
             return 1;
         }
         const int32_t hdr[2] = {(int32_t) c.n_vocab, (int32_t) ids.size()};
         std::fwrite(hdr, sizeof hdr, 1, out);
+        if (mout) std::fwrite(hdr, sizeof hdr, 1, mout);
+        std::vector<float> h_prev((size_t) c.n_embd, 0.0f);   // --mtp-out: the trunk's h at the position before
         strata::glm::Trace trace;
         // --dump-names, by llama.cpp's graph names, in the order given
         const std::pair<const char*, const std::vector<std::vector<float>>*> known[] = {
@@ -162,7 +173,12 @@ int main(int argc, char** argv) {
             points.push_back(hit->second);
         }
         for (size_t i = 0; i < ids.size(); ++i) {
+            if (mout) {
+                const std::vector<float>& ml = ref.mtp_eval(ids[i], h_prev.data());
+                std::fwrite(ml.data(), sizeof(float), ml.size(), mout);
+            }
             const std::vector<float>& logits = ref.eval(ids[i], lay ? &trace : nullptr);
+            if (mout) h_prev = ref.h();
             std::fwrite(logits.data(), sizeof(float), logits.size(), out);
             if (lay)
                 for (size_t l = 0; l < trace.layer_out.size(); ++l)
@@ -174,6 +190,7 @@ int main(int argc, char** argv) {
         }
         std::fclose(out);
         if (lay) std::fclose(lay);
+        if (mout) std::fclose(mout);
         const auto t2 = std::chrono::steady_clock::now();
         const double load_s = std::chrono::duration<double>(t1 - t0).count();
         const double run_s = std::chrono::duration<double>(t2 - t1).count();

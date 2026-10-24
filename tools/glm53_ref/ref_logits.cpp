@@ -13,6 +13,10 @@
 //                   float32 each), in that order, the layout `strata-glm-ref --dump-layers` writes with the same
 //                   --dump-names (tools/glm53_layers_compare.py compares the two). Needs -b 1 -ub 1, one position per
 //                   decode. Other names: hc_attn_pre, attn_norm, hc_ffn_pre, ffn_norm, ffn_out (n_embd each).
+//   --mtp-out PATH  the model's MTP block (its NextN layer, what `--spec-type draft-mtp` drafts with) at every
+//                   position p, fed the token at p and the trunk's hidden state at p-1 (zeros at position 0), the way
+//                   llama.cpp's MTP drafting pairs them: its logits, in the --out layout. Loads the block (load_mtp)
+//                   and runs it in an MTP context of its own after the trunk.
 //
 // Input is either a prompt (-p TEXT or -f FILE, tokenized by llama.cpp) or --tokens-file PATH (ids separated by
 // commas or whitespace). Every other flag is llama.cpp's own (-m, -ngl, --n-cpu-moe, -c, -t, ...).
@@ -23,6 +27,7 @@
 #include "common.h"
 #include "llama.h"
 #include "log.h"
+#include "../../src/llama-ext.h"   // llama_set_embeddings_nextn, llama_get_embeddings_nextn_ith (MTP)
 
 #include <cstdint>
 #include <cstdio>
@@ -100,6 +105,7 @@ int main(int argc, char ** argv) {
     std::string tokens_path;
     std::string layers_path;
     std::string dump_names;
+    std::string mtp_path;
     std::vector<char *> rest = { argv[0] };
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -109,13 +115,16 @@ int main(int argc, char ** argv) {
             layers_path = argv[++i];
         } else if (a == "--dump-names" && i + 1 < argc) {
             dump_names = argv[++i];
+        } else if (a == "--mtp-out" && i + 1 < argc) {
+            mtp_path = argv[++i];
         } else {
             rest.push_back(argv[i]);
         }
     }
     if (out_path.empty()) {
         fprintf(stderr, "usage: %s -m MODEL.gguf (-p TEXT | -f FILE | --tokens-file IDS) --out LOGITS.bin "
-                        "[--ids-out IDS.txt] [--dump-layers LAYERS.bin [--dump-names a,b]] [llama.cpp flags]\n",
+                        "[--ids-out IDS.txt] [--dump-layers LAYERS.bin [--dump-names a,b]] [--mtp-out MTP.bin] "
+                        "[llama.cpp flags]\n",
                 argv[0]);
         return 2;
     }
@@ -138,6 +147,9 @@ int main(int argc, char ** argv) {
     if (!layers_path.empty()) {
         params.cb_eval = layer_dump_cb;
         params.cb_eval_user_data = &dump;
+    }
+    if (!mtp_path.empty()) {
+        params.load_mtp = true;
     }
     llama_backend_init();
     llama_numa_init(params.numa);
@@ -202,6 +214,20 @@ int main(int argc, char ** argv) {
     }
     int32_t dumped = -1;   // the layers each position had, the same for every position
 
+    // --mtp-out: the trunk's hidden state at every position (h_nextn: the streams' mean after output_norm, what the
+    // MTP block takes), kept while the trunk runs
+    const int32_t n_embd_h = llama_model_n_embd_out(model);
+    std::vector<float> h_rows;
+    if (!mtp_path.empty()) {
+        if (llama_model_n_layer_nextn(model) < 1) {
+            LOG_ERR("--mtp-out: the model has no MTP block (nextn_predict_layers is 0)\n");
+            fclose(out);
+            return 1;
+        }
+        llama_set_embeddings_nextn(ctx, true, /*masked*/ false);
+        h_rows.reserve(ids.size() * (size_t) n_embd_h);
+    }
+
     // Decode in chunks of n_batch with an output on every position, writing each chunk's rows as it finishes.
     const int32_t n_batch = (int32_t) llama_n_batch(ctx);
     for (int32_t off = 0; off < (int32_t) ids.size(); off += n_batch) {
@@ -221,6 +247,15 @@ int main(int argc, char ** argv) {
                 LOG_ERR("cannot read or write the logits of position %d\n", off + j);
                 fclose(out);
                 return 1;
+            }
+            if (!mtp_path.empty()) {
+                const float * h = llama_get_embeddings_nextn_ith(ctx, j);
+                if (h == nullptr) {
+                    LOG_ERR("--mtp-out: no hidden state for position %d\n", off + j);
+                    fclose(out);
+                    return 1;
+                }
+                h_rows.insert(h_rows.end(), h, h + n_embd_h);
             }
         }
         if (lay != nullptr) {
@@ -262,6 +297,59 @@ int main(int argc, char ** argv) {
         fclose(lay);
         LOG_INF("wrote %d layers' %s per position to %s\n", dumped, dump_names.empty() ? "hc_attn_post,l_out" :
                 dump_names.c_str(), layers_path.c_str());
+    }
+
+    if (!mtp_path.empty()) {
+        // the MTP block in a context of its own (as common_speculative's draft-mtp makes it): position p takes the
+        // token at p and the trunk's h at p-1, each position with an output, so every one runs the whole block
+        llama_context_params cp = common_context_params_to_llama(params);
+        cp.ctx_type  = LLAMA_CONTEXT_TYPE_MTP;
+        cp.n_ctx     = llama_n_ctx(ctx);
+        cp.n_rs_seq  = 0;
+        cp.ctx_other = ctx;
+        llama_context * mctx = llama_init_from_model(model, cp);
+        if (mctx == nullptr) {
+            LOG_ERR("--mtp-out: cannot make the MTP context\n");
+            return 1;
+        }
+        FILE * mout = fopen(mtp_path.c_str(), "wb");
+        if (mout == nullptr) {
+            LOG_ERR("cannot write %s\n", mtp_path.c_str());
+            llama_free(mctx);
+            return 1;
+        }
+        fwrite(hdr, sizeof(hdr), 1, mout);
+        const std::vector<float> zeros((size_t) n_embd_h, 0.0f);
+        bool ok = true;
+        for (int32_t off = 0; ok && off < (int32_t) ids.size(); off += n_batch) {
+            const int32_t n = std::min<int32_t>(n_batch, (int32_t) ids.size() - off);
+            common_batch batch(mctx);
+            for (int32_t j = 0; j < n; ++j) {
+                const int32_t p = off + j;
+                const int32_t idx = batch.add(ids[(size_t) p], p, 0, true);
+                const float * h = p == 0 ? zeros.data() : h_rows.data() + (size_t) (p - 1) * n_embd_h;
+                batch.set_embd_state(idx, { h, 1, (size_t) n_embd_h });
+            }
+            if (llama_process(mctx, LLAMA_PROCESS_TYPE_DECODE, batch.get()) != 0) {
+                LOG_ERR("--mtp-out: the MTP decode failed at position %d\n", off);
+                ok = false;
+                break;
+            }
+            for (int32_t j = 0; j < n; ++j) {
+                const float * row = llama_get_logits_ith(mctx, j);
+                if (row == nullptr || fwrite(row, sizeof(float), (size_t) n_vocab, mout) != (size_t) n_vocab) {
+                    LOG_ERR("--mtp-out: cannot read or write the MTP logits of position %d\n", off + j);
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        fclose(mout);
+        llama_free(mctx);
+        if (!ok) {
+            return 1;
+        }
+        LOG_INF("wrote %zu rows of the MTP block's %d logits to %s\n", ids.size(), n_vocab, mtp_path.c_str());
     }
 
     if (!ids_out_path.empty()) {

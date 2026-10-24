@@ -208,20 +208,22 @@ void Model::resolve() {
     output_ = get("output.weight", {E, V});
 
     const int64_t hc = c.hc, mix = c.hc_mix_dim();
-    layers_.resize((size_t) c.n_layer);
-    for (int64_t il = 0; il < c.n_layer; ++il) {
+    // a trunk layer, or (mtp) the MTP block: no mHC tensors, MLA with its own indexer, routed experts
+    const auto load = [&](int64_t il, bool mtp) {
         LayerWeights& w = layers_[(size_t) il];
         auto n = [&](const char* suffix) { return "blk." + std::to_string(il) + "." + suffix; };
         const int64_t H = c.n_head[(size_t) il];
 
         w.attn_norm = get(n("attn_norm.weight"), {E});
         w.ffn_norm = get(n("ffn_norm.weight"), {E});
-        w.hc_attn_fn = get(n("hc_attn_fn.weight"), {hc * E, mix});
-        w.hc_attn_base = get(n("hc_attn_base.weight"), {mix});
-        w.hc_attn_scale = get(n("hc_attn_scale.weight"), {3});
-        w.hc_ffn_fn = get(n("hc_ffn_fn.weight"), {hc * E, mix});
-        w.hc_ffn_base = get(n("hc_ffn_base.weight"), {mix});
-        w.hc_ffn_scale = get(n("hc_ffn_scale.weight"), {3});
+        if (!mtp) {
+            w.hc_attn_fn = get(n("hc_attn_fn.weight"), {hc * E, mix});
+            w.hc_attn_base = get(n("hc_attn_base.weight"), {mix});
+            w.hc_attn_scale = get(n("hc_attn_scale.weight"), {3});
+            w.hc_ffn_fn = get(n("hc_ffn_fn.weight"), {hc * E, mix});
+            w.hc_ffn_base = get(n("hc_ffn_base.weight"), {mix});
+            w.hc_ffn_scale = get(n("hc_ffn_scale.weight"), {3});
+        }
 
         if (c.is_kda(il)) {
             const int64_t D = c.kda_head_dim, DI = D * H, K = c.ssm_d_conv;
@@ -252,7 +254,7 @@ void Model::resolve() {
             m.k_b = get(n("attn_k_b.weight"), {HK - c.n_rot, KL, H});
             m.v_b = get(n("attn_v_b.weight"), {KL, HV, H});
             w.wo = get(n("attn_output.weight"), {H * HV, E});
-            const bool full = c.indexer_full[(size_t) il] != 0;
+            const bool full = mtp || c.indexer_full[(size_t) il] != 0;
             const int64_t IH = c.indexer_n_head, ID = c.indexer_head_size;
             m.idx_k_norm = get(n("indexer.k_norm.weight"), {ID}, full);
             m.idx_k_norm_b = get(n("indexer.k_norm.bias"), {ID}, full);
@@ -280,6 +282,26 @@ void Model::resolve() {
                 w.down_shexp = get(n("ffn_down_shexp.weight"), {FS, E});
             }
         }
+    };
+    layers_.resize((size_t) c.n_layer);
+    for (int64_t il = 0; il < c.n_layer; ++il) load(il, false);
+
+    // the MTP block (llama.cpp's NextN) right after the trunk, when the file has it; a file without its eh_proj is
+    // trunk-only, as llama.cpp reads it (nextn_flags)
+    const int64_t im = c.n_layer;
+    const std::string nb = "blk." + std::to_string(im) + ".nextn.";
+    if (c.n_layer_nextn > 0 && gguf_->find(nb + "eh_proj.weight")) {
+        if (c.is_kda(im)) throw std::runtime_error("the MTP block (blk." + std::to_string(im) + ") is not an MLA layer");
+        if (c.is_dense(im)) throw std::runtime_error("the MTP block has a dense FFN, not routed experts");
+        layers_.resize((size_t) im + 1);
+        load(im, true);
+        nextn_.eh_proj = get(nb + "eh_proj.weight", {2 * E, E});
+        nextn_.enorm = get(nb + "enorm.weight", {E});
+        nextn_.hnorm = get(nb + "hnorm.weight", {E});
+        nextn_.shared_head_norm = get(nb + "shared_head_norm.weight", {E}, false);
+        nextn_.shared_head_head = get(nb + "shared_head_head.weight", {E, V}, false);
+        nextn_.embed_tokens = get(nb + "embed_tokens.weight", {E, V}, false);
+        has_mtp_ = true;
     }
 }
 

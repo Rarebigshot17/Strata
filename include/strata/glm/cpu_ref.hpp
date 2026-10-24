@@ -69,6 +69,15 @@ public:
     /// Runs `token` at the next position and returns its logits (`n_vocab` floats).
     const std::vector<float>& eval(int32_t token, Trace* trace = nullptr);
     int64_t pos() const { return pos_; }
+    /// The hidden state the last eval left (`n_embd` floats): the streams' mean after output_norm, what the output head
+    /// and the MTP block read (llama.cpp's h_nextn).
+    const std::vector<float>& h() const { return h_; }
+    /// The MTP block (Model::has_mtp) at its next position, mtp_pos(): `token` there and `h_prev`, the trunk's h() at
+    /// the position before it (zeros at position 0), as llama.cpp's MTP drafting pairs them. Returns its logits, the
+    /// next token's draft. Its latent cache and indexer are its own; snapshots leave them out (restore() and reset()
+    /// empty them).
+    const std::vector<float>& mtp_eval(int32_t token, const float* h_prev);
+    int64_t mtp_pos() const { return mtp_pos_; }
     /// Counts layers run, from any thread (serve_loop's heartbeat).
     uint64_t ticks() const { return ticks_.load(std::memory_order_relaxed); }
     /// Saves the state (snapshot.hpp); `restore` puts one back, pos() included.
@@ -83,7 +92,7 @@ private:
                 float* comb);
     void hc_post(const float* y, float* R, const float* post, const float* comb);
     void kda_layer(int64_t il, const float* x, float* y);
-    void mla_layer(int64_t il, const float* x, float* y);
+    void mla_layer(int64_t il, const float* x, float* y, int64_t t);
     void ffn(int64_t il, const float* x, float* y);
     void swiglu_ffn(const Tensor& gate, const Tensor& up, const Tensor& down, float limit, const float* x, float* y);
 
@@ -97,6 +106,9 @@ private:
     std::vector<std::unique_ptr<LayerState>> st_;
     std::vector<int32_t> sel_;        ///< the selected cells of the last full indexer layer, this token
     std::vector<float> logits_;
+    std::vector<float> h_;            ///< h(): the last eval's hidden state
+    int64_t mtp_pos_ = 0;
+    std::vector<float> mtp_logits_, enorm_, hnorm_, head_norm_;
 };
 
 }  // namespace strata::glm

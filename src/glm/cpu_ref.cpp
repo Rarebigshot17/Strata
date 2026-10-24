@@ -237,15 +237,19 @@ CpuRef::CpuRef(const Model& model, int64_t max_ctx, int n_threads)
     : m_(model), c_(model.config()), max_ctx_(max_ctx), pool_(new ThreadPool(n_threads)) {
     ggml_cpu_init();
     experts_ = std::make_unique<CpuExperts>(m_, *pool_);
-    for (int64_t il = 0; il < c_.n_layer; ++il) {
+    // the trunk's layers, then the MTP block's (st_[n_layer], no mHC) when the file has one
+    const int64_t n_st = c_.n_layer + (m_.has_mtp() ? 1 : 0);
+    for (int64_t il = 0; il < n_st; ++il) {
         auto s = std::make_unique<LayerState>();
         const LayerWeights& w = m_.layer(il);
         s->attn_norm = to_f32(w.attn_norm);
         s->ffn_norm = to_f32(w.ffn_norm);
-        s->hc_attn_base = to_f32(w.hc_attn_base);
-        s->hc_attn_scale = to_f32(w.hc_attn_scale);
-        s->hc_ffn_base = to_f32(w.hc_ffn_base);
-        s->hc_ffn_scale = to_f32(w.hc_ffn_scale);
+        if (il < c_.n_layer) {
+            s->hc_attn_base = to_f32(w.hc_attn_base);
+            s->hc_attn_scale = to_f32(w.hc_attn_scale);
+            s->hc_ffn_base = to_f32(w.hc_ffn_base);
+            s->hc_ffn_scale = to_f32(w.hc_ffn_scale);
+        }
         if (c_.is_kda(il)) {
             s->a = to_f32(w.kda.a);
             s->dt_b = to_f32(w.kda.dt_b);
@@ -265,6 +269,12 @@ CpuRef::CpuRef(const Model& model, int64_t max_ctx, int n_threads)
         if (!c_.is_dense(il)) s->exp_probs_b = to_f32(w.exp_probs_b);
         st_.push_back(std::move(s));
     }
+    if (m_.has_mtp()) {
+        const NextnWeights& nx = m_.nextn();
+        enorm_ = to_f32(nx.enorm);
+        hnorm_ = to_f32(nx.hnorm);
+        head_norm_ = to_f32(nx.shared_head_norm.ok() ? nx.shared_head_norm : m_.output_norm());
+    }
     reset();
 }
 
@@ -272,7 +282,9 @@ CpuRef::~CpuRef() = default;
 
 void CpuRef::reset() {
     pos_ = 0;
-    for (int64_t il = 0; il < c_.n_layer; ++il) {
+    mtp_pos_ = 0;
+    h_.assign((size_t) c_.n_embd, 0.0f);
+    for (int64_t il = 0; il < (int64_t) st_.size(); ++il) {
         LayerState& s = *st_[(size_t) il];
         if (c_.is_kda(il)) {
             const int64_t H = c_.n_head[(size_t) il], D = c_.kda_head_dim;
@@ -373,6 +385,9 @@ void CpuRef::restore(const Snapshot& snap) {
         }
     }
     pos_ = sn->pos;
+    // the MTP block's state is not in snapshots: it starts again empty (cpu_ref.hpp)
+    mtp_pos_ = 0;
+    h_.assign((size_t) c_.n_embd, 0.0f);
 }
 
 // ================================ products ================================
@@ -574,11 +589,11 @@ void CpuRef::kda_layer(int64_t il, const float* x, float* y) {
 
 // ================================ MLA with the k-pool indexer (build_dsa_layer) ================================
 
-void CpuRef::mla_layer(int64_t il, const float* x, float* y) {
+void CpuRef::mla_layer(int64_t il, const float* x, float* y, int64_t t) {
     const LayerWeights& w = m_.layer(il);
     LayerState& s = *st_[(size_t) il];
     const int64_t H = c_.n_head[(size_t) il], QL = c_.q_lora_rank, KL = c_.kv_lora_rank;
-    const int64_t HK = c_.head_k_mla, HV = c_.head_v_mla, t = pos_;
+    const int64_t HK = c_.head_k_mla, HV = c_.head_v_mla;
 
     std::vector<float> qr((size_t) QL), q((size_t) (H * HK)), kv((size_t) KL);
     matvec(w.mla.q_a, x, qr.data());
@@ -780,7 +795,7 @@ const std::vector<float>& CpuRef::eval(int32_t token, Trace* trace) {
             trace->attn_norm.push_back(xn);
         }
         if (c_.is_kda(il)) kda_layer(il, xn.data(), yv.data());
-        else mla_layer(il, xn.data(), yv.data());
+        else mla_layer(il, xn.data(), yv.data(), pos_);
         hc_post(yv.data(), R.data(), post.data(), comb.data());
         if (trace) trace->attn_out.push_back(R);
 
@@ -804,10 +819,49 @@ const std::vector<float>& CpuRef::eval(int32_t token, Trace* trace) {
     }
     const std::vector<float> on = to_f32(m_.output_norm());
     rms_norm(x.data(), xn.data(), E, c_.rms_eps, on.data());
+    h_ = xn;
     logits_.resize((size_t) c_.n_vocab);
     matvec(m_.output(), xn.data(), logits_.data());
     ++pos_;
     return logits_;
+}
+
+// ================================ the MTP block (graph_mtp) ================================
+
+const std::vector<float>& CpuRef::mtp_eval(int32_t token, const float* h_prev) {
+    if (!m_.has_mtp()) throw std::runtime_error("CpuRef: the model has no MTP block");
+    if (mtp_pos_ >= max_ctx_) throw std::runtime_error("CpuRef: the MTP block's sequence is longer than max_ctx");
+    if (token < 0 || token >= c_.n_vocab) throw std::runtime_error("CpuRef: token id outside the vocabulary");
+    const int64_t E = c_.n_embd, im = c_.n_layer;
+    const NextnWeights& nx = m_.nextn();
+    const LayerState& s = *st_[(size_t) im];
+
+    // mtp_enorm and mtp_hnorm, concatenated (embedding first) through eh_proj: the block's input, inpSA
+    std::vector<float> emb((size_t) E), cat((size_t) (2 * E)), cur((size_t) E);
+    {
+        const Tensor& te = nx.embed_tokens.ok() ? nx.embed_tokens : m_.tok_embd();
+        if (te.type == GGML_TYPE_F32) std::memcpy(emb.data(), te.row(token), (size_t) E * sizeof(float));
+        else ggml_get_type_traits((ggml_type) te.type)->to_float(te.row(token), emb.data(), E);
+    }
+    rms_norm(emb.data(), cat.data(), E, c_.rms_eps, enorm_.data());
+    rms_norm(h_prev, cat.data() + E, E, c_.rms_eps, hnorm_.data());
+    matvec(nx.eh_proj, cat.data(), cur.data());                                 // mtp_eh_proj
+
+    // attention (build_dsa_layer at the block's position), the residual, the FFN, the residual
+    std::vector<float> xn((size_t) E), y((size_t) E), ffn_inp((size_t) E), out((size_t) E);
+    rms_norm(cur.data(), xn.data(), E, c_.rms_eps, s.attn_norm.data());       // mtp_attn_norm
+    mla_layer(im, xn.data(), y.data(), mtp_pos_);
+    for (int64_t i = 0; i < E; ++i) ffn_inp[(size_t) i] = y[(size_t) i] + cur[(size_t) i];
+    rms_norm(ffn_inp.data(), xn.data(), E, c_.rms_eps, s.ffn_norm.data());     // mtp_ffn_norm
+    ffn(im, xn.data(), y.data());                                               // routed experts + shared expert
+    for (int64_t i = 0; i < E; ++i) out[(size_t) i] = y[(size_t) i] + ffn_inp[(size_t) i];
+
+    // shared_head_norm (else output_norm), then shared_head_head (else output)
+    rms_norm(out.data(), xn.data(), E, c_.rms_eps, head_norm_.data());
+    mtp_logits_.resize((size_t) c_.n_vocab);
+    matvec(nx.shared_head_head.ok() ? nx.shared_head_head : m_.output(), xn.data(), mtp_logits_.data());
+    ++mtp_pos_;
+    return mtp_logits_;
 }
 
 }  // namespace strata::glm
