@@ -521,8 +521,10 @@ from the Strata folder.
    tokens for the agents' 512K-1M conversations; each token of it takes 12.4 KB of VRAM in the MLA cache and the
    indexer (1.7 GB at 131,072, 13.3 GB at 1M, calculated), which the expert cache gives up.
    `./setup.sh --setup --context N` changes it later. The engine options are the run config's `"args"`: setup writes
-   `-m`, `--ctx`, `--park-mib` and `--expert-profile` (the use counts, in the data folder `../Strata-GLM-data`), and
-   keeps any other option you add there (`--vram-reserve`, `--max-swaps`, ...) when it runs again. To start with
+   `-m`, `--ctx`, `--park-mib` and `--expert-profile` (the use counts, in the data folder `../Strata-GLM-data`), with
+   40 GiB or more of RAM beside the experts also `--pin-experts --prefill-chunk 4096 --kv-in-ram` (and
+   `--prefill-spread` with more than one GPU; the latent cache then takes 11 KB of RAM a token, not VRAM), and keeps
+   any other option you add there (`--vram-reserve`, `--max-swaps`, ...) when it runs again. To start with
    step 7's counts, copy `~/glm53-ref/profile.bin` over `../Strata-GLM-data/glm-ud-iq3_xxs.profile` before the
    first start.
 

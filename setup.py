@@ -89,6 +89,13 @@ RAM_LEFT_GIB = 40        # RAM beside the experts from which a size fits well: L
 RAM_LEFT_MIN_GIB = 12    # below this the OS pages the experts from the disk: very slow, or no start at all
 PARK_MIB = 8192          # the engine's RAM for parked conversations and checkpoints (its default)
 PARK_MIB_TIGHT = 4096    # with less than RAM_LEFT_GIB beside the experts (the 3-bit on 128 GB, the 4-bit on 160 GB)
+# The settings measured on the owner's PC (napster-ai, 2026-10-24, docs/GLM53_PORT.md "Speed on napster-ai"): the
+# experts locked in RAM (--pin-experts), 4,096-token prompt chunks, the attention cache's latent in locked RAM
+# (--kv-in-ram) and, with more than one GPU, every card on each prompt chunk (--prefill-spread): decoding 17.6 to 17.7
+# tokens/s and a 64K-token prompt read at 380 tokens/s there. Only where the size fits well (RAM_LEFT_GIB beside its
+# experts): locked memory cannot be paged out.
+FAST_CHUNK = 4096
+FAST_FLAGS = ("--pin-experts", "--prefill-chunk", "--kv-in-ram", "--prefill-spread")
 CONTEXTS = [32768, 131072, 262144, 524288, 1048576]
 MAX_CONTEXT = 1048576    # GLM-5.3-Flash's trained context
 # The attention cache in VRAM, per token of context (calculated from the engine's buffers, src/glm/engine.cu): the
@@ -393,13 +400,19 @@ def fit_text(model: str, ram: float) -> str:
             "no": f"they do not fit this PC's {ram:.0f} GiB of RAM"}[model_fit(model, ram)]
 
 
+def fallback_experts_gib(model: str, total: float) -> float:
+    """A size's fallback files of `total` GB: their experts (GiB), taken as the same share of the files as the size's
+    own."""
+    d = MODELS[model]
+    return total * d["experts_gb"] / d["download_gb"] * 1e9 / GIB
+
+
 def fallback_park(model: str, quant: str, total: float, ram: float, park: int, a, lead: str) -> int:
     """A size's fallback files (the 4-bit: UD-Q4_K_XL), `total` GB listed for the download or found on this PC: their
     experts, taken as the same share of the files as the size's own (the 4-bit's is derived, see MODELS), and what
     they leave of the RAM (GiB), said after `lead`.  Judged as model_fit judges a size: asked below RAM_LEFT_MIN_GIB
     (--model --yes is the consent), less parking below RAM_LEFT_GIB.  The parking RAM to use."""
-    d = MODELS[model]
-    experts = total * d["experts_gb"] / d["download_gb"] * 1e9 / GIB
+    experts = fallback_experts_gib(model, total)
     warn(f"{lead}{quant} ({total:.0f} GB, about {experts:.0f} GiB of experts in RAM: "
          + (f"~{ram - experts:.0f} GiB of RAM left beside them)" if ram >= experts else
             f"more than this PC's {ram:.0f} GiB)"))
@@ -424,6 +437,21 @@ def mla_gb(ctx: int) -> float:
 def kb_per_token() -> str:
     """The attention cache per token as the texts give it: "12.4 KB" (KB of 1024 bytes, as "11 KB" for the latent)."""
     return f"{VRAM_BYTES_PER_TOKEN / 1024:.1f} KB"
+
+
+def fast_args(model: str, ram: float, cards: int) -> list[str]:
+    """The engine options of FAST_FLAGS for this PC: all of them where the size fits well (--prefill-spread with more
+    than one card), none where it does not."""
+    if model_fit(model, ram) != "fits":
+        return []
+    return ["--pin-experts", "--prefill-chunk", str(FAST_CHUNK), "--kv-in-ram"] + (["--prefill-spread"] if cards > 1
+                                                                                    else [])
+
+
+def cache_vram_gb(ctx: int, latent_in_ram: bool) -> float:
+    """The attention cache's VRAM (GB) for `ctx` tokens: all of it (mla_gb), or with --kv-in-ram only the indexer's
+    pooled keys (the latent is in RAM; its first few thousand rows in VRAM too, 23 MB)."""
+    return ctx * INDEXER_BYTES_PER_TOKEN / 1e9 if latent_in_ram else mla_gb(ctx)
 
 
 def recommended_context(vram_gb: float) -> int:
@@ -1329,7 +1357,7 @@ def write_config(path: Path, cfg: dict):
 # "sampling" or "mcp_servers" block, "allowed_hosts", "cors_origins", "open_browser" - and is kept when setup runs
 # again.  The same for the engine options: setup writes SETUP_ARGS, any other one in "args" was added by hand.
 SETUP_KEYS = frozenset({"exe", "args", "cwd", "log", "lib_dirs", "model_name", "port", "gpu", "host", "api_key"})
-SETUP_ARGS = frozenset({"-m", "--ctx", "--park-mib", "--expert-profile"})
+SETUP_ARGS = frozenset({"-m", "--ctx", "--park-mib", "--expert-profile", *FAST_FLAGS})
 
 
 def flag_value(args: list, flag: str):
@@ -1359,14 +1387,15 @@ def arg_pairs(args: list) -> list:
     return pairs
 
 
-def engine_args(first: Path, ctx: int, park: int, profile: Path | None) -> list[str]:
+def engine_args(first: Path, ctx: int, park: int, profile: Path | None, fast: list[str] | None = None) -> list[str]:
     """What setup writes into the config's "args", for strata-glm (the server adds --serve and --eos-ids): the model's
-    first shard (the engine finds the others beside it), the context, the RAM for parked conversations and the expert
-    profile (the use counts it loads at start and saves at exit, so the VRAM cache starts warm)."""
+    first shard (the engine finds the others beside it), the context, the RAM for parked conversations, the expert
+    profile (the use counts it loads at start and saves at exit, so the VRAM cache starts warm) and the speed settings
+    of fast_args."""
     args = ["-m", str(first), "--ctx", str(ctx), "--park-mib", str(park)]
     if profile is not None:
         args += ["--expert-profile", str(profile)]
-    return args
+    return args + list(fast or [])
 
 
 def carry_over(old: dict, cfg: dict) -> list[str]:
@@ -1841,24 +1870,40 @@ def main() -> int:
              f"{PARK_MIB_TIGHT} MiB instead of {PARK_MIB} (--park-mib {PARK_MIB_TIGHT}); close other big programs "
              "while it runs")
     ok(f"size: {model} ({d['bits']})")
+    fast = fast_args(model, ram, len(sel))
+    in_ram = "--kv-in-ram" in fast
     rec_ctx = recommended_context(vram)
     if a.context:
         ctx = a.context
     else:
         say()
         say("  Context = the longest conversation the model can hold (your chat, files, tool output). Each token of it")
-        say(f"  takes {kb_per_token()} of VRAM in the attention cache (calculated), which the expert cache gives up:")
+        if in_ram:
+            say(f"  takes {MLA_BYTES_PER_TOKEN / 1024:.0f} KB of locked RAM and {INDEXER_BYTES_PER_TOKEN / 1024:.1f} "
+                "KB of VRAM in the attention cache (calculated); the VRAM the expert cache gives up:")
+        else:
+            say(f"  takes {kb_per_token()} of VRAM in the attention cache (calculated), which the expert cache gives "
+                "up:")
         for i, c in enumerate(CONTEXTS, 1):
-            say(f"  {i}) {context_label(c):>4s} tokens  {mla_gb(c):4.1f} GB of VRAM"
+            say(f"  {i}) {context_label(c):>4s} tokens  {cache_vram_gb(c, in_ram):4.1f} GB of VRAM"
+                + (f", {c * MLA_BYTES_PER_TOKEN / 1e9:4.1f} GB of RAM" if in_ram else "")
                 + ("   (recommended for your GPUs)" if c == rec_ctx else "")
                 + ("   (the model's whole context)" if c == MAX_CONTEXT else ""))
         ctx = CONTEXTS[int(ask("Context?", [str(i) for i in range(1, len(CONTEXTS) + 1)],
                                str(CONTEXTS.index(rec_ctx) + 1), a.yes)) - 1]
-    if mla_gb(ctx) > 0.5 * vram:
-        warn(f"a {ctx}-token context takes {mla_gb(ctx):.1f} GB of the GPUs' {vram:.0f} GB for its attention cache: few "
-             f"experts stay cached in VRAM, so answers are slower. Kept as you chose ({context_label(rec_ctx)} is the "
-             "recommended one)")
-    ok(f"context: {ctx} tokens ({mla_gb(ctx):.1f} GB of VRAM for the attention cache)")
+    if cache_vram_gb(ctx, in_ram) > 0.5 * vram:
+        warn(f"a {ctx}-token context takes {cache_vram_gb(ctx, in_ram):.1f} GB of the GPUs' {vram:.0f} GB for its "
+             f"attention cache: few experts stay cached in VRAM, so answers are slower. Kept as you chose "
+             f"({context_label(rec_ctx)} is the recommended one)")
+    ok(f"context: {ctx} tokens ({cache_vram_gb(ctx, in_ram):.1f} GB of VRAM for the attention cache"
+       + (f", {ctx * MLA_BYTES_PER_TOKEN / 1e9:.1f} GB of locked RAM)" if in_ram else ")"))
+    if fast:
+        ok("speed settings: the experts locked in RAM, 4,096-token prompt chunks, the attention cache in RAM"
+           + (", every GPU on each prompt" if "--prefill-spread" in fast else "")
+           + f" ({' '.join(fast)})")
+    else:
+        say(f"  speed settings left off (--pin-experts and the rest): {model} leaves ~{ram_left(model, ram):.0f} GiB "
+            f"of RAM beside its experts, and they need {RAM_LEFT_GIB}")
 
     # the model's files: --gguf-dir, a finished download (here or on another drive), or the repository's listing
     models_root = Path(a.models_dir)
@@ -1876,6 +1921,10 @@ def main() -> int:
             # before a download
             total = sum(s.stat().st_size for s in shards if s.is_file()) / 1e9
             park = fallback_park(model, quant, total, ram, park, a, f"the {d['bits']} model's files on this PC are ")
+            if fast and ram - fallback_experts_gib(model, total) < RAM_LEFT_GIB:
+                fast = []                                  # their experts leave too little RAM to lock them
+                say(f"  speed settings left off: {quant}'s experts leave less than {RAM_LEFT_GIB} GiB of RAM beside "
+                    "them")
             if not a.gguf_dir:
                 say(f"  (setup takes the files it finds: to download its {model} files instead, move "
                     f"{shards[0].parent} away and run it again)")
@@ -1897,6 +1946,10 @@ def main() -> int:
         if quant != model:
             park = fallback_park(model, quant, total, ram, park, a,
                                  f"the repository has no {model} files: the {d['bits']} model is its ")
+            if fast and ram - fallback_experts_gib(model, total) < RAM_LEFT_GIB:
+                fast = []                                  # their experts leave too little RAM to lock them
+                say(f"  speed settings left off: {quant}'s experts leave less than {RAM_LEFT_GIB} GiB of RAM beside "
+                    "them")
         need = max(total - on_disk, 0) + 1
         if free_gb(folder) < need:
             fail(f"not enough free disk space in {folder}: need ~{need:.0f} GB" +
@@ -1930,7 +1983,7 @@ def main() -> int:
     step(6, "writing the start script")
     tag = config_tag(model, given)                     # an install made as IQ4_XS keeps its names
     cfg_path = ROOT / f"strata-{tag}.json"
-    cfg = {"exe": str(exe), "args": engine_args(shards[0], ctx, park, data / f"{tag}.profile"), "cwd": str(ROOT),
+    cfg = {"exe": str(exe), "args": engine_args(shards[0], ctx, park, data / f"{tag}.profile", fast), "cwd": str(ROOT),
            "log": str(ROOT / f"strata-{tag}.log"), "lib_dirs": installed_build().get("lib_dirs") or [],
            "model_name": MODEL_NAME, "port": port}
     if name_gpus:

@@ -906,8 +906,11 @@ class Config(unittest.TestCase):
         self.assertEqual(set(cfg), {"exe", "args", "cwd", "log", "lib_dirs", "model_name", "port"})
         self.assertEqual(cfg["exe"], str(root / "build" / "strata-glm"))
         first = data / "models" / "glm-ud-iq3_xxs" / "GLM-5.3-Flash-UD-IQ3_XXS-00001-of-00003.gguf"
+        # the owner's PC: the 3-bit model fits well, so the speed settings measured there (three cards: every card on
+        # each prompt too)
         self.assertEqual(cfg["args"], ["-m", str(first), "--ctx", "131072", "--park-mib", "8192",
-                                       "--expert-profile", str(data / "glm-ud-iq3_xxs.profile")])
+                                       "--expert-profile", str(data / "glm-ud-iq3_xxs.profile"),
+                                       "--pin-experts", "--prefill-chunk", "4096", "--kv-in-ram", "--prefill-spread"])
         self.assertEqual(cfg["cwd"], str(root))
         self.assertEqual(cfg["log"], str(root / "strata-glm-ud-iq3_xxs.log"))
         self.assertEqual(cfg["model_name"], "glm-5.3-flash")
@@ -937,7 +940,8 @@ class Config(unittest.TestCase):
         self.assertEqual(rec["builds"], [[86]])
 
     def test_context_menu_and_its_vram(self):
-        code, out, cfgs, _, _ = install(["--no-start", "--model", "UD-IQ3_XXS"])   # questions: stdin is empty
+        # 125 GiB: the 3-bit model fits, but not well, so the attention cache stays in VRAM
+        code, out, cfgs, _, _ = install(["--no-start", "--model", "UD-IQ3_XXS"], ram=125.0)   # stdin is empty
         self.assertEqual(code, 1)                                                  # EOF stops at the question
         # per token: the 512-wide f16 latent of 11 MLA layers (11 KB) and their indexers' pooled keys, one 128-wide
         # fp32 key per 4 tokens (attention.indexer.kpool in the real file) in each: 1.4 KB
@@ -960,11 +964,58 @@ class Config(unittest.TestCase):
     def test_a_long_context_on_little_vram_is_kept_with_a_warning(self):
         smi = "0, NVIDIA GeForce RTX 3060, 12288, 8.6, 580.95.05\n"
         code, out, cfgs, _, _ = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start", "--context", "1048576"],
-                                        smi=smi)
+                                        smi=smi, ram=125.0)
         self.assertEqual(code, 0, out)
         self.assertIn("few experts stay cached in VRAM", out)
         args = cfgs["strata-glm-ud-iq3_xxs.json"]["args"]
         self.assertEqual(args[args.index("--ctx") + 1], "1048576")
+        # with RAM to spare the attention cache's latent goes to RAM: 1.5 GB of VRAM at 1M, no warning
+        code, out, cfgs, _, _ = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start", "--context", "1048576"],
+                                        smi=smi)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("few experts stay cached in VRAM", out)
+        self.assertIn("context: 1048576 tokens (1.5 GB of VRAM for the attention cache, 11.8 GB of locked RAM)", out)
+
+    def test_speed_settings_where_the_size_fits_well(self):
+        # the owner's PC (188 GiB, three cards): all of them, and the context menu counts the latent in RAM
+        code, out, cfgs, _, _ = install(["--no-start", "--model", "UD-IQ3_XXS"])   # questions: stdin is empty
+        self.assertIn("takes 11 KB of locked RAM and 1.4 KB of VRAM", out)
+        self.assertIn("0.2 GB of VRAM,  1.5 GB of RAM", out)                       # 128K
+        code, out, cfgs, _, _ = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start", "--context", "524288"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("speed settings: the experts locked in RAM, 4,096-token prompt chunks, the attention cache in "
+                      "RAM, every GPU on each prompt (--pin-experts --prefill-chunk 4096 --kv-in-ram --prefill-spread)",
+                      out)
+        self.assertEqual(setup.fast_args("UD-IQ3_XXS", OWNER_RAM, 3),
+                         ["--pin-experts", "--prefill-chunk", "4096", "--kv-in-ram", "--prefill-spread"])
+        # one card: no sharing of the prompt's experts
+        self.assertEqual(setup.fast_args("UD-IQ3_XXS", OWNER_RAM, 1),
+                         ["--pin-experts", "--prefill-chunk", "4096", "--kv-in-ram"])
+        smi = "0, NVIDIA GeForce RTX 3090, 24576, 8.6, 580.95.05\n"
+        code, out, cfgs, _, _ = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start"], smi=smi)
+        self.assertEqual(code, 0, out)
+        args = cfgs["strata-glm-ud-iq3_xxs.json"]["args"]
+        self.assertIn("--pin-experts", args)
+        self.assertNotIn("--prefill-spread", args)
+        # the 4-bit model on the owner's PC: ~52 GiB beside its experts, so it fits well too
+        self.assertEqual(setup.model_fit("UD-IQ4_XS", OWNER_RAM), "fits")
+        self.assertIn("--pin-experts", setup.fast_args("UD-IQ4_XS", OWNER_RAM, 3))
+
+    def test_speed_settings_left_off_where_ram_is_tight(self):
+        # 125 GiB: the 3-bit model leaves ~23 GiB beside its experts, too little to lock them
+        old = {"exe": "x", "args": ["-m", "m.gguf", "--ctx", "131072", "--pin-experts", "--prefill-chunk", "1024",
+                                    "--vram-reserve", "2"]}
+        code, out, cfgs, _, _ = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start"], ram=125.0,
+                                        configs=[("strata-glm-ud-iq3_xxs.json", old)])
+        self.assertEqual(code, 0, out)
+        self.assertIn("speed settings left off (--pin-experts and the rest): UD-IQ3_XXS leaves ~23 GiB of RAM beside "
+                      "its experts, and they need 40", out)
+        args = cfgs["strata-glm-ud-iq3_xxs.json"]["args"]
+        # setup owns these options: an earlier --pin-experts and chunk size go, a hand-added option stays
+        for flag in setup.FAST_FLAGS:
+            self.assertNotIn(flag, args)
+        self.assertEqual(args[args.index("--vram-reserve") + 1], "2")
+        self.assertEqual(setup.fast_args("UD-IQ3_XXS", 125.0, 3), [])
 
     def test_choices_from_config_read_it_back(self):
         code, out, cfgs, _, rec = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start", "--context", "262144",

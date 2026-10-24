@@ -323,8 +323,11 @@ JSON. Change it with a text editor, or the few keys the web app's Settings view 
 server reads it only when it starts. A bad value in most keys stops the start with a line that names the key.
 
 Setup writes the keys in the first table. When setup runs again for the same size, it rewrites those and keeps every
-other key, and every engine option in `"args"` it does not write itself (it writes `-m`, `--ctx`, `--park-mib` and
-`--expert-profile`).
+other key, and every engine option in `"args"` it does not write itself. It writes `-m`, `--ctx`, `--park-mib` and
+`--expert-profile`, and, where the size leaves 40 GiB or more of RAM beside its experts, the settings measured fastest
+on the owner's PC: `--pin-experts --prefill-chunk 4096 --kv-in-ram`, and `--prefill-spread` with more than one GPU
+([below](#engine-options-args)). The experts and the attention cache's latent are then locked in RAM: 110 GB for the
+3-bit model and 11 KB a token of context (5.9 GB at 524,288). With less RAM it leaves them out and says why.
 
 A config as setup writes it (the paths are an example):
 
@@ -333,7 +336,8 @@ A config as setup writes it (the paths are an example):
  "exe": "/home/me/Strata/build/strata-glm",
  "args": ["-m", "/home/me/Strata-GLM-data/models/glm-ud-iq3_xxs/<name>-00001-of-0000N.gguf",
           "--ctx", "131072", "--park-mib", "8192",
-          "--expert-profile", "/home/me/Strata-GLM-data/glm-ud-iq3_xxs.profile"],
+          "--expert-profile", "/home/me/Strata-GLM-data/glm-ud-iq3_xxs.profile",
+          "--pin-experts", "--prefill-chunk", "4096", "--kv-in-ram", "--prefill-spread"],
  "cwd": "/home/me/Strata",
  "log": "/home/me/Strata/strata-glm-ud-iq3_xxs.log",
  "lib_dirs": ["/usr/local/cuda-13.0/lib64"],
