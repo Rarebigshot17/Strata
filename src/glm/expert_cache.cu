@@ -38,6 +38,7 @@ gpu::DevMatrix shape_of(const Tensor& t) {
 ExpertCache::ExpertCache(const Model& model, const ExpertCacheOptions& opt) : m_(model), opt_(opt) {
     const Config& c = m_.config();
     verify_ = std::getenv("STRATA_GLM_VERIFY") && std::atoi(std::getenv("STRATA_GLM_VERIFY")) > 0;
+    sync_swaps_ = std::getenv("STRATA_GLM_SYNC_SWAPS") && std::atoi(std::getenv("STRATA_GLM_SYNC_SWAPS")) > 0;
     L_.resize((size_t) c.n_layer);
     score_.assign((size_t) c.n_layer, std::vector<float>((size_t) c.n_expert, 0.0f));
     missed_.resize((size_t) c.n_layer);
@@ -342,6 +343,14 @@ void ExpertCache::maintain() {
             cv_todo_.notify_one();
         }
         miss.clear();
+    }
+    if (sync_swaps_) {
+        // the copies queued now land before the next token runs (a test of whether copies overlapping work matter)
+        {
+            std::unique_lock<std::mutex> lk(mu_);
+            cv_idle_.wait(lk, [&] { return todo_.empty() && busy_ == 0; });
+        }
+        apply_done();
     }
 }
 

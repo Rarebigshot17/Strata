@@ -108,6 +108,8 @@ private:
     int64_t hits_ = 0, lookups_ = 0, tick_ = 0;
     bool verify_ = false;                             ///< STRATA_GLM_VERIFY=1: every copy and, every 512 tokens,
                                                       ///< every cached slot checked against RAM
+    bool sync_swaps_ = false;                         ///< STRATA_GLM_SYNC_SWAPS=1: a token's swaps finish before
+                                                      ///< maintain() returns (a test setting)
     bool loaded_profile_ = false;
     // the copy thread: copies queued by maintain(), done ones handed back; all under mu_
     std::thread copier_;
