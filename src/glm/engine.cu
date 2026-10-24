@@ -619,11 +619,11 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
     }
     if (trace) trace->layer_out.clear();
 
-    // --decode-graphs: `body` launches a fixed run of a layer's ops onto d's stream, the same every token (no
-    // position in it, every buffer at a fixed address). The first time it is captured as a CUDA graph and launched;
-    // after that only the graph is launched, one call into the driver for the run instead of one per op, and the
-    // host's swaps of the residual buffers in it are done again by hand. Without the option, or for a layer whose
-    // capture failed, the body runs as it is.
+    // decode graphs (the default; --no-decode-graphs): `body` launches a fixed run of a layer's ops onto d's stream,
+    // the same every token (no position in it, every buffer at a fixed address). The first time it is captured as a
+    // CUDA graph and launched; after that only the graph is launched, one call into the driver for the run instead
+    // of one per op, and the host's swaps of the residual buffers in it are done again by hand. With
+    // --no-decode-graphs, or for a layer whose capture failed, the body runs as it is.
     const auto decode_segment = [&](DevCtx& d, DecodeGraph& g, int64_t il, const std::function<void()>& body) {
         if (!I.opt.decode_graphs || g.failed) {
             body();

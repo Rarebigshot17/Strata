@@ -31,7 +31,7 @@ struct EngineOptions {
     bool kv_in_ram = false;          ///< the f16 latent cache in page-locked host RAM, not VRAM (--kv-in-ram)
     bool prefill_spread = false;     ///< a chunk's streamed experts computed on every card (--prefill-spread)
     int decode_help = 0;             ///< a token's missed experts per layer the GPUs take from the CPU (--decode-help)
-    bool decode_graphs = false;      ///< a decoded token's fixed runs of ops as one CUDA graph per layer (--decode-graphs)
+    bool decode_graphs = true;       ///< a decoded token's fixed runs of ops as one CUDA graph per layer (--no-decode-graphs)
     bool lend_prompt_buffers = false;///< between prompts the prompt buffers hold expert-cache slots (--lend-prompt-buffers)
     int lend_min_prompt = 64;        ///< with that, a shorter prompt runs token by token (--lend-min-prompt)
     ExpertCacheOptions cache;

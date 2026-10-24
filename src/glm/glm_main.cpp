@@ -22,9 +22,11 @@
 // --decode-help N: with the experts page-locked, of each decoded token's experts a layer's cache misses, up to N are
 // computed on the GPUs instead of the CPU (the first on the layer's card, the next ones on the others), each copied
 // in from RAM while the CPU computes the rest.
-// --decode-graphs: each layer's ops up to the routing that do not depend on the position (a KDA layer's attention
-// half and the router, an MLA layer's from its FFN half on; a dense layer's all) are captured as a CUDA graph at the
-// first decoded token and launched as one from then on, instead of one call into the driver per op.
+// Each layer's ops up to the routing that do not depend on the position (a KDA layer's attention half and the
+// router, an MLA layer's from its FFN half on; a dense layer's all) are captured as a CUDA graph at the first decoded
+// token and launched as one from then on, instead of one call into the driver per op; --no-decode-graphs launches
+// them op by op (the same values: on napster-ai, 2026-10-24, 300 tokens' logits bitwise the same, and 1.6% faster
+// with the graphs). --decode-graphs is the default, and is still taken.
 // --lend-prompt-buffers: between prompts the prompt path's large buffers (the chunk's streams, the arena, the copy-ahead
 // pools) hold more slots of the VRAM expert cache. A prompt of --lend-min-prompt tokens or more (64) takes them back,
 // and their experts leave the cache; the next decoded token gives them back empty, and the misses fill them again
@@ -125,7 +127,7 @@ int usage() {
                  "                  [--max-tokens N] [--vram-reserve GB] [--expert-profile PATH]\n"
                  "                  [--max-swaps N] [--cache-decay D] [--no-expert-cache] [--prefill] [--prefill-chunk N]\n"
                  "                  [--pin-experts [--pin-keep-free GB]] [--prefill-rows N] [--kv-in-ram]\n"
-                 "                  [--prefill-spread] [--decode-help N] [--decode-graphs]\n"
+                 "                  [--prefill-spread] [--decode-help N] [--no-decode-graphs]\n"
                  "                  [--lend-prompt-buffers [--lend-min-prompt N]] [--cache-max-slots N]\n"
                  "       strata-glm -m MODEL.gguf --serve [--ctx N] [--eos-ids A,B] [--park-mib N] [--no-warm]\n"
                  "                  [--checkpoint-min N] [same GPU and cache options]\n");
@@ -172,6 +174,7 @@ int main(int argc, char** argv) {
         else if (a == "--prefill-spread") opt.prefill_spread = true;
         else if (a == "--decode-help" && (v = next())) opt.decode_help = std::max(0, std::atoi(v));
         else if (a == "--decode-graphs") opt.decode_graphs = true;
+        else if (a == "--no-decode-graphs") opt.decode_graphs = false;
         else if (a == "--lend-prompt-buffers") opt.lend_prompt_buffers = true;
         else if (a == "--lend-min-prompt" && (v = next())) opt.lend_min_prompt = std::max(0, std::atoi(v));
         else if (a == "--eos-ids" && (v = next())) eos = parse_list<int32_t>(v);

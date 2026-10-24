@@ -166,7 +166,8 @@ for m in glm5-next-moe v1 v1-bare q4_0 q8_0; do
         grep -E "expert cache|strata-glm:|CUDA" "$W/lend_$m.txt" | head -4
         grep check-prefill "$W/lend_$m.txt"; fail=1
     fi
-    # decoding with each layer's ops up to the routing captured once and replayed as a CUDA graph, the VRAM cache on
+    # decoding with each layer's ops up to the routing captured once and replayed as a CUDA graph (the default since
+    # 2026-10-24, named here so the run says so), the VRAM cache on
     if "$SB/strata-glm" -m "$W/$m.gguf" --tokens-file "$W/ids.txt" --check-cpu --decode-graphs \
             > "$W/graphs_$m.txt" 2>&1 && ! grep -q "runs without a graph" "$W/graphs_$m.txt"; then
         echo "decode, CUDA graphs: $(grep -E "^check-cpu" "$W/graphs_$m.txt")"
