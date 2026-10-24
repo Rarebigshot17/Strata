@@ -6,6 +6,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -351,7 +352,7 @@ void ExpertCache::record(int64_t il, const int32_t* ids, int k) {
     }
 }
 
-void ExpertCache::maintain() {
+void ExpertCache::maintain(int tokens) {
     apply_done();
     if (frozen_) {
         for (auto& miss : missed_) miss.clear();
@@ -374,8 +375,11 @@ void ExpertCache::maintain() {
         std::fprintf(stderr, "expert check: token %lld: %lld cached slots checked, %lld differ from RAM%s\n",
                      (long long) tick_, (long long) n, (long long) bad, bad >= 20 ? " (stopped at 20)" : "");
     }
+    tokens = std::max(tokens, 1);
+    const float decay = (float) std::pow(opt_.decay, tokens);
+    const int cap = opt_.max_swaps_per_token * tokens;   // a pass over a token and its draft: two tokens' worth
     for (auto& row : score_)
-        for (auto& v : row) v *= (float) opt_.decay;
+        for (auto& v : row) v *= decay;
     // filling a free slot costs one copy and displaces nothing, so the cache fills four times faster than it swaps
     // the starting layer rotates, so a cap reached early in the loop does not always favour the first layers
     int swaps = 0, fills = 0;
@@ -387,7 +391,7 @@ void ExpertCache::maintain() {
     // RAM the copies read, but fewer of them
     {
         std::lock_guard<std::mutex> lk(mu_);
-        swaps = std::min<int>((int) todo_.size() + busy_, opt_.max_swaps_per_token);
+        swaps = std::min<int>((int) todo_.size() + busy_, cap);
     }
     const int64_t first = tick_++ % c.n_layer;
     for (int64_t n = 0; n < c.n_layer; ++n) {
@@ -395,7 +399,7 @@ void ExpertCache::maintain() {
         ExpertSlots& s = L_[(size_t) il];
         auto& miss = missed_[(size_t) il];
         for (int e : miss) {
-            if (swaps >= opt_.max_swaps_per_token && fills >= 4 * opt_.max_swaps_per_token) break;
+            if (swaps >= cap && fills >= 4 * cap) break;
             if (s.slot_of[(size_t) e] != -1) continue;   // cached, or being copied
             const auto& sc = score_[(size_t) il];
             int victim = -1;
@@ -408,11 +412,11 @@ void ExpertCache::maintain() {
             }
             if (victim < 0) break;
             if (vscore < 0.0f) {
-                if (fills >= 4 * opt_.max_swaps_per_token) continue;
+                if (fills >= 4 * cap) continue;
                 ++fills;
                 ++fills_queued_;
             } else {
-                if (swaps >= opt_.max_swaps_per_token || !(sc[(size_t) e] > 1.2f * vscore + 0.5f)) continue;
+                if (swaps >= cap || !(sc[(size_t) e] > 1.2f * vscore + 0.5f)) continue;
                 ++swaps;
                 ++swaps_queued_;
             }

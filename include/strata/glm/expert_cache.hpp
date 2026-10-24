@@ -95,8 +95,9 @@ public:
     /// Counts this token's routing of layer `il` (k experts).
     void record(int64_t il, const int32_t* ids, int k);
     /// After a token: puts the copies that have finished in their slots, decays the scores, and queues the copies
-    /// of the misses that earned a slot (the copy thread does them).
-    void maintain();
+    /// of the misses that earned a slot (the copy thread does them). After a pass over `tokens` decoded tokens (a
+    /// token and its draft) the decay and the swap cap are those of as many tokens one at a time.
+    void maintain(int tokens = 1);
     /// Waits for the queued copies and puts them in their slots (before the prompt path claims free slots).
     void drain();
     /// Writes the scores to the profile path (no-op without one).

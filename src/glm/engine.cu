@@ -1478,7 +1478,7 @@ void GpuEngine::eval_n(const int32_t* tok, int n, Trace* trace) {
     const auto t_lw = tclock::now();
     ok(cudaStreamSynchronize(d.stream), "sync");
     const auto t_m = tclock::now();
-    I.cache->maintain();
+    I.cache->maintain(n);
     if (I.timing) {
         I.t_logits_wait += std::chrono::duration<double>(t_m - t_lw).count();
         I.t_maintain += sec(t_m);

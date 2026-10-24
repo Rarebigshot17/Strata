@@ -45,7 +45,9 @@
 // block) reads each line of the tokens file as a prompt, then decodes N tokens greedily one at a time and again with
 // the block's drafts (mtp_draft, eval_pair, drop_last when the draft is not the next token), the expert cache warmed
 // by a first run and then kept as it is for both; it passes when both give the same tokens, and reports the drafts
-// taken and the time. --out then writes the replies' token ids, a line each.
+// taken and the time. --out then writes the replies' token ids, a line each. --bench-generate N times the same with
+// the expert cache live, as a server runs it (from --expert-profile), every prompt both ways each of --bench-rounds
+// rounds (2), the order alternating by round.
 #include "strata/glm/check.hpp"
 #include "strata/glm/cpu_ref.hpp"
 #include "strata/glm/engine.hpp"
@@ -177,7 +179,7 @@ int usage() {
                  "                  [--prefill-spread] [--decode-help N] [--no-decode-graphs]\n"
                  "                  [--no-lend-prompt-buffers] [--lend-min-prompt N] [--cache-max-slots N]\n"
                  "                  [--mtp [--mtp-min-prob P] [--check-pairs] [--mtp-out MTP.bin]\n"
-                 "                  [--check-generate N]]\n"
+                 "                  [--check-generate N] [--bench-generate N [--bench-rounds R]]]\n"
                  "       strata-glm -m MODEL.gguf --serve [--ctx N] [--eos-ids A,B] [--park-mib N] [--no-warm]\n"
                  "                  [--checkpoint-min N] [same GPU and cache options]\n");
     return 2;
@@ -189,7 +191,7 @@ int main(int argc, char** argv) {
     std::string model_path, ids_path, out_path, mtp_path;
     strata::glm::EngineOptions opt;
     bool check_cpu = false, serve = false, use_prefill = false, warm = true, pin = false, check_pairs = false;
-    int check_generate = 0;
+    int check_generate = 0, bench_generate = 0, bench_rounds = 2;
     double pin_keep_gb = 16.0;
     long long max_tokens = 0;
     std::vector<int32_t> eos;
@@ -228,6 +230,8 @@ int main(int argc, char** argv) {
         else if (a == "--check-pairs") check_pairs = true;
         else if (a == "--mtp-out" && (v = next())) mtp_path = v;
         else if (a == "--check-generate" && (v = next())) check_generate = std::max(1, std::atoi(v));
+        else if (a == "--bench-generate" && (v = next())) bench_generate = std::max(1, std::atoi(v));
+        else if (a == "--bench-rounds" && (v = next())) bench_rounds = std::max(1, std::atoi(v));
         else if (a == "--mtp-min-prob" && (v = next())) so.draft_min_prob = std::atof(v);
         else if (a == "--no-decode-graphs") opt.decode_graphs = false;
         else if (a == "--lend-prompt-buffers") opt.lend_prompt_buffers = true;
@@ -293,7 +297,8 @@ int main(int argc, char** argv) {
         if (max_tokens > 0 && (long long) ids.size() > max_tokens) ids.resize((size_t) max_tokens);
         // the prompt check decodes a few tokens past the prompt on both engines: room for them too
         const int check_decode = use_prefill && check_cpu ? 4 : 0;
-        const int64_t n_ctx = (int64_t) ids.size() + check_decode + (check_generate > 0 ? check_generate + 2 : 0);
+        const int64_t n_gen = std::max(check_generate, bench_generate);
+        const int64_t n_ctx = (int64_t) ids.size() + check_decode + (n_gen > 0 ? n_gen + 2 : 0);
         if (n_ctx > opt.max_ctx) opt.max_ctx = n_ctx;
 
         const auto t0 = std::chrono::steady_clock::now();
@@ -379,7 +384,7 @@ int main(int argc, char** argv) {
             return pass ? 0 : 1;
         }
 
-        if (check_generate > 0) {
+        if (check_generate > 0 || bench_generate > 0) {
             // each prompt (in chunks), then N tokens chosen greedily: one at a time, and with the MTP block's drafts,
             // each checked by a pass over the token and its draft (the draft is taken when it is the token the first
             // row of logits chooses, else drop_last). Bitwise the same logits, so the same tokens: a first run warms
@@ -402,7 +407,8 @@ int main(int argc, char** argv) {
             }
             using clk = std::chrono::steady_clock;
             const auto since = [](clk::time_point a) { return std::chrono::duration<double>(clk::now() - a).count(); };
-            const int N = check_generate;
+            const int N = check_generate > 0 ? check_generate : bench_generate;
+            const bool live = check_generate == 0;   // --bench-generate: the expert cache as a server runs it
             const int64_t V = c.n_vocab;
             const auto am = [&](const float* v) { return (int32_t) (std::max_element(v, v + V) - v); };
             const auto plain = [&](const std::vector<int32_t>& pr, std::vector<int32_t>& toks) {
@@ -467,6 +473,46 @@ int main(int argc, char** argv) {
             bool same = true;
             std::vector<std::vector<int32_t>> replies;
             size_t prompt_tokens = 0;
+            if (live) {
+                // --bench-generate: every prompt one token at a time and with drafts, each round, with the expert cache
+                // learning and swapping as in a server (it starts from --expert-profile); the order alternates by round
+                // so neither mode always meets the cache the other left. The replies can part where the cache's
+                // placement flips a near tie, so the time is per token of each reply.
+                int same_n = 0, runs = 0;
+                for (int r = 0; r < bench_rounds; ++r)
+                    for (size_t k = 0; k < prompts.size(); ++k) {
+                        const std::vector<int32_t>& pr = prompts[k];
+                        std::vector<int32_t> one, two;
+                        const int64_t d0 = drafts, k0 = taken;
+                        double o = 0, w = 0;
+                        if (r % 2 == 0) {
+                            o = plain(pr, one);
+                            w = drafted(pr, two);
+                        } else {
+                            w = drafted(pr, two);
+                            o = plain(pr, one);
+                        }
+                        s_one += o;
+                        s_two += w;
+                        ++runs;
+                        same_n += one == two;
+                        const double per = 1e3 / (double) std::max(N - 1, 1);
+                        std::printf("round %d, prompt %zu: one token at a time %.2f ms a token, with drafts %.2f ms a "
+                                    "token; %lld of %lld drafts taken; %s\n", r + 1, k + 1, o * per, w * per,
+                                    (long long) (taken - k0), (long long) (drafts - d0),
+                                    one == two ? "the same tokens" : "other tokens");
+                    }
+                const double nt = (double) runs * std::max(N - 1, 1);
+                std::printf("bench-generate: %d rounds of %zu prompts, %d tokens each: one token at a time %.2f ms a "
+                            "token, with drafts %.2f ms a token (%.1f%% faster; %lld drafts, %.1f%% taken, a draft "
+                            "%.2f ms, a pass %.2f ms); %d of %d replies the same\n", bench_rounds, prompts.size(), N,
+                            1e3 * s_one / nt, 1e3 * s_two / nt, 100.0 * (s_one / s_two - 1.0), (long long) drafts,
+                            100.0 * (double) taken / (double) std::max<int64_t>(drafts, 1),
+                            1e3 * s_draft / (double) std::max<int64_t>(drafts, 1),
+                            1e3 * s_pass / (double) std::max<int64_t>(drafts, 1), same_n, runs);
+                eng.save_profile();
+                return 0;
+            }
             for (size_t k = 0; k < prompts.size(); ++k) {
                 const std::vector<int32_t>& pr = prompts[k];
                 prompt_tokens += pr.size();
