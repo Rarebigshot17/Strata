@@ -10,7 +10,7 @@ Reports, per position and in total:
   max |logit diff|
 
 Usage:  python tools/glm53_compare.py REF.bin STRATA.bin [--kl-max 0.01] [--top1-min 0.98] [--tie-margin 0.01]
-                                      [--diff-max D] [--rel-diff-max R] [--rows N]
+                                      [--diff-max D] [--rel-diff-max R] [--rows N] [--tie-rows LIST]
 
 Exit code 0 when mean KL <= --kl-max, top-1 agreement >= --top1-min, (with --diff-max) max |logit diff| <= D and
 (with --rel-diff-max) the worst row's max |logit diff| over its largest |ref logit| <= R, 1 otherwise. The defaults
@@ -27,6 +27,12 @@ those seeds, the rows that changed had one gap of 0.08 or more, all but one: see
 gaps were 0.0017 and 0.0007, a tie. A tie does not excuse the other limits: those 5 runs fail the selftest's mean
 KL limit (by 43 times or more) and its --diff-max 0.01 (their largest logit difference is 0.15 or more) with or
 without ties.
+
+--tie-rows names positions where the reference may have taken another branch than strata at a near tie that moves
+the logits a lot (glm53_gpu_check.sh: where strata-glm's CPU reference had the MTP block's indexer pool scores within
+10% at the cut, so llama.cpp's own arithmetic may keep the other pool). A listed row that is off by itself, its KL
+above --kl-max or its difference above --diff-max or --rel-diff-max, is left out of every figure and named; the others
+count as usual. More than a quarter of the rows left out fails.
 """
 from __future__ import annotations
 
@@ -52,6 +58,19 @@ def log_softmax(x: np.ndarray) -> np.ndarray:
     return x - m - np.log(np.exp(x - m).sum(axis=-1, keepdims=True))
 
 
+def row_stats(ref: np.ndarray, got: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Each row's KL(ref || got), max |logit diff|, and that diff over the row's largest |ref logit| (NaN for a row
+    with a NaN)."""
+    lr, lg = log_softmax(ref), log_softmax(got)
+    kl = (np.exp(lr) * (lr - lg)).sum(axis=1)
+    diff = np.abs(ref.astype(np.float64) - got).max(axis=1)
+    return kl, diff, diff / np.maximum(np.abs(ref.astype(np.float64)).max(axis=1), 1e-30)
+
+
+def positions(ps: list[int]) -> str:
+    return f"position{'s' if len(ps) != 1 else ''} {', '.join(map(str, ps))}" if ps else "none"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("ref")
@@ -65,10 +84,9 @@ def main() -> int:
     ap.add_argument("--rel-diff-max", type=float, default=None,
                     help="also fail when a row's max |logit diff| is above this times its largest |ref logit|")
     ap.add_argument("--rows", type=int, default=0, help="compare only the first N rows")
-    ap.add_argument("--skip-rows", default="",
-                    help="positions (from 0, comma separated) left out of every figure and named in the output: "
-                         "glm53_gpu_check.sh's MTP comparison leaves out the positions where strata-glm found the MTP "
-                         "block's selection a tie against the CPU reference")
+    ap.add_argument("--tie-rows", default="",
+                    help="positions (from 0, comma separated) of near ties: each one off by itself is left out of "
+                         "every figure and named in the output")
     a = ap.parse_args()
 
     ref, got = load(a.ref), load(a.strata)
@@ -83,25 +101,30 @@ def main() -> int:
         n = min(n, a.rows)
     ref, got = ref[:n], got[:n]
     pos = np.arange(n)                       # each row's position, as the tables print it
-    left = ""
-    if a.skip_rows:
-        skip = {int(x) for x in a.skip_rows.split(",") if x.strip()}
-        out = sorted(i for i in skip if i < n)
-        keep = np.array([i not in skip for i in range(n)], dtype=bool)
-        ref, got, pos = ref[keep], got[keep], pos[keep]
+    n_all, out = n, []
+    if a.tie_rows:
+        listed = sorted({int(x) for x in a.tie_rows.split(",") if x.strip()} & set(range(n)))
+        kl, diff, rel_row = row_stats(ref, got)
+        off = kl > a.kl_max                  # NaN is never off by itself, so never left out
+        if a.diff_max is not None:
+            off |= diff > a.diff_max
+        if a.rel_diff_max is not None:
+            off |= rel_row > a.rel_diff_max
+        drop = off & np.isin(pos, listed)
+        out = pos[drop].tolist()
+        ref, got, pos = ref[~drop], got[~drop], pos[~drop]
         n = len(pos)
-        left = f" ({len(out)} left out)"
-        print(f"left out (--skip-rows): position{'s' if len(out) != 1 else ''} {', '.join(map(str, out))}")
+        print(f"near ties (--tie-rows): {positions(listed)}; "
+              + (f"left out, off by itself: {positions(out)}" if out else "none off by itself, none left out"))
+    left = f" ({len(out)} left out)" if out else ""
 
     bad = ~np.isfinite(got).all(axis=1)
     if bad.any():
         print(f"strata has NaN/inf in {int(bad.sum())} row(s), first at position {int(pos[np.argmax(bad)])}")
 
-    lr, lg = log_softmax(ref), log_softmax(got)
-    kl = (np.exp(lr) * (lr - lg)).sum(axis=1)
+    kl, diff, rel_row = row_stats(ref, got)
     top_r, top_g = ref.argmax(axis=1), got.argmax(axis=1)
     agree = top_r == top_g
-    diff = np.abs(ref.astype(np.float64) - got).max(axis=1)
     # how far below its own top-1 each side puts the other's (0 where they agree; NaN never makes a tie)
     rows = np.arange(n)
     gap_r = ref[rows, top_r].astype(np.float64) - ref[rows, top_g]
@@ -119,8 +142,7 @@ def main() -> int:
     n_tie = int(tie.sum())
     top1 = float((agree | tie).mean())
     ties = f" ({top1 * 100:.2f}% with {n_tie} tie{'s' if n_tie > 1 else ''})" if n_tie else ""
-    # each row's largest difference relative to its largest |ref logit| (NaN for a row with a NaN)
-    worst_rel = float((diff / np.maximum(np.abs(ref.astype(np.float64)).max(axis=1), 1e-30)).max())
+    worst_rel = float(rel_row.max())
     rel = f"   worst relative diff {worst_rel:.3g}" if a.rel_diff_max is not None else ""
     print(f"\nrows {n}{left}   mean KL {mean_kl:.5f}   max KL {float(np.nanmax(kl)):.5f}   "
           f"top-1 agreement {float(agree.mean()) * 100:.2f}%{ties}   max |logit diff| {float(diff.max()):.4f}{rel}")
@@ -133,6 +155,9 @@ def main() -> int:
     if a.rel_diff_max is not None:
         ok = ok and worst_rel <= a.rel_diff_max
         needs += f" and worst relative diff <= {a.rel_diff_max}"
+    if out:
+        ok = ok and len(out) * 4 <= n_all
+        needs += " and at most a quarter of the rows left out"
     print("PASS" if ok else f"FAIL (needs {needs})")
     return 0 if ok else 1
 

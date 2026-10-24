@@ -85,10 +85,12 @@ STUBS = {
     "sb/strata-glm-ref": 'python3 "$FAKE/write_logits.py" "$out"\n',
     "sb/strata-glm": 'if gpu_full; then echo "strata-glm: cudaSetDevice: out of memory" >&2; exit 1; fi\n'
                      '[ -z "$mtp_out" ] || python3 "$FAKE/write_logits.py" "$mtp_out" mtp\n'
-                     # FAKE_MTP_TIE=1: position 5 is a selection tie (its MTP row far off), reported; =unreported: the
-                     # same row off without the report
+                     # FAKE_MTP_TIE=1: position 5 is a selection tie (its MTP row far off), reported, and 5 and 9
+                     # are near ties; =unreported: the same row off, with only 9 a near tie
                      '[ -n "$mtp_out" ] && [ "$FAKE_MTP_TIE" = 1 ] && '
                      'echo "position 5: the MTP block\'s selection is a tie (logits relative diff 0.6)"\n'
+                     'case "$FAKE_MTP_TIE" in 1) nt=5,9;; unreported) nt=9;; *) nt=none;; esac\n'
+                     '[ -n "$mtp_out" ] && echo "MTP near ties (pool scores the CPU had within 10% at the cut): $nt"\n'
                      'case " $* " in\n'
                      '  *" --decode-help "*) echo "check-cpu: top-1 agreement 40/40: PASS";;\n'
                      # FAKE_PAIRS_DIFFER: a pair's row differed from one token at a time
@@ -231,7 +233,8 @@ class Checks(unittest.TestCase):
         rc, out = self.run_script("glm53_gpu_check.sh", FAKE_SMI="0, 23900\\n1, 11800\\n2, 9800\\n")
         self.assertEqual(rc, 0, out)
         self.assertEqual(len(re.findall("^vs llama.cpp: rows 40", out, re.M)), len(GPU_MODELS), out)
-        self.assertEqual(len(re.findall("^MTP vs llama.cpp: rows 40", out, re.M)), len(GPU_MODELS), out)
+        # no near ties listed: nothing left out, no note
+        self.assertEqual(len(re.findall("^MTP vs llama.cpp: rows 40 .*PASS $", out, re.M)), len(GPU_MODELS), out)
         # each model's runs: decode, the prompt path, it 6 rows at a time, both with the latent cache in RAM, and
         # the prompt path with the experts page-locked, on one card and on every card, decoding with the GPUs
         # helping the CPU, decoding with CUDA graphs, and the prompt buffers lent to the expert cache
@@ -276,16 +279,17 @@ class Checks(unittest.TestCase):
                          2 * len(GPU_MODELS), out)
         self.assertIn("check-mtp: worst logits relative diff 0.31 (limit 0.005): FAIL", out)
 
-    def test_gpu_check_leaves_an_mtp_selection_tie_out_of_the_llama_cpp_comparison(self):
-        # strata-glm reported position 5 a tie against the CPU reference: the comparison with llama.cpp leaves it out
-        # and says so; the same row off without the report fails
+    def test_gpu_check_leaves_an_mtp_near_tie_out_of_the_llama_cpp_comparison_only_when_it_is_off(self):
+        # strata-glm listed positions 5 and 9 as near ties: the comparison with llama.cpp leaves out 5, which is off,
+        # counts 9, and says so; the same row off with only 9 listed fails
         rc, out = self.run_script("glm53_gpu_check.sh", FAKE_SMI="0, 23900\\n", FAKE_MTP_TIE="1")
         self.assertEqual(rc, 0, out)
         lines = re.findall("^MTP vs llama.cpp: .*$", out, re.M)
         self.assertEqual(len(lines), len(GPU_MODELS), out)
         for ln in lines:
             self.assertIn("rows 39 (1 left out)", ln)
-            self.assertTrue(ln.endswith("PASS (left out: position 5, a selection tie)"), ln)
+            self.assertTrue(ln.endswith(
+                "PASS (near ties at the cut: positions 5, 9; left out, off by itself: position 5)"), ln)
         rc, out = self.run_script("glm53_gpu_check.sh", FAKE_SMI="0, 23900\\n", FAKE_MTP_TIE="unreported")
         self.assertNotEqual(rc, 0, out)
         lines = re.findall("^MTP vs llama.cpp: .*$", out, re.M)
@@ -293,6 +297,7 @@ class Checks(unittest.TestCase):
         for ln in lines:
             self.assertIn("rows 40 ", ln)
             self.assertIn("FAIL", ln)
+            self.assertTrue(ln.endswith("(near ties at the cut: position 9; none off by itself, none left out)"), ln)
 
     def test_gpu_check_fails_when_drafts_change_the_tokens(self):
         rc, out = self.run_script("glm53_gpu_check.sh", FAKE_SMI="0, 23900\\n", FAKE_GENERATE_DIFFERS="1")

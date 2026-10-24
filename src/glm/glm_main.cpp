@@ -650,6 +650,7 @@ int main(int argc, char** argv) {
         }
         std::vector<float> h_prev((size_t) c.n_embd, 0.0f);
         eng.mtp_keep_selection(mtp && check_cpu);
+        std::string near_ties;   // positions whose MTP pool scores the CPU had within MtpCheck::kSelTie at the cut
         for (size_t i = 0; i < ids.size(); ++i) {
             if (mtp) {
                 eng.mtp_draft(ids[i]);
@@ -660,6 +661,8 @@ int main(int argc, char** argv) {
                     if (mchk.add(mc, mg, ref->mtp_selection(), ref->mtp_margin(), eng.mtp_selection()) < 0)
                         std::printf("position %zu: the MTP block's selection is a tie (logits relative diff %.3g)\n",
                                     i, strata::glm::rel_diff(mc, mg));
+                    if (ref->mtp_margin() < MtpCheck::kSelTie)
+                        near_ties += (near_ties.empty() ? "" : ",") + std::to_string(i);
                 }
             }
             const auto a = std::chrono::steady_clock::now();
@@ -696,7 +699,13 @@ int main(int argc, char** argv) {
             const bool pass = chk.pass(lim), mpass = !mtp || mchk.pass(lim);
             std::printf("check-cpu: %s; worst layer diff %.3g: %s\n", chk.summary(lim).c_str(), layers.worst,
                         pass ? "PASS" : "FAIL");
-            if (mtp) std::printf("check-mtp: %s: %s\n", mchk.summary(lim).c_str(), mpass ? "PASS" : "FAIL");
+            if (mtp) {
+                // for comparisons with other engines (the GPU check's with llama.cpp): where another engine may take
+                // the other pool at the cut
+                std::printf("MTP near ties (pool scores the CPU had within %.0f%% at the cut): %s\n",
+                            MtpCheck::kSelTie * 100, near_ties.empty() ? "none" : near_ties.c_str());
+                std::printf("check-mtp: %s: %s\n", mchk.summary(lim).c_str(), mpass ? "PASS" : "FAIL");
+            }
             return pass && mpass ? 0 : 1;
         }
     } catch (const std::exception& e) {

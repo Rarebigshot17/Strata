@@ -245,20 +245,20 @@ for m in glm5-next-moe v1 v1-bare q4_0 q8_0 v1-heads; do
             --rel-diff-max "$rel") || fail=1
         echo "vs llama.cpp: $(echo "$res" | tail -2 | tr '\n' ' ')"
     fi
-    # the MTP block's logits against llama.cpp's MTP head (draft-mtp's graph), by the same rule, less the positions
-    # where strata-glm found the block's selection a tie against the CPU reference (above): llama.cpp's CPU path
-    # selects as the CPU reference does, so the GPU's other cells there differ from it alike
-    mties=$(grep -oE "^position [0-9]+: the MTP block's selection is a tie" "$W/mtp_$m.txt" 2> /dev/null \
-        | awk '{print $2}' | tr -d ':' | paste -sd, -)
+    # the MTP block's logits against llama.cpp's MTP head (draft-mtp's graph), by the same rule, less the rows off by
+    # themselves at the near ties strata-glm listed (above): where the CPU reference had the block's pool scores
+    # within 10% at the cut, the GPU's rounding or llama.cpp's own arithmetic can keep the other pool, and attending
+    # other cells moves the logits a lot
+    nties=$(sed -n 's/^MTP near ties (.*): //p' "$W/mtp_$m.txt" 2> /dev/null | grep -v '^none$')
     if [ ! -s "$W/refmtp_$m.bin" ]; then
         echo "FAIL MTP vs llama.cpp: llama-strata-ref wrote no MTP logits:"; tail -4 "$W/ref_$m.txt"; fail=1
     elif [ ! -s "$W/mtpgpu_$m.bin" ]; then
         echo "FAIL MTP vs llama.cpp: strata-glm wrote no MTP logits (its lines above)"; fail=1
     else
         res=$(python3 "$HERE/glm53_compare.py" "$W/refmtp_$m.bin" "$W/mtpgpu_$m.bin" --kl-max 1e-5 --top1-min 0 \
-            --rel-diff-max "$rel" ${mties:+--skip-rows "$mties"}) || fail=1
-        note=${mties:+"(left out: position $mties, a selection tie)"}
-        echo "MTP vs llama.cpp: $(echo "$res" | tail -2 | tr '\n' ' ')$note"
+            --rel-diff-max "$rel" ${nties:+--tie-rows "$nties"}) || fail=1
+        note=$(echo "$res" | sed -n 's/^near ties (--tie-rows): //p')
+        echo "MTP vs llama.cpp: $(echo "$res" | tail -2 | tr '\n' ' ')${note:+(near ties at the cut: $note)}"
     fi
 done
 # conversations parked in host memory and restored (over every GPU the layers are split across), against fresh

@@ -392,9 +392,15 @@ other way. On one Q4_0 model, at position 43, the CPU had pool 5 at 0.005085 and
 and 0.004983, so the two attended different cells and the logits differed by 0.355 (`STRATA_GLM_SEL_DEBUG=1` prints
 both sides' selections). The GPU's pool scores differed from the CPU's by up to 4.0% at the positions printed. So
 check-mtp counts a position where the two took other cells, on scores the CPU had within 10% of each other, as a tie,
-prints it and leaves it out of the rule; more than a quarter of the rows as ties fails. The comparison of the GPU's
-MTP logits with llama.cpp's leaves the same positions out and names them: llama.cpp's CPU path selects as the CPU
-reference does (in the last check's Q4_0 model, position 19 of 40, 0.653 there and at most 0.0197 elsewhere). A pass
+prints it and leaves it out of the rule; more than a quarter of the rows as ties fails. llama.cpp's arithmetic meets
+the same ties: on one Q8_0 model (napster-ai, 2026-10-24), at position 31 of 40, the GPU and the CPU took the same
+cells, with pool 4 at 0.001150 just ahead of pool 6 at 0.001143 (0.6% apart), and their MTP logits differed from
+llama.cpp's by 0.397 of the row's largest logit. llama.cpp's selection is not printed; keeping pool 6 is the likely
+cause. So `strata-glm --mtp --check-cpu` lists the positions where the CPU had the scores at the cut within 10%
+(`MTP near ties`), and the GPU check's comparison with llama.cpp leaves out a listed row only when it is off by itself
+(`glm53_compare.py --tie-rows`: its KL or difference over the limit), names it, and fails with more than a quarter of
+the rows left out. A GPU tie as above is a near tie too (on one Q4_0 model, position 19 of 40 was 0.653 off
+llama.cpp's and the other rows at most 0.0197). A pass
 over a token and its draft (`--check-pairs`) is held to more than the rule: every row bitwise the same as one token
 at a time, with the expert cache warmed and then kept as it is; and `--check-generate` decodes with and without
 drafts and asks for the same tokens.

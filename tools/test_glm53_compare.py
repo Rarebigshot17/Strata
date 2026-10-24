@@ -151,19 +151,49 @@ class Compare(unittest.TestCase):
         self.assertEqual(rc, 1, out)
         self.assertIn("NaN", out)
 
-    def test_rows_left_out(self):
-        # row 12 far off (its own largest logit is 0.5): it fails, and passes only left out, which the output says
+    LOOSE = ("--kl-max", "1e-5", "--top1-min", "0", "--rel-diff-max", "0.05")
+
+    def test_a_near_tie_off_by_itself_is_left_out(self):
+        # row 12 far off (its own largest logit is 0.5): it fails, and passes listed as a near tie, left out and named;
+        # row 20, listed too and not off, counts
         ref, got = rows40(), rows40()
         got[12] = [v + (0.3 if i % 2 else -0.3) for i, v in enumerate(got[12])]
-        rc, out = self.run_compare(ref, got, "--kl-max", "1e-5", "--top1-min", "0", "--rel-diff-max", "0.05")
+        rc, out = self.run_compare(ref, got, *self.LOOSE)
         self.assertEqual(rc, 1, out)
-        rc, out = self.run_compare(ref, got, "--kl-max", "1e-5", "--top1-min", "0", "--rel-diff-max", "0.05",
-                                   "--skip-rows", "12")
+        rc, out = self.run_compare(ref, got, *self.LOOSE, "--tie-rows", "20,12")
         self.assertEqual(rc, 0, out)
-        self.assertIn("left out (--skip-rows): position 12", out)
+        self.assertIn("near ties (--tie-rows): positions 12, 20; left out, off by itself: position 12", out)
         self.assertIn("rows 39 (1 left out)", out)
         # the table keeps the rows' own positions after the one left out
+        self.assertRegex(out, r"(?m)^ +20 ")
         self.assertRegex(out, r"(?m)^ +39 ")
+        self.assertNotRegex(out, r"(?m)^ +12 ")
+
+    def test_a_near_tie_within_the_limits_counts(self):
+        rc, out = self.run_compare(rows40(), rows40(), *self.LOOSE, "--tie-rows", "3")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("near ties (--tie-rows): position 3; none off by itself, none left out", out)
+        self.assertIn("rows 40 ", out)
+
+    def test_a_row_off_that_is_not_a_listed_near_tie_fails(self):
+        ref, got = rows40(), rows40()
+        got[12] = [v + (0.3 if i % 2 else -0.3) for i, v in enumerate(got[12])]
+        rc, out = self.run_compare(ref, got, *self.LOOSE, "--tie-rows", "11,13")
+        self.assertEqual(rc, 1, out)
+        self.assertIn("none off by itself, none left out", out)
+        self.assertIn("rows 40 ", out)
+
+    def test_more_than_a_quarter_of_the_rows_left_out_fails(self):
+        # rows 0-10 off, each a listed near tie: the 29 left pass, and 11 of 40 left out fails; 10 of 40 passes
+        for n_off, rc_want in ((11, 1), (10, 0)):
+            ref, got = rows40(), rows40()
+            for r in range(n_off):
+                got[r] = [v + (0.3 if i % 2 else -0.3) for i, v in enumerate(got[r])]
+            rc, out = self.run_compare(ref, got, *self.LOOSE, "--tie-rows", ",".join(map(str, range(n_off))))
+            self.assertEqual(rc, rc_want, out)
+            self.assertIn(f"rows {40 - n_off} ({n_off} left out)", out)
+            if rc_want:
+                self.assertIn("and at most a quarter of the rows left out)", out)
 
     def test_a_row_of_nan_is_neither_a_tie_nor_a_pass(self):
         ref, got = rows40(), rows40()
