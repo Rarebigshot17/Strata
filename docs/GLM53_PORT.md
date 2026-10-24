@@ -143,7 +143,11 @@ builds), the answer was the code word exactly, and three 256-token summaries at 
   57.82; 88.2% of 3,818 drafts taken). With two tokens' worth of copies a pass, at 0.8, 0.9% faster (57.32 against
   57.85; interval -0.37% to +2.12%; a pass 103.6 ms, 43.6% hit). The rule set before the runs was a mean gain of 1% or
   more with the interval above zero. One way of three passed it; its interval corrected for the three (Bonferroni) is
-  +0.02% to +3.87%. So `--mtp` is in setup's speed settings, and 0.8 is `--mtp-min-prob`'s default. With it the
+  +0.02% to +3.87%. So `--mtp` is in setup's speed settings, and 0.8 is `--mtp-min-prob`'s default. Through the
+  server with the live flags and `--mtp` (`57a07b2`, one pass each): 17.4, 17.6 and 16.3 tokens/s over (a)-(c),
+  mean 17.10, against 17.10 and 17.33 for two runs without drafts before; one pass a prompt varies by about 0.7
+  tokens/s from run to run, more than the gain, so this shows neither a gain nor a loss. 24 of 24 tool calls right,
+  and 165 to 184 drafts per 400 tokens (the 0.8 default applied). With it the
   expert cache is 0.53 GB smaller (30.71 against 31.24 GB: the layer's weights and pooled keys on the output head's
   card, and the KDA layers' copies of a pair's state), its experts take 2.6 GB of RAM in the page cache, and its
   latent cache 1 KB a token (in locked RAM with `--kv-in-ram`).

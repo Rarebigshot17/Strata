@@ -77,7 +77,7 @@ None of these needs a GPU or a model download, except where it says so.
   - `tools/glm53_server_check.sh LLAMA_DIR ENGINE`: `serve/server.py` end to end on the engine.
   - `tools/glm53_gpu_check.sh LLAMA_BUILD_DIR STRATA_BUILD_DIR`: the GPU engine. **Needs an NVIDIA GPU** with
     2 GiB free on each visible card. It passed on napster-ai on 2026-10-20 (three runs at `fa74d8a`) and on
-    2026-10-24 at `6664fe6`, with the MTP layer's checks (108 checks).
+    2026-10-24 at `6664fe6` and `57a07b2`, with the MTP layer's checks (108 checks).
 - **The server without an engine:** `python3 serve/server.py` starts it with the mock engine (a fixed answer) on
   port 8101. `--engine strata --config strata-glm-<size>.json` runs the real one.
 
