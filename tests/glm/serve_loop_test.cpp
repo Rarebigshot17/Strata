@@ -135,10 +135,13 @@ struct Conv : Evaluator {
 struct Draft : Conv {
     std::vector<float> two = std::vector<float>(2 * V, 0.0f);
     bool can_draft() const override { return true; }
+    int32_t last_draft_tok = 0;
     int32_t draft(int32_t tok) override {
+        last_draft_tok = tok;
         const int32_t g = next(step(h, tok));
         return tok % 3 ? g : (g + 1) % (V - 1);
     }
+    double draft_prob() const override { return last_draft_tok % 5 ? 0.9 : 0.3; }
     const float* eval_pair(int32_t a, int32_t b) override {
         std::copy_n(eval(a).begin(), V, two.begin());
         std::copy_n(eval(b).begin(), V, two.begin() + V);
@@ -210,14 +213,15 @@ std::vector<std::string> run_conv(const std::string& input, size_t park_bytes, i
         true);
 }
 
-/// The same with Draft (drafts) or Conv, a larger park and no checkpoints.
-std::vector<std::string> run_drafts(const std::string& input, bool drafts) {
+/// The same with Draft (drafts, those below min_prob not run) or Conv, a larger park and no checkpoints.
+std::vector<std::string> run_drafts(const std::string& input, bool drafts, double min_prob = 0) {
     return run_child(
         input,
         [&] {
             Draft d;
             Conv c;
             ServeOptions opt;
+            opt.draft_min_prob = min_prob;
             opt.max_ctx = 4096;
             opt.n_vocab = V;
             opt.eos_ids = {31};
@@ -754,6 +758,28 @@ int main() {
                    w2[k].resume == (long) (3 + with[k - 12].toks.size() - 1);
         expect(cont, "drafts, sampled: the states left are the same as without drafts (the next turns resume alike)",
                {});
+        // with a minimum probability the unlikely drafts' tokens run alone: still the same tokens and states, fewer
+        // passes over a token and its draft
+        const auto lmin = run_drafts(in + in2, true, 0.5);
+        const auto m2 = replies(lmin);
+        bool same_min = m2.size() == 24;
+        for (size_t k = 0; same_min && k < 24; ++k) same_min = m2[k].toks == n2[k].toks && m2[k].resume == n2[k].resume;
+        long d_all = 0, d_min = 0;
+        const auto count_drafts = [](const std::vector<std::string>& lines) {
+            long n = 0;
+            for (const auto& ln : lines)
+                if (ln.rfind("DONE ", 0) == 0) {
+                    std::istringstream is(ln);
+                    std::string w;
+                    for (int i = 0; i <= 6 && is >> w; ++i)
+                        if (i == 6) n += std::stol(w);
+                }
+            return n;
+        };
+        d_all = count_drafts(run_drafts(in + in2, true));
+        d_min = count_drafts(lmin);
+        expect(same_min && d_min > 0 && d_min < d_all,
+               "drafts below draft_min_prob run their token alone: the same tokens and states, fewer pairs", {});
     }
     std::printf(failures ? "%d FAILED\n" : "all passed\n", failures);
     return failures != 0;

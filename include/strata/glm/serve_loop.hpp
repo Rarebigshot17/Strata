@@ -79,6 +79,8 @@ public:
     /// the next two positions and returns a's logits then b's (n_vocab floats each); drop_last() takes b back.
     virtual bool can_draft() const { return false; }
     virtual int32_t draft(int32_t /*token*/) { return -1; }
+    /// The drafter's probability of its last draft (ServeOptions::draft_min_prob).
+    virtual double draft_prob() const { return 1.0; }
     virtual const float* eval_pair(int32_t /*a*/, int32_t /*b*/) { return nullptr; }
     virtual void drop_last() {}
 };
@@ -96,6 +98,9 @@ struct ServeOptions {
     int max_checkpoints = 2;                ///< per conversation, the latest kept
     std::vector<int32_t> eos_ids;
     std::vector<std::string> info;   ///< extra INFO key=value pairs (backend, expert cache figures)
+    /// Drafts: a draft the drafter gives a lower probability is not run with its token (the token runs alone): a
+    /// pass over two tokens costs more than one and pays only when the draft is likely to be the next token. 0: all.
+    double draft_min_prob = 0;
 };
 
 /// Runs until QUIT or the end of stdin. Returns the process exit code.

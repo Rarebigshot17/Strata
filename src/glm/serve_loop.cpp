@@ -533,6 +533,11 @@ int serve_loop(Evaluator& ev, const ServeOptions& opt) {
                         continue;
                     }
                     const int32_t d = ev.draft(y);
+                    if (opt.draft_min_prob > 0 && ev.draft_prob() < opt.draft_min_prob) {
+                        conv.logits = ev.eval(y);    // an unlikely draft: y alone
+                        conv.append(&y, 1);
+                        continue;
+                    }
                     const float* lg = ev.eval_pair(y, d);
                     ++drafts;
                     conv.append(&y, 1);

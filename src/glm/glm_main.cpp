@@ -134,6 +134,7 @@ struct GpuEvaluator : strata::glm::Evaluator {
     void restore(const strata::glm::Snapshot& s) override { e.restore(s); }
     bool can_draft() const override { return e.mtp_ready(); }
     int32_t draft(int32_t t) override { return e.mtp_draft(t); }
+    double draft_prob() const override { return e.mtp_draft_prob(); }
     const float* eval_pair(int32_t a, int32_t b) override { return e.eval_pair(a, b); }
     void drop_last() override { e.drop_last(); }
 };
@@ -175,7 +176,8 @@ int usage() {
                  "                  [--pin-experts [--pin-keep-free GB]] [--prefill-rows N] [--kv-in-ram]\n"
                  "                  [--prefill-spread] [--decode-help N] [--no-decode-graphs]\n"
                  "                  [--no-lend-prompt-buffers] [--lend-min-prompt N] [--cache-max-slots N]\n"
-                 "                  [--mtp [--check-pairs] [--mtp-out MTP.bin] [--check-generate N]]\n"
+                 "                  [--mtp [--mtp-min-prob P] [--check-pairs] [--mtp-out MTP.bin]\n"
+                 "                  [--check-generate N]]\n"
                  "       strata-glm -m MODEL.gguf --serve [--ctx N] [--eos-ids A,B] [--park-mib N] [--no-warm]\n"
                  "                  [--checkpoint-min N] [same GPU and cache options]\n");
     return 2;
@@ -226,6 +228,7 @@ int main(int argc, char** argv) {
         else if (a == "--check-pairs") check_pairs = true;
         else if (a == "--mtp-out" && (v = next())) mtp_path = v;
         else if (a == "--check-generate" && (v = next())) check_generate = std::max(1, std::atoi(v));
+        else if (a == "--mtp-min-prob" && (v = next())) so.draft_min_prob = std::atof(v);
         else if (a == "--no-decode-graphs") opt.decode_graphs = false;
         else if (a == "--lend-prompt-buffers") opt.lend_prompt_buffers = true;
         else if (a == "--no-lend-prompt-buffers") opt.lend_prompt_buffers = false;
@@ -410,7 +413,7 @@ int main(int argc, char** argv) {
                 while ((int) toks.size() < N) toks.push_back(x = am(eng.eval(x).data()));
                 return since(a);
             };
-            int64_t drafts = 0, taken = 0;
+            int64_t drafts = 0, taken = 0, skipped = 0;
             double s_draft = 0, s_pass = 0, s_one = 0, s_two = 0;
             // the drafts by the MTP block's probability of its own draft (softmax of its logits): how many, how many
             // taken, in bands below 0.5, 0.8, 0.95 and above
@@ -433,6 +436,11 @@ int main(int argc, char** argv) {
                     const int32_t d = eng.mtp_draft(x);
                     s_draft += since(b);
                     const double pd = draft_prob();
+                    if (pd < so.draft_min_prob) {    // --mtp-min-prob: an unlikely draft, x alone
+                        ++skipped;
+                        toks.push_back(x = am(eng.eval(x).data()));
+                        continue;
+                    }
                     const int band = pd < band_top[0] ? 0 : pd < band_top[1] ? 1 : pd < band_top[2] ? 2 : 3;
                     ++band_n[band];
                     const auto e = clk::now();
@@ -492,6 +500,9 @@ int main(int argc, char** argv) {
                         1e3 * s_one / nt, 1e3 * s_two / nt, 1e3 * s_draft / (double) std::max<int64_t>(drafts, 1),
                         1e3 * s_pass / (double) std::max<int64_t>(drafts, 1), (long long) drafts, (long long) taken,
                         100.0 * (double) taken / (double) std::max<int64_t>(drafts, 1));
+            if (so.draft_min_prob > 0)
+                std::printf("--mtp-min-prob %g: %lld drafts below it, their tokens run alone\n", so.draft_min_prob,
+                            (long long) skipped);
             std::printf("drafts by the MTP block's probability of its draft: below 0.5 %lld (%lld taken), 0.5-0.8 %lld "
                         "(%lld), 0.8-0.95 %lld (%lld), 0.95 and above %lld (%lld)\n", (long long) band_n[0],
                         (long long) band_taken[0], (long long) band_n[1], (long long) band_taken[1],

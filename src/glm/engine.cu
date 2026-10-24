@@ -688,6 +688,14 @@ bool GpuEngine::mtp_ready() const { return impl_->mtp.on; }
 
 const std::vector<float>& GpuEngine::mtp_logits() const { return impl_->mtp.logits; }
 
+double GpuEngine::mtp_draft_prob() const {
+    const std::vector<float>& l = impl_->mtp.logits;
+    const float mx = *std::max_element(l.begin(), l.end());
+    double sum = 0;
+    for (float v : l) sum += std::exp((double) v - mx);
+    return 1.0 / sum;
+}
+
 const std::vector<int32_t>& GpuEngine::mtp_selection() const { return impl_->mtp.sel; }
 
 void GpuEngine::mtp_keep_selection(bool on) { impl_->mtp.keep_sel = on; }

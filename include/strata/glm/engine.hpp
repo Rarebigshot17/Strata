@@ -61,6 +61,8 @@ public:
     /// logits in mtp_logits(). The pass over `token` at pos() keeps the row this wrote.
     int32_t mtp_draft(int32_t token);
     const std::vector<float>& mtp_logits() const;
+    /// The MTP block's probability of the last draft (the softmax of mtp_logits at the token it returned).
+    double mtp_draft_prob() const;
     /// The cells the MTP block's indexer selected at the last mtp_draft, kept from mtp_keep_selection(true) on (the
     /// checks compare it with the CPU reference's).
     const std::vector<int32_t>& mtp_selection() const;
