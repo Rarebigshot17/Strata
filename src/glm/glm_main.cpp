@@ -196,6 +196,10 @@ int main(int argc, char** argv) {
     long long max_tokens = 0;
     std::vector<int32_t> eos;
     strata::glm::ServeOptions so;
+    // --mtp-min-prob: on napster-ai (2026-10-24, the 3-bit file, --bench-generate 400 over 6 rounds, the expert cache
+    // live) drafts decoded 2.1% faster than one token at a time at 0.8 (18 paired runs, 95% interval of the mean gain
+    // +0.4% to +3.5%), and 1.2% slower with every draft run
+    so.draft_min_prob = 0.8;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : nullptr; };

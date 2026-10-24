@@ -326,9 +326,10 @@ server reads it only when it starts. A bad value in most keys stops the start wi
 Setup writes the keys in the first table. When setup runs again for the same size, it rewrites those and keeps every
 other key, and every engine option in `"args"` it does not write itself. It writes `-m`, `--ctx`, `--park-mib` and
 `--expert-profile`, and, where the size leaves 40 GiB or more of RAM beside its experts, the settings measured fastest
-on the owner's PC: `--pin-experts --prefill-chunk 4096 --kv-in-ram`, and `--prefill-spread` with more than one GPU
-([below](#engine-options-args)). The experts and the attention cache's latent are then locked in RAM: 110 GB for the
-3-bit model and 11 KB a token of context (5.9 GB at 524,288). With less RAM it leaves them out and says why.
+on the owner's PC: `--pin-experts --prefill-chunk 4096 --kv-in-ram`, `--prefill-spread` with more than one GPU, and
+`--mtp` ([below](#engine-options-args)). The experts and the attention cache's latent are then locked in RAM: 110 GB
+for the 3-bit model and 12 KB a token of context with the MTP layer's (6.4 GB at 524,288); the MTP layer's experts
+take 2.6 GB more in the page cache. With less RAM it leaves them out and says why.
 
 A config as setup writes it (the paths are an example):
 
@@ -338,7 +339,7 @@ A config as setup writes it (the paths are an example):
  "args": ["-m", "/home/me/Strata-GLM-data/models/glm-ud-iq3_xxs/<name>-00001-of-0000N.gguf",
           "--ctx", "131072", "--park-mib", "8192",
           "--expert-profile", "/home/me/Strata-GLM-data/glm-ud-iq3_xxs.profile",
-          "--pin-experts", "--prefill-chunk", "4096", "--kv-in-ram", "--prefill-spread"],
+          "--pin-experts", "--prefill-chunk", "4096", "--kv-in-ram", "--prefill-spread", "--mtp"],
  "cwd": "/home/me/Strata",
  "log": "/home/me/Strata/strata-glm-ud-iq3_xxs.log",
  "lib_dirs": ["/usr/local/cuda-13.0/lib64"],
@@ -377,7 +378,7 @@ server adds `--serve`, `--split` from the config's `split` key, and `--eos-ids` 
 | `--checkpoint-min N` | No checkpoint closer than N tokens to the start of a conversation. | 256 |
 | `--expert-profile FILE` | The expert use scores: loaded at start (the VRAM cache starts full), written when the engine ends cleanly. | None |
 | `--vram-reserve GB` | VRAM left free on each GPU after the expert cache. | 1 |
-| `--max-swaps N` | Experts copied into the VRAM cache per token, all layers together, in the background. | 64 (measured on napster-ai, UD-IQ3_XXS, three 400-token answers: 66.0 ms a token against 70.6 at 16, 71.0 at 32 without the decode graphs, and 66.6 at 128) |
+| `--max-swaps N` | Experts copied into the VRAM cache per token (and per pass over a token and its draft), all layers together, in the background. | 64 (measured on napster-ai, UD-IQ3_XXS, three 400-token answers: 66.0 ms a token against 70.6 at 16, 71.0 at 32 without the decode graphs, and 66.6 at 128) |
 | `--cache-decay D` | How fast the expert cache forgets: each token multiplies every expert's use score by D. | 0.95 (measured on napster-ai, UD-IQ3_XXS, four chat prompts after the first: 15.1-15.9 tokens/s and 67-69% of the experts in VRAM, against 12.4-12.8 tokens/s and 35-38% with 0.999 and 8 swaps on the same build) |
 | `--no-expert-cache` | No VRAM expert cache. | Off |
 | `--prefill-chunk N` | Prompt tokens read at once. 0 = one at a time. | 256 |
@@ -390,8 +391,8 @@ server adds `--serve`, `--split` from the config's `split` key, and `--eos-ids` 
 | `--no-decode-graphs` | Launches a decoded token's ops one by one instead of one CUDA graph per layer. The same values. | Graphs (napster-ai: 1.6% faster) |
 | `--no-lend-prompt-buffers` | Keeps the prompt path's buffers for prompts alone. By default they hold more expert-cache slots between prompts, and a prompt of `--lend-min-prompt` tokens or more takes them back (their experts are copied in again as decoding needs them). | Lent (napster-ai: the cache 23.2 to 31.2 GB, decoding 11% to 17% faster) |
 | `--lend-min-prompt N` | With the buffers lent: a shorter prompt runs token by token and leaves the cache as it is. | 64 |
-| `--mtp` | Loads the model's MTP layer, which drafts the next token after each one: the token and its draft run in one pass, and a draft that is not the next token is taken back. The replies are the same token for token. The expert cache is 0.53 GB smaller, and the layer's experts take 2.6 GB of RAM (read by the CPU; the warm-up reads them too). | Off (napster-ai, three 400-token answers, four rounds with the cache live: 1.2% slower; with `--mtp-min-prob 0.8`, 0.5% faster, within the spread between rounds) |
-| `--mtp-min-prob P` | With `--mtp`: a draft the MTP layer gives a probability below P runs as its token alone. | 0 (every draft) |
+| `--mtp` | Loads the model's MTP layer, which drafts the next token after each one: the token and its draft run in one pass, and a draft that is not the next token is taken back. The replies are the same token for token. The expert cache is 0.53 GB smaller, and the layer's experts take 2.6 GB of RAM (read by the CPU; the warm-up reads them too). | Off; on in setup's speed settings (napster-ai, the 3-bit file, three 400-token answers, six rounds with the cache live: 2.1% faster, 95% interval of the mean gain +0.4% to +3.5%) |
+| `--mtp-min-prob P` | With `--mtp`: a draft the MTP layer gives a probability below P runs as its token alone. 0 runs every draft. | 0.8 (napster-ai, the same runs: 2.1% faster; every draft run: 1.2% slower) |
 | `--threads N` (`-t N`) | CPU threads for the experts computed on the CPU. The warm-up uses at most 16 of them (8 when this is 0). | 0 = one per CPU core (measured on napster-ai, Xeon E5-2699 v4, UD-IQ3_XXS, 205 tokens one at a time: 22 threads 10.0 tokens/s, all 44 hardware threads 6.8) |
 | `--devices 0,1,2` | CUDA device numbers, in layer order. Use `gpu` instead: it sets which cards CUDA shows the engine and in which order, and these numbers would count among those. | Every visible device |
 | `--split w,w,w` | Each device's share of the layers. The config's `split` key gives the same. | Each card's free VRAM at start |
@@ -454,8 +455,9 @@ changed in the file only. A change is used from the next start.
 
 The context (`--ctx`) is the longest conversation the engine takes: the chat, files and tool output together. Each
 token of it takes 12.4 KB of VRAM in the attention (MLA) cache: a 512-wide f16 latent in each of the 11 MLA layers
-(11 KB) and their indexer's pooled keys, one 128-wide fp32 key per 4 tokens in each layer (1.4 KB). The engine
-reserves it at start, and the expert cache gets the VRAM that is left. Calculated:
+(11 KB) and their indexer's pooled keys, one 128-wide fp32 key per 4 tokens in each layer (1.4 KB); with `--mtp` the
+MTP layer is a twelfth (13.5 KB in all). The engine reserves it at start, and the expert cache gets the VRAM that is
+left. Calculated, without `--mtp`:
 
 | Context | Tokens | Attention cache in VRAM |
 | --- | --- | --- |
@@ -472,7 +474,8 @@ the chosen cards' VRAM; it keeps your choice. How much a smaller expert cache sl
 A long context also costs RAM when a conversation is parked (several clients taking turns,
 [below](#parking-and-several-clients)): about 0.15 GB for the KDA layers' state, plus about 12.4 KB per token (the
 11 KB latent and 1.4 KB of the indexer's pooled keys). Calculated: about 1.8 GB for a 128K-token conversation, about
-6.8 GB for 512K, about 13.4 GB for 1M. The KDA figure assumes a short-convolution width of 4, which is read from the
+6.8 GB for 512K, about 13.4 GB for 1M; with `--mtp`, which parks the MTP layer's cache too (13.5 KB per token), about
+2.0, 7.4 and 14.6 GB. The KDA figure assumes a short-convolution width of 4, which is read from the
 model's file; it is not checked on the real GGUF yet.
 
 To change the context of an installed model: `./setup.sh --setup --model <size> --context <tokens>`, or edit `--ctx` in

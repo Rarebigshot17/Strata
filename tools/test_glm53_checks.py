@@ -261,6 +261,11 @@ class Checks(unittest.TestCase):
             found = re.findall("^" + re.escape(line) + "$", out, re.M)
             self.assertEqual(len(found), len(GPU_MODELS), line + "\n" + out)
         self.assertEqual(out.count("check-prefill:"), 6 * len(GPU_MODELS), out)
+        # decoding with drafts runs every draft, which the default --mtp-min-prob 0.8 would not on the small models
+        gen = [ln for ln in self.calls("strata-glm") if " --check-generate " in ln]
+        self.assertEqual(len(gen), len(GPU_MODELS), gen)
+        for ln in gen:
+            self.assertIn(" --mtp-min-prob 0 ", ln)
         self.assertIn("parking: 6 turns, all PASS", out)
         self.assertNotIn("Traceback", out)
         # every model has the MTP block GLM-5.3-Flash has; v1-heads with its optional tensors

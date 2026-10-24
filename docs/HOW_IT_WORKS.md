@@ -48,11 +48,12 @@ The same in technical terms:
 - **Reading a prompt:** the prompt is read in chunks of 256 tokens (`--prefill-chunk`). Each expert that a chunk
   uses runs once on the GPU for all of the chunk's tokens. It comes from the expert cache when it is there.
   Otherwise it streams in from RAM through two buffers, so one expert copies in while the previous one computes.
-- **Guessing the next word (`--mtp`, off by default):** the model has one more layer, trained to guess the word
-  after the next one. With `--mtp` the engine runs each word together with that guess in one pass, keeps the guess
-  when it is the word picked next and takes it back when it is not, so the answers are the same word for word. On
-  napster-ai the guess is right about 9 times in 10, but a pass over two words needs the experts of both, and with
-  the expert cache live it came out 1.2% slower to 0.5% faster: it stays off ([GLM53_PORT.md](GLM53_PORT.md)).
+- **Guessing the next word (`--mtp`, in setup's speed settings):** the model has one more layer, trained to guess
+  the word after the next one. With `--mtp` the engine runs each word together with that guess in one pass, keeps
+  the guess when it is the word picked next and takes it back when it is not, so the answers are the same word for
+  word. A pass over two words needs the experts of both, so a guess runs only when the layer gives it a probability
+  of 0.8 or more (`--mtp-min-prob`). On napster-ai 96% of those guesses were right and answers came out 2.1% faster
+  ([GLM53_PORT.md](GLM53_PORT.md)).
 
 ## Long conversations
 

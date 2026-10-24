@@ -910,7 +910,8 @@ class Config(unittest.TestCase):
         # each prompt too)
         self.assertEqual(cfg["args"], ["-m", str(first), "--ctx", "131072", "--park-mib", "8192",
                                        "--expert-profile", str(data / "glm-ud-iq3_xxs.profile"),
-                                       "--pin-experts", "--prefill-chunk", "4096", "--kv-in-ram", "--prefill-spread"])
+                                       "--pin-experts", "--prefill-chunk", "4096", "--kv-in-ram", "--prefill-spread",
+                                       "--mtp"])
         self.assertEqual(cfg["cwd"], str(root))
         self.assertEqual(cfg["log"], str(root / "strata-glm-ud-iq3_xxs.log"))
         self.assertEqual(cfg["model_name"], "glm-5.3-flash")
@@ -969,28 +970,33 @@ class Config(unittest.TestCase):
         self.assertIn("few experts stay cached in VRAM", out)
         args = cfgs["strata-glm-ud-iq3_xxs.json"]["args"]
         self.assertEqual(args[args.index("--ctx") + 1], "1048576")
-        # with RAM to spare the attention cache's latent goes to RAM: 1.5 GB of VRAM at 1M, no warning
+        # with RAM to spare the attention cache's latent goes to RAM: 1.6 GB of VRAM at 1M with the MTP layer's
+        # pooled keys (1.5 GB without), no warning
         code, out, cfgs, _, _ = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start", "--context", "1048576"],
                                         smi=smi)
         self.assertEqual(code, 0, out)
         self.assertNotIn("few experts stay cached in VRAM", out)
-        self.assertIn("context: 1048576 tokens (1.5 GB of VRAM for the attention cache, 11.8 GB of locked RAM)", out)
+        self.assertIn("context: 1048576 tokens (1.6 GB of VRAM for the attention cache, 12.9 GB of locked RAM)", out)
+        self.assertAlmostEqual(setup.cache_vram_gb(1048576, True), 1.48, places=2)
+        self.assertAlmostEqual(setup.latent_ram_gb(1048576), 11.81, places=2)
 
     def test_speed_settings_where_the_size_fits_well(self):
-        # the owner's PC (188 GiB, three cards): all of them, and the context menu counts the latent in RAM
+        # the owner's PC (188 GiB, three cards): all of them, and the context menu counts the latent in RAM, the MTP
+        # layer's too (a twelfth MLA layer: 12 KB and 1.5 KB a token, against 11 KB and 1.4 KB)
         code, out, cfgs, _, _ = install(["--no-start", "--model", "UD-IQ3_XXS"])   # questions: stdin is empty
-        self.assertIn("takes 11 KB of locked RAM and 1.4 KB of VRAM", out)
-        self.assertIn("0.2 GB of VRAM,  1.5 GB of RAM", out)                       # 128K
+        self.assertIn("takes 12 KB of locked RAM and 1.5 KB of VRAM in the attention cache (calculated, the MTP "
+                      "layer's too)", out)
+        self.assertIn("0.2 GB of VRAM,  1.6 GB of RAM", out)                       # 128K
         code, out, cfgs, _, _ = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start", "--context", "524288"])
         self.assertEqual(code, 0, out)
         self.assertIn("speed settings: the experts locked in RAM, 4,096-token prompt chunks, the attention cache in "
-                      "RAM, every GPU on each prompt (--pin-experts --prefill-chunk 4096 --kv-in-ram --prefill-spread)",
-                      out)
+                      "RAM, every GPU on each prompt, drafts from the MTP layer (--pin-experts --prefill-chunk 4096 "
+                      "--kv-in-ram --prefill-spread --mtp)", out)
         self.assertEqual(setup.fast_args("UD-IQ3_XXS", OWNER_RAM, 3),
-                         ["--pin-experts", "--prefill-chunk", "4096", "--kv-in-ram", "--prefill-spread"])
+                         ["--pin-experts", "--prefill-chunk", "4096", "--kv-in-ram", "--prefill-spread", "--mtp"])
         # one card: no sharing of the prompt's experts
         self.assertEqual(setup.fast_args("UD-IQ3_XXS", OWNER_RAM, 1),
-                         ["--pin-experts", "--prefill-chunk", "4096", "--kv-in-ram"])
+                         ["--pin-experts", "--prefill-chunk", "4096", "--kv-in-ram", "--mtp"])
         smi = "0, NVIDIA GeForce RTX 3090, 24576, 8.6, 580.95.05\n"
         code, out, cfgs, _, _ = install(["--model", "UD-IQ3_XXS", "--yes", "--no-start"], smi=smi)
         self.assertEqual(code, 0, out)

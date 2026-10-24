@@ -115,9 +115,10 @@ builds), the answer was the code word exactly, and three 256-token summaries at 
   8,192), but the 1,971-token prompt read at 285.3 tokens/s against 322.6: during a prompt chunk 8,192 keeps less
   cache of its own. On a 64K-token prompt 8,192 is 5% faster (398.7 against 379.6 tokens/s, both lent). The live
   server keeps 4,096: the same decode, 13% faster on a 2K prompt, and less cache to fill again after each prompt.
-- **Drafts from the MTP layer (`--mtp`): built, exact, and no faster here.** GLM-5.3-Flash's MTP layer (block 45)
-  drafts the next token from the token just picked and the trunk's hidden state before it. The engine then runs the
-  token and its draft in one pass, whose two rows of logits are bitwise those of two passes (300 of 300 rows,
+- **Drafts from the MTP layer (`--mtp`): built, exact, 2.1% faster, and in setup's speed settings.** GLM-5.3-Flash's
+  MTP layer (block 45) drafts the next token from the token just picked and the trunk's hidden state before it. The
+  engine then runs the token and its draft in one pass, whose two rows of logits are bitwise those of two passes (300
+  of 300 rows,
   `--check-pairs`, `f30aea9`), and takes the draft when it is the token picked from the first row; otherwise it takes
   the draft back (the KDA state and conv windows as after the first token). Every token is picked once from the same
   logits as without drafts, so the replies are the same token for token (`--check-generate`, 3 prompts of 200 tokens,
@@ -133,9 +134,19 @@ builds), the answer was the code word exactly, and three 256-token summaries at 
   pass needs both tokens' experts: 13.8 a layer against 8, of them on the CPU 4.58 against 2.53, and the CPU's
   experts are most of a token's time. Through the server (`a0ca37b`, one run each, before the cache got a pass's two
   tokens of swaps): 17.10 tokens/s without drafts, 17.33 with them and 17.53 with `--mtp-min-prob 0.8` over (a)-(c),
-  against 17.33 for the live server's own run; 24 of 24 tool calls right with drafts. So `--mtp` stays off. With it
-  the expert cache is 0.53 GB smaller (30.71 against 31.24 GB: the layer's weights and pooled keys on the output
-  head's card, and the KDA layers' copies of a pair's state), and its experts take 2.6 GB of RAM in the page cache.
+  against 17.33 for the live server's own run; 24 of 24 tool calls right with drafts. So the cache now copies one
+  token's worth of experts in during a pass (`--max-swaps` a pass, not a token), and `--bench-generate 400
+  --bench-rounds 6` measured three ways (2026-10-24, the 3-bit file, the live flags; per prompt and round the gain of
+  the run with drafts over the run one token at a time, 18 pairs a way). At `--mtp-min-prob 0.8` drafts decoded 2.1%
+  faster (56.84 against 58.02 ms a token; mean gain +1.94%, 95% interval +0.41% to +3.47%; a pass 101.9 ms, 96.4% of
+  3,153 passes taken, 43.3% of the cache's lookups hit). With every draft run they decoded 1.2% slower (58.54 against
+  57.82; 88.2% of 3,818 drafts taken). With two tokens' worth of copies a pass, at 0.8, 0.9% faster (57.32 against
+  57.85; interval -0.37% to +2.12%; a pass 103.6 ms, 43.6% hit). The rule set before the runs was a mean gain of 1% or
+  more with the interval above zero. One way of three passed it; its interval corrected for the three (Bonferroni) is
+  +0.02% to +3.87%. So `--mtp` is in setup's speed settings, and 0.8 is `--mtp-min-prob`'s default. With it the
+  expert cache is 0.53 GB smaller (30.71 against 31.24 GB: the layer's weights and pooled keys on the output head's
+  card, and the KDA layers' copies of a pair's state), its experts take 2.6 GB of RAM in the page cache, and its
+  latent cache 1 KB a token (in locked RAM with `--kv-in-ram`).
 
 **Where a decoded token's time goes now** (the live settings: 4,096-token chunks, the buffers lent, 64 swaps, graphs;
 prompts (a)-(c) and 24 tool calls): about 61 ms, of which 41 ms are the CPU's experts (2.67 a layer of 9.1 MB each,
@@ -572,8 +583,9 @@ from the Strata folder.
    indexer (1.7 GB at 131,072, 13.3 GB at 1M, calculated), which the expert cache gives up.
    `./setup.sh --setup --context N` changes it later. The engine options are the run config's `"args"`: setup writes
    `-m`, `--ctx`, `--park-mib` and `--expert-profile` (the use counts, in the data folder `../Strata-GLM-data`), with
-   40 GiB or more of RAM beside the experts also `--pin-experts --prefill-chunk 4096 --kv-in-ram` (and
-   `--prefill-spread` with more than one GPU; the latent cache then takes 11 KB of RAM a token, not VRAM), and keeps
+   40 GiB or more of RAM beside the experts also `--pin-experts --prefill-chunk 4096 --kv-in-ram --mtp` (and
+   `--prefill-spread` with more than one GPU; the latent cache then takes 12 KB of RAM a token with the MTP layer's,
+   not VRAM), and keeps
    any other option you add there (`--vram-reserve`, `--max-swaps`, ...) when it runs again. To start with
    step 7's counts, copy `~/glm53-ref/profile.bin` over `../Strata-GLM-data/glm-ud-iq3_xxs.profile` before the
    first start.

@@ -700,11 +700,12 @@ are the start of the new prompt. To keep each client's conversation anyway, the 
 
 How big these are, calculated from the engine's snapshot code with the model's shapes (not measured): a parked
 conversation is about 0.15 GB of KDA state plus about 12.4 KB per token (the MLA cache's 512-wide f16 latent in 11
-layers, 11 KB, and the indexer's pooled keys, 1.4 KB); a checkpoint is about 0.15 GB. So `--park-mib 8192` holds one
-conversation of up to roughly 660,000 tokens, or several shorter ones. A conversation that does not fit is not parked
+layers, 11 KB, and the indexer's pooled keys, 1.4 KB), 13.5 KB with `--mtp` (the MTP layer's too); a checkpoint is
+about 0.15 GB. So `--park-mib 8192` holds one conversation of up to roughly 660,000 tokens (610,000 with `--mtp`), or
+several shorter ones. A conversation that does not fit is not parked
 (the engine log says `... more than --park-mib; not kept`): when another client takes a turn, it is lost with its
 checkpoints, and its next request reads its prompt again from the start. A 1,048,576-token conversation needs
-`--park-mib` of about 13,000 or more to be parked, and that RAM must be free beside the experts.
+`--park-mib` of about 13,000 (14,000 with `--mtp`) or more to be parked, and that RAM must be free beside the experts.
 
 On the CPU reference engine this does not change the answers: `tools/glm53_park_check.py` checks each resumed reply
 against a fresh engine's, token for token (with small random models). On the GPU engine, chunked prompts and the

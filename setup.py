@@ -92,18 +92,22 @@ PARK_MIB_TIGHT = 4096    # with less than RAM_LEFT_GIB beside the experts (the 3
 # The settings measured on the owner's PC (napster-ai, 2026-10-24, docs/GLM53_PORT.md "Speed on napster-ai"): the
 # experts locked in RAM (--pin-experts), 4,096-token prompt chunks, the attention cache's latent in locked RAM
 # (--kv-in-ram) and, with more than one GPU, every card on each prompt chunk (--prefill-spread): decoding 17.6 to 17.7
-# tokens/s and a 64K-token prompt read at 380 tokens/s there. Only where the size fits well (RAM_LEFT_GIB beside its
-# experts): locked memory cannot be paged out.
+# tokens/s and a 64K-token prompt read at 380 tokens/s there. And drafts from the model's MTP layer (--mtp, at the
+# engine's --mtp-min-prob 0.8): 2.1% faster decoding there (the 3-bit file, 3 prompts of 400 tokens, 6 rounds; 95%
+# interval of the mean gain +0.4% to +3.5%); its experts take 2.6 GB of RAM and its latent cache 1 KB a token. Only
+# where the size fits well (RAM_LEFT_GIB beside its experts): locked memory cannot be paged out.
 FAST_CHUNK = 4096
-FAST_FLAGS = ("--pin-experts", "--prefill-chunk", "--kv-in-ram", "--prefill-spread")
+FAST_FLAGS = ("--pin-experts", "--prefill-chunk", "--kv-in-ram", "--prefill-spread", "--mtp")
 CONTEXTS = [32768, 131072, 262144, 524288, 1048576]
 MAX_CONTEXT = 1048576    # GLM-5.3-Flash's trained context
 # The attention cache in VRAM, per token of context (calculated from the engine's buffers, src/glm/engine.cu): the
 # MLA cache, a 512-wide f16 latent in each of the 11 MLA layers, and each layer's indexer, one pooled 128-wide fp32
-# key per INDEXER_KPOOL tokens (attention.indexer.kpool, 4 in the real file).  11 KB + 1.4 KB.
-MLA_BYTES_PER_TOKEN = 11 * 512 * 2
+# key per INDEXER_KPOOL tokens (attention.indexer.kpool, 4 in the real file).  11 KB + 1.4 KB.  With --mtp the MTP
+# layer is one more MLA layer, with its own latent and indexer.
+MLA_LAYERS = 11
+MLA_BYTES_PER_TOKEN = MLA_LAYERS * 512 * 2
 INDEXER_KPOOL = 4
-INDEXER_BYTES_PER_TOKEN = 11 * 128 * 4 // INDEXER_KPOOL
+INDEXER_BYTES_PER_TOKEN = MLA_LAYERS * 128 * 4 // INDEXER_KPOOL
 VRAM_BYTES_PER_TOKEN = MLA_BYTES_PER_TOKEN + INDEXER_BYTES_PER_TOKEN
 
 
@@ -444,14 +448,25 @@ def fast_args(model: str, ram: float, cards: int) -> list[str]:
     than one card), none where it does not."""
     if model_fit(model, ram) != "fits":
         return []
-    return ["--pin-experts", "--prefill-chunk", str(FAST_CHUNK), "--kv-in-ram"] + (["--prefill-spread"] if cards > 1
-                                                                                    else [])
+    return (["--pin-experts", "--prefill-chunk", str(FAST_CHUNK), "--kv-in-ram"]
+            + (["--prefill-spread"] if cards > 1 else []) + ["--mtp"])
 
 
-def cache_vram_gb(ctx: int, latent_in_ram: bool) -> float:
+def mla_share(mtp: bool) -> float:
+    """The attention cache with --mtp over the trunk's alone: the MTP layer is a twelfth MLA layer."""
+    return (MLA_LAYERS + 1) / MLA_LAYERS if mtp else 1.0
+
+
+def cache_vram_gb(ctx: int, latent_in_ram: bool, mtp: bool = False) -> float:
     """The attention cache's VRAM (GB) for `ctx` tokens: all of it (mla_gb), or with --kv-in-ram only the indexer's
-    pooled keys (the latent is in RAM; its first few thousand rows in VRAM too, 23 MB)."""
-    return ctx * INDEXER_BYTES_PER_TOKEN / 1e9 if latent_in_ram else mla_gb(ctx)
+    pooled keys (the latent is in RAM; its first few thousand rows in VRAM too, 23 MB); with --mtp the MTP layer's
+    too."""
+    return (ctx * INDEXER_BYTES_PER_TOKEN / 1e9 if latent_in_ram else mla_gb(ctx)) * mla_share(mtp)
+
+
+def latent_ram_gb(ctx: int, mtp: bool = False) -> float:
+    """With --kv-in-ram: the latent cache's locked RAM (GB) for `ctx` tokens, with --mtp the MTP layer's too."""
+    return ctx * MLA_BYTES_PER_TOKEN * mla_share(mtp) / 1e9
 
 
 def recommended_context(vram_gb: float) -> int:
@@ -1871,7 +1886,7 @@ def main() -> int:
              "while it runs")
     ok(f"size: {model} ({d['bits']})")
     fast = fast_args(model, ram, len(sel))
-    in_ram = "--kv-in-ram" in fast
+    in_ram, mtp = "--kv-in-ram" in fast, "--mtp" in fast
     rec_ctx = recommended_context(vram)
     if a.context:
         ctx = a.context
@@ -1879,27 +1894,29 @@ def main() -> int:
         say()
         say("  Context = the longest conversation the model can hold (your chat, files, tool output). Each token of it")
         if in_ram:
-            say(f"  takes {MLA_BYTES_PER_TOKEN / 1024:.0f} KB of locked RAM and {INDEXER_BYTES_PER_TOKEN / 1024:.1f} "
-                "KB of VRAM in the attention cache (calculated); the VRAM the expert cache gives up:")
+            say(f"  takes {MLA_BYTES_PER_TOKEN * mla_share(mtp) / 1024:.0f} KB of locked RAM and "
+                f"{INDEXER_BYTES_PER_TOKEN * mla_share(mtp) / 1024:.1f} KB of VRAM in the attention cache (calculated"
+                + (", the MTP layer's too" if mtp else "") + "); the VRAM the expert cache gives up:")
         else:
             say(f"  takes {kb_per_token()} of VRAM in the attention cache (calculated), which the expert cache gives "
                 "up:")
         for i, c in enumerate(CONTEXTS, 1):
-            say(f"  {i}) {context_label(c):>4s} tokens  {cache_vram_gb(c, in_ram):4.1f} GB of VRAM"
-                + (f", {c * MLA_BYTES_PER_TOKEN / 1e9:4.1f} GB of RAM" if in_ram else "")
+            say(f"  {i}) {context_label(c):>4s} tokens  {cache_vram_gb(c, in_ram, mtp):4.1f} GB of VRAM"
+                + (f", {latent_ram_gb(c, mtp):4.1f} GB of RAM" if in_ram else "")
                 + ("   (recommended for your GPUs)" if c == rec_ctx else "")
                 + ("   (the model's whole context)" if c == MAX_CONTEXT else ""))
         ctx = CONTEXTS[int(ask("Context?", [str(i) for i in range(1, len(CONTEXTS) + 1)],
                                str(CONTEXTS.index(rec_ctx) + 1), a.yes)) - 1]
-    if cache_vram_gb(ctx, in_ram) > 0.5 * vram:
-        warn(f"a {ctx}-token context takes {cache_vram_gb(ctx, in_ram):.1f} GB of the GPUs' {vram:.0f} GB for its "
+    if cache_vram_gb(ctx, in_ram, mtp) > 0.5 * vram:
+        warn(f"a {ctx}-token context takes {cache_vram_gb(ctx, in_ram, mtp):.1f} GB of the GPUs' {vram:.0f} GB for its "
              f"attention cache: few experts stay cached in VRAM, so answers are slower. Kept as you chose "
              f"({context_label(rec_ctx)} is the recommended one)")
-    ok(f"context: {ctx} tokens ({cache_vram_gb(ctx, in_ram):.1f} GB of VRAM for the attention cache"
-       + (f", {ctx * MLA_BYTES_PER_TOKEN / 1e9:.1f} GB of locked RAM)" if in_ram else ")"))
+    ok(f"context: {ctx} tokens ({cache_vram_gb(ctx, in_ram, mtp):.1f} GB of VRAM for the attention cache"
+       + (f", {latent_ram_gb(ctx, mtp):.1f} GB of locked RAM)" if in_ram else ")"))
     if fast:
         ok("speed settings: the experts locked in RAM, 4,096-token prompt chunks, the attention cache in RAM"
            + (", every GPU on each prompt" if "--prefill-spread" in fast else "")
+           + (", drafts from the MTP layer" if mtp else "")
            + f" ({' '.join(fast)})")
     else:
         say(f"  speed settings left off (--pin-experts and the rest): {model} leaves ~{ram_left(model, ram):.0f} GiB "

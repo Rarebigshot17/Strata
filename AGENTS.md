@@ -6,7 +6,7 @@ the CPU reference `strata-glm-ref`), a Python server with OpenAI-, Anthropic- an
 web app (`serve/`), and an installer (`setup.py`, started by `./setup.sh`). It is a fork of
 [Niko1221/Strata](https://github.com/Niko1221/Strata), which ran Qwen3.8-Flash-Next. The Qwen engine, AMD (HIP),
 the Windows launchers, vision, batching, replicas, the speed projection and slot save/restore are gone, and so is the
-Qwen engine's MTP drafting (the GLM engine has its own, `--mtp`, off by default).
+Qwen engine's MTP drafting (the GLM engine has its own, `--mtp`, in setup's speed settings).
 
 **The real model has run** on napster-ai (2026-10-22/23: the 3-bit file on a Xeon E5-2699 v4, 184 GiB of RAM, an
 RTX 3090 Ti 24 GB + RTX 3080 Ti 12 GB + RTX 3080 10 GB, sm_86). It answers correctly through the server, predicts

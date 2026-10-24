@@ -377,7 +377,11 @@ void ExpertCache::maintain(int tokens) {
     }
     tokens = std::max(tokens, 1);
     const float decay = (float) std::pow(opt_.decay, tokens);
-    const int cap = opt_.max_swaps_per_token * tokens;   // a pass over a token and its draft: two tokens' worth
+    // the cap is one token's worth per pass, also over a token and its draft: the copies read the RAM the pass's CPU
+    // experts read. On napster-ai (2026-10-24, the 3-bit file, --bench-generate 400 over 6 rounds, --mtp-min-prob 0.8)
+    // a pass took 101.9 ms with this cap against 103.6 ms with two tokens' worth, and drafts decoded 2.1% faster than
+    // one token at a time against 0.9%; 43.3% of the lookups hit against 43.6%
+    const int cap = opt_.max_swaps_per_token;
     for (auto& row : score_)
         for (auto& v : row) v *= decay;
     // filling a free slot costs one copy and displaces nothing, so the cache fills four times faster than it swaps

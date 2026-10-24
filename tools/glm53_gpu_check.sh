@@ -215,9 +215,10 @@ for m in glm5-next-moe v1 v1-bare q4_0 q8_0 v1-heads; do
         fi
     done
     # 24 tokens decoded greedily after the 40-token prompt, with the MTP block's drafts (each taken or taken back) and
-    # one at a time: the same tokens
-    if "$SB/strata-glm" -m "$W/$m.gguf" --tokens-file "$W/ids.txt" --mtp --check-generate 24 --prefill-chunk 16 \
-            > "$W/gen_$m.txt" 2>&1; then
+    # one at a time: the same tokens. Every draft runs (--mtp-min-prob 0): the small random models give their drafts
+    # low probabilities, so the default 0.8 would run their tokens alone
+    if "$SB/strata-glm" -m "$W/$m.gguf" --tokens-file "$W/ids.txt" --mtp --mtp-min-prob 0 --check-generate 24 \
+            --prefill-chunk 16 > "$W/gen_$m.txt" 2>&1; then
         echo "decode with drafts: $(grep -E "^check-generate" "$W/gen_$m.txt")"
     else
         echo "decode with drafts FAILED:"; grep -E "^check-|^token|strata-glm:|CUDA" "$W/gen_$m.txt" | head -4; fail=1
