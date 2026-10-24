@@ -115,17 +115,27 @@ builds), the answer was the code word exactly, and three 256-token summaries at 
   8,192), but the 1,971-token prompt read at 285.3 tokens/s against 322.6: during a prompt chunk 8,192 keeps less
   cache of its own. On a 64K-token prompt 8,192 is 5% faster (398.7 against 379.6 tokens/s, both lent). The live
   server keeps 4,096: the same decode, 13% faster on a 2K prompt, and less cache to fill again after each prompt.
-- **MTP drafting: measured, not built.** GLM-5.3-Flash has one MTP layer (block 45), which this engine does not load.
-  llama.cpp (`a0e6dc7`, `--spec-type draft-mtp`, experts on the CPU) drafting one token on the same file accepted 89%,
-  85% and 96% of the drafts on prompts (a), (b), (c) at temperature 0, and 83%, 76% and 95% at temperature 1.0 with
-  top_p 0.95 (about 210 drafts each); two and three drafted tokens on (a) gave 2.62 and 2.87 tokens per pass. Here a
-  pass over a token and its draft reads the experts of both: two tokens in a row route 13.84 experts per layer
-  together against 8 for one, and 4.81 of them miss the cache against 2.67 (the live settings). Calculated from the
-  live timing (41 ms of CPU experts, 14 ms on the GPUs, 6 ms of host work a token): a pass would take about 102 ms
-  with the MTP layer, against 61 ms for one token, so it pays above about 68% acceptance, and at the acceptance
-  measured would decode about 6% to 18% faster. Building it means a decode path of two tokens at once that can take
-  back the second (the KDA state, the latent cache and the indexer's pools), the MTP layer itself, and checking the
-  draft in the serve loop.
+- **Drafts from the MTP layer (`--mtp`): built, exact, and no faster here.** GLM-5.3-Flash's MTP layer (block 45)
+  drafts the next token from the token just picked and the trunk's hidden state before it. The engine then runs the
+  token and its draft in one pass, whose two rows of logits are bitwise those of two passes (300 of 300 rows,
+  `--check-pairs`, `f30aea9`), and takes the draft when it is the token picked from the first row; otherwise it takes
+  the draft back (the KDA state and conv windows as after the first token). Every token is picked once from the same
+  logits as without drafts, so the replies are the same token for token (`--check-generate`, 3 prompts of 200 tokens,
+  `bac1887`). On prompts (a), (b), (c) 90.2% of the drafts were the next token (89.5%, 85.2%, 96.1%; llama.cpp's
+  `--spec-type draft-mtp` 89.1%, 85.1%, 96.1% on the same file). With the expert cache kept as it was after a first
+  run, a draft took 3.9 ms and a pass over a token and its draft 97.0 ms against 57.8 ms for one token: 54.33 against
+  57.77 ms a token, 6.3% more tokens a second. With the cache live, as a server runs it (`--bench-generate 400
+  --bench-rounds 4`, `f50c2f3`, the live flags, each prompt both ways in each round), a pass took 104.5 ms: the cache
+  copies two tokens' worth of experts in during it (about 50 a token), and those copies read the same RAM as the
+  CPU's experts. Drafts then decoded 1.2% slower (59.06 against 58.32 ms a token, 88.1% of 2,547 drafts taken), and
+  with `--mtp-min-prob 0.8`, which runs a draft the layer gives below 0.8 as its token alone, 0.5% faster (57.84
+  against 58.14, 96.4% of 2,102 passes taken); the same prompt varied by up to 2 ms a token from round to round. A
+  pass needs both tokens' experts: 13.8 a layer against 8, of them on the CPU 4.58 against 2.53, and the CPU's
+  experts are most of a token's time. Through the server (`a0ca37b`, one run each, before the cache got a pass's two
+  tokens of swaps): 17.10 tokens/s without drafts, 17.33 with them and 17.53 with `--mtp-min-prob 0.8` over (a)-(c),
+  against 17.33 for the live server's own run; 24 of 24 tool calls right with drafts. So `--mtp` stays off. With it
+  the expert cache is 0.53 GB smaller (30.71 against 31.24 GB: the layer's weights and pooled keys on the output
+  head's card, and the KDA layers' copies of a pair's state), and its experts take 2.6 GB of RAM in the page cache.
 
 **Where a decoded token's time goes now** (the live settings: 4,096-token chunks, the buffers lent, 64 swaps, graphs;
 prompts (a)-(c) and 24 tool calls): about 61 ms, of which 41 ms are the CPU's experts (2.67 a layer of 9.1 MB each,

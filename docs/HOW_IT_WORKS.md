@@ -48,6 +48,11 @@ The same in technical terms:
 - **Reading a prompt:** the prompt is read in chunks of 256 tokens (`--prefill-chunk`). Each expert that a chunk
   uses runs once on the GPU for all of the chunk's tokens. It comes from the expert cache when it is there.
   Otherwise it streams in from RAM through two buffers, so one expert copies in while the previous one computes.
+- **Guessing the next word (`--mtp`, off by default):** the model has one more layer, trained to guess the word
+  after the next one. With `--mtp` the engine runs each word together with that guess in one pass, keeps the guess
+  when it is the word picked next and takes it back when it is not, so the answers are the same word for word. On
+  napster-ai the guess is right about 9 times in 10, but a pass over two words needs the experts of both, and with
+  the expert cache live it came out 1.2% slower to 0.5% faster: it stays off ([GLM53_PORT.md](GLM53_PORT.md)).
 
 ## Long conversations
 
@@ -101,6 +106,8 @@ What has run on napster-ai's three cards (2026-10-20), on the same small random 
   (`tools/glm53_gpu_check.sh`): its decode and its prompt path matched both, within the rounding of the GPU's 8-bit
   activations that llama.cpp's own GPU shows too, on one card and with the layers split over two of the three.
 - **Conversation parking** on the GPU engine, with the layers split over two cards: passed.
+- **The MTP layer** (`--mtp`, 2026-10-24), on the same small models with one added: the CPU reference and the GPU
+  against llama.cpp's MTP head, and decoding with drafts against one token at a time (the same tokens): passed.
 
 The real 3-bit file on napster-ai (2026-10-22/23, after its RAM went to 184 GiB):
 
