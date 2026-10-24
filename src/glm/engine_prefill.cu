@@ -26,6 +26,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -462,6 +463,7 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
     std::snprintf(rname, sizeof rname, "chunk %lld+%d", (long long) t0, T);
     NvtxRange r_chunk(rname);
     I.cache->drain();   // the decode's queued expert copies land before this chunk claims free slots
+    std::vector<std::array<int64_t, 3>> claimed;        // STRATA_GLM_VERIFY: (layer, slot, expert) filled here
 
     // ---- embeddings, dequantized on the host, copied into every stream
     {
@@ -1039,6 +1041,7 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
                         // stream it in: into a free cache slot when there is one, else a staging buffer
                         slot = I.cache->claim_free(il, (int) e);
                         staged = slot < 0;
+                        if (!staged && I.cache->verifying()) claimed.push_back({il, (int64_t) slot, e});
                         base = staged ? d.dstage[b] : I.cache->slot_ptr(il, slot);
                         const Tensor g = lw.gate_exps.slice2(e), u = lw.up_exps.slice2(e), dn = lw.down_exps.slice2(e);
                         const size_t db = es.down.row_bytes * (size_t) es.down.n_out;
@@ -1111,6 +1114,7 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
             ok(cudaStreamSynchronize(dc.stream), "sync");
         }
     }
+    for (const auto& cl : claimed) I.cache->check_slot(cl[0], (int) cl[1], (int) cl[2], "the prompt path's copy");
     I.cache->maintain();
     pos_ += T;
     if (I.prof_on && --I.prof_left == 0) {

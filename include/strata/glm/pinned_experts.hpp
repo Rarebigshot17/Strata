@@ -19,9 +19,14 @@
 
 #include "strata/glm/model.hpp"
 
+#include <atomic>
+#include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -42,7 +47,22 @@ public:
     const std::string& why() const { return why_; } ///< why the first of those was left, if any
 
 private:
+    struct Watched {
+        const uint8_t* p;
+        size_t n;
+        int64_t il;
+        uint64_t hash;
+    };
+    void watch();                                    ///< STRATA_GLM_VERIFY: rehashes the copies every minute
+
     std::vector<std::pair<void*, size_t>> blocks_;   ///< each moved layer's block and its length
+    // STRATA_GLM_VERIFY=1: the copies are compared with the file once they are locked, then hashed, and a thread
+    // hashes them again every minute and says which pieces changed
+    std::vector<Watched> watched_;
+    std::thread watcher_;
+    std::mutex wmu_;
+    std::condition_variable wcv_;
+    bool wstop_ = false;
     size_t bytes_ = 0;
     int layers_ = 0, left_ = 0;
     std::string why_;

@@ -8,6 +8,8 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <string>
@@ -19,6 +21,18 @@
 namespace strata::glm {
 
 namespace {
+uint64_t hash_bytes(const uint8_t* p, size_t n) {
+    uint64_t h = 1469598103934665603ULL;
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        uint64_t w;
+        std::memcpy(&w, p + i, 8);
+        h = (h ^ w) * 1099511628211ULL;
+    }
+    for (; i < n; ++i) h = (h ^ p[i]) * 1099511628211ULL;
+    return h;
+}
+
 // MADV_PAGEOUT (Linux 5.4): reclaim the range now; clean file pages are dropped. Older kernels say EINVAL, then
 // MADV_COLD (also 5.4) or nothing.
 #ifdef MADV_PAGEOUT
@@ -167,6 +181,44 @@ PinnedExperts::PinnedExperts(Model& model, int threads, size_t keep_free,
         ++layers_;
         model.move_experts(mv.il, mv.dst[0], mv.dst[1], mv.dst[2]);
     }
+
+    if (std::getenv("STRATA_GLM_VERIFY") && std::atoi(std::getenv("STRATA_GLM_VERIFY")) > 0) {
+        // the locked copies against the file (read again from disk where its pages were let go), then their hashes
+        struct Check {
+            const uint8_t* src;
+            const uint8_t* dst;
+            size_t n;
+            int64_t il;
+        };
+        std::vector<Check> check;
+        for (const Move& mv : moves) {
+            if (model.layer(mv.il).gate_exps.data != mv.dst[0]) continue;     // left on the file
+            const uint8_t* lo = static_cast<const uint8_t*>(mv.block);
+            for (const Piece& pc : pieces)
+                if (pc.dst >= lo && pc.dst < lo + mv.size) check.push_back({pc.src, pc.dst, pc.n, mv.il});
+        }
+        std::atomic<size_t> ci{0}, bad{0};
+        auto cmp = [&] {
+            for (;;) {
+                const size_t i = ci.fetch_add(1);
+                if (i >= check.size()) return;
+                const Check& k = check[i];
+                if (std::memcmp(k.dst, k.src, k.n) == 0) continue;
+                size_t j = 0;
+                while (j < k.n && k.dst[j] == k.src[j]) ++j;
+                if (bad.fetch_add(1) < 20)
+                    std::fprintf(stderr, "expert check: layer %lld: the locked copy differs from the file at byte "
+                                         "%zu of a %zu-byte piece\n", (long long) k.il, j, k.n);
+            }
+        };
+        pool.clear();
+        for (int t = 0; t < std::max(1, threads); ++t) pool.emplace_back(cmp);
+        for (auto& th : pool) th.join();
+        std::fprintf(stderr, "expert check: %zu pieces of the locked experts compared with the file, %zu differ\n",
+                     check.size(), bad.load());
+        for (const Check& k : check) watched_.push_back({k.dst, k.n, k.il, hash_bytes(k.dst, k.n)});
+        watcher_ = std::thread([this] { watch(); });
+    }
     // the mapping's pages of the moved experts are not read again: let them go (they stay in the page cache, which
     // the kernel takes back when it needs the memory)
     for (const Piece& s : sources) {
@@ -176,7 +228,34 @@ PinnedExperts::PinnedExperts(Model& model, int threads, size_t keep_free,
     }
 }
 
+void PinnedExperts::watch() {
+    for (;;) {
+        {
+            std::unique_lock<std::mutex> lk(wmu_);
+            if (wcv_.wait_for(lk, std::chrono::seconds(60), [&] { return wstop_; })) return;
+        }
+        size_t changed = 0;
+        for (Watched& pc : watched_) {
+            const uint64_t h = hash_bytes(pc.p, pc.n);
+            if (h != pc.hash && changed++ < 20)
+                std::fprintf(stderr, "expert check: layer %lld: a %zu-byte piece of the locked experts changed\n",
+                             (long long) pc.il, pc.n);
+            pc.hash = h;
+        }
+        std::fprintf(stderr, "expert check: the locked experts hashed again, %zu of %zu pieces changed\n", changed,
+                     watched_.size());
+    }
+}
+
 PinnedExperts::~PinnedExperts() {
+    if (watcher_.joinable()) {
+        {
+            std::lock_guard<std::mutex> lk(wmu_);
+            wstop_ = true;
+        }
+        wcv_.notify_all();
+        watcher_.join();
+    }
     for (const auto& [p, n] : blocks_) {
         cudaHostUnregister(p);
         munmap(p, n);

@@ -80,6 +80,10 @@ public:
     /// Writes the scores to the profile path (no-op without one).
     void save_profile() const;
 
+    /// STRATA_GLM_VERIFY: the bytes in `slot` of layer `il` against expert `e` in RAM; prints the first difference.
+    bool check_slot(int64_t il, int slot, int e, const char* what) const;
+    bool verifying() const { return verify_; }
+
     int64_t hits() const { return hits_; }
     int64_t lookups() const { return lookups_; }
     std::string summary() const;
@@ -102,6 +106,8 @@ private:
     std::vector<std::vector<float>> score_;           ///< [layer][expert]
     std::vector<std::vector<int32_t>> missed_;        ///< this token's misses per layer
     int64_t hits_ = 0, lookups_ = 0, tick_ = 0;
+    bool verify_ = false;                             ///< STRATA_GLM_VERIFY=1: every copy and, every 512 tokens,
+                                                      ///< every cached slot checked against RAM
     bool loaded_profile_ = false;
     // the copy thread: copies queued by maintain(), done ones handed back; all under mu_
     std::thread copier_;

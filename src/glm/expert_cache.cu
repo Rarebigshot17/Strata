@@ -6,6 +6,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -36,6 +37,7 @@ gpu::DevMatrix shape_of(const Tensor& t) {
 
 ExpertCache::ExpertCache(const Model& model, const ExpertCacheOptions& opt) : m_(model), opt_(opt) {
     const Config& c = m_.config();
+    verify_ = std::getenv("STRATA_GLM_VERIFY") && std::atoi(std::getenv("STRATA_GLM_VERIFY")) > 0;
     L_.resize((size_t) c.n_layer);
     score_.assign((size_t) c.n_layer, std::vector<float>((size_t) c.n_expert, 0.0f));
     missed_.resize((size_t) c.n_layer);
@@ -136,6 +138,36 @@ void ExpertCache::load(int64_t il, int e, int slot) {
     s.slot_of[(size_t) e] = slot;
 }
 
+bool ExpertCache::check_slot(int64_t il, int slot, int e, const char* what) const {
+    const ExpertSlots& s = L_[(size_t) il];
+    const LayerWeights& w = m_.layer(il);
+    std::vector<uint8_t> got(s.blob);
+    ok(cudaSetDevice(s.dev), "cudaSetDevice");
+    ok(cudaMemcpy(got.data(), s.d + (size_t) slot * s.blob, s.blob, cudaMemcpyDeviceToHost), "slot check");
+    const Tensor g = w.gate_exps.slice2(e), u = w.up_exps.slice2(e), d = w.down_exps.slice2(e);
+    const struct {
+        const char* name;
+        const void* src;
+        size_t off, n;
+    } parts[3] = {{"gate", g.data, 0, s.up_off},
+                  {"up", u.data, s.up_off, s.down_off - s.up_off},
+                  {"down", d.data, s.down_off, s.down.row_bytes * (size_t) s.down.n_out}};
+    for (const auto& pt : parts) {
+        const uint8_t* a = got.data() + pt.off;
+        const uint8_t* b = static_cast<const uint8_t*>(pt.src);
+        if (std::memcmp(a, b, pt.n) == 0) continue;
+        size_t i = 0;
+        while (i < pt.n && a[i] == b[i]) ++i;
+        size_t bad = 0;
+        for (size_t j = i; j < pt.n; ++j) bad += a[j] != b[j];
+        std::fprintf(stderr, "expert check: %s: layer %lld expert %d slot %d on GPU %d: its %s differs from RAM at "
+                             "byte %zu of %zu (%zu bytes differ)\n", what, (long long) il, e, slot, s.dev, pt.name,
+                     i, pt.n, bad);
+        return false;
+    }
+    return true;
+}
+
 void ExpertCache::copier() {
     std::vector<cudaStream_t> streams;   // per device, made here
     for (;;) {
@@ -157,6 +189,7 @@ void ExpertCache::copier() {
                 ok(cudaStreamCreateWithFlags(&streams[(size_t) dev], cudaStreamNonBlocking), "cudaStreamCreate");
             copy_expert(job.il, job.e, job.slot, streams[(size_t) dev]);
             copied = true;
+            if (verify_) check_slot(job.il, job.slot, job.e, "a swap's copy");
         } catch (const std::exception& ex) {
             std::fprintf(stderr, "expert cache: copying expert %d of layer %lld failed (%s); its slot stays empty\n",
                          job.e, (long long) job.il, ex.what());
@@ -246,6 +279,22 @@ void ExpertCache::record(int64_t il, const int32_t* ids, int k) {
 void ExpertCache::maintain() {
     apply_done();
     const Config& c = m_.config();
+    if (verify_ && tick_ % 512 == 0) {
+        // every cached slot against RAM (the slots being copied into are skipped)
+        int64_t n = 0, bad = 0;
+        for (int64_t il = 0; il < c.n_layer; ++il) {
+            const ExpertSlots& s = L_[(size_t) il];
+            for (int i = 0; i < s.n_slots; ++i) {
+                const int ex = s.expert_in[(size_t) i];
+                if (ex < 0) continue;
+                ++n;
+                if (!check_slot(il, i, ex, "the cache") && ++bad >= 20) break;
+            }
+            if (bad >= 20) break;
+        }
+        std::fprintf(stderr, "expert check: token %lld: %lld cached slots checked, %lld differ from RAM%s\n",
+                     (long long) tick_, (long long) n, (long long) bad, bad >= 20 ? " (stopped at 20)" : "");
+    }
     for (auto& row : score_)
         for (auto& v : row) v *= (float) opt_.decay;
     // filling a free slot costs one copy and displaces nothing, so the cache fills four times faster than it swaps
