@@ -280,6 +280,12 @@ void GpuEngine::setup_prefill() {
         d.d_idx = dalloc<int32_t>((size_t) (T * KU), b);
         d.d_slot = dalloc<int32_t>((size_t) (T * KU), b);
         d.sel_rows = dalloc<int32_t>((size_t) (T * MS), b);
+        // what only a prompt chunk reads or writes (measure_links below uses the arena once, before the cache)
+        for (const auto& [p, n] : {std::pair<void*, size_t>{d.pR, (size_t) (T * hc * E) * f},
+                                   {d.pR2, (size_t) (T * hc * E) * f}, {d.pflat, (size_t) (Ta * hc * E) * f},
+                                   {d.pxn, (size_t) (T * E) * f}, {d.py, (size_t) (T * E) * f}, {d.arena, arena},
+                                   {d.sel_rows, (size_t) (T * MS) * sizeof(int32_t)}})
+            d.lendable.emplace_back(static_cast<uint8_t*>(p), n);
         d.n_sel = dalloc<int32_t>((size_t) T, b);
         if (I.opt.kv_in_ram) {
             // a batch of kKvBatch queries' cells, each read from host memory once (cell_union)
@@ -290,6 +296,7 @@ void GpuEngine::setup_prefill() {
             d.kv_local = dalloc<int32_t>((size_t) (kKvBatch * MS), b);
             d.kv_count = dalloc<int32_t>(1, b);
             d.kv_rows = dalloc<uint16_t>((size_t) (kKvBatch * MS * KL), b);
+            d.lendable.emplace_back(reinterpret_cast<uint8_t*>(d.kv_rows), (size_t) (kKvBatch * MS * KL) * 2);
             d.kv_tmp_bytes = gpu::cell_union_scratch(cells);
             d.kv_tmp = dalloc<uint8_t>(d.kv_tmp_bytes, b);
         }
@@ -337,9 +344,13 @@ void GpuEngine::setup_prefill() {
             ok(cudaGetDeviceProperties(&pr, d.id), "cudaGetDeviceProperties");
             d.sms = pr.multiProcessorCount;
             d.y_part = dalloc<float>((size_t) (T * E), b);
+            d.lendable.emplace_back(reinterpret_cast<uint8_t*>(d.y_part), (size_t) (T * E) * f);
             d.y_recv.assign(nd, nullptr);
             for (size_t k = 0; k < nd; ++k)
-                if (k != di) d.y_recv[k] = dalloc<float>((size_t) (T * E), b);
+                if (k != di) {
+                    d.y_recv[k] = dalloc<float>((size_t) (T * E), b);
+                    d.lendable.emplace_back(reinterpret_cast<uint8_t*>(d.y_recv[k]), (size_t) (T * E) * f);
+                }
             d.d_wrow = dalloc<float>((size_t) (T * KU), b);
             d.h_idx = halloc<int32_t>((size_t) (T * KU));
             d.h_wrow = halloc<float>((size_t) (T * KU));
@@ -391,6 +402,7 @@ void GpuEngine::setup_prefill() {
             const double part = all > 0 ? d.link_all / all : 1.0 / (double) I.ctx.size();
             d.pf_slots = (int) std::min<int64_t>(NE, (int64_t) std::ceil(part * (double) NE) + 8);
             d.pf_pool = dalloc<uint8_t>((size_t) d.pf_slots * I.blob_max, &d.bytes);
+            d.lendable.emplace_back(d.pf_pool, (size_t) d.pf_slots * I.blob_max);
             d.pf_ev.resize((size_t) d.pf_slots);
             for (auto& ev : d.pf_ev) ok(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming), "cudaEventCreate");
             ok(cudaEventCreateWithFlags(&d.ev_pf_free, cudaEventDisableTiming), "cudaEventCreate");
@@ -433,6 +445,27 @@ const std::vector<float>& GpuEngine::prefill(const int32_t* ids, int64_t n,
     const int64_t dense_until = !any_mla ? INT64_MAX
                                 : c.indexer_select_tail ? (c.indexer_top_k / c.indexer_kpool + 1) * c.indexer_kpool - 1
                                                         : 0;
+    // --lend-prompt-buffers: a prompt takes its buffers back from the expert cache (their experts leave it; the
+    // next decoded token gives them back empty, eval). A short one runs token by token instead, as decoding, and
+    // leaves the cache as it is: taking the buffers costs their experts, which are copied in again from RAM.
+    if (I.cache->has_loans() && !I.loans_out) {
+        if (n < I.opt.lend_min_prompt) {
+            ++I.short_prompts;
+            for (int64_t k = 0; k < n; ++k) {
+                eval(ids[k]);
+                if (progress && !progress(k + 1)) break;
+            }
+            return I.logits;
+        }
+        I.cache->reclaim_loans();
+        I.loans_out = true;
+        ++I.loan_reclaims;
+    }
+    struct InPrefill {
+        bool& on;
+        explicit InPrefill(bool& b) : on(b) { on = true; }
+        ~InPrefill() { on = false; }
+    } in_prefill(I.in_prefill);
     int64_t i = 0;
     while (i < n) {
         const int64_t room = std::min<int64_t>(I.opt.prefill_chunk, n - i);

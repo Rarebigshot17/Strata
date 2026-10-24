@@ -12,6 +12,10 @@
 // rather than stalling one. A swap's copy runs on a thread of its own while decoding goes on: the old expert leaves
 // its slot at once, and the new one takes it at the first token boundary after its copy is done. The scores can be saved and loaded (--expert-profile), so a restart begins with the
 // cache already filled.
+//
+// Lent slots (add_loans, --lend-prompt-buffers): between prompts the prompt path's large buffers hold more slots, laid
+// out one expert's blob after another in each buffer. A prompt takes them back (reclaim_loans: their experts leave the
+// cache) and the next decoded token gives them back empty (return_loans), to be filled again as misses come in.
 #pragma once
 
 #include "strata/glm/gpu_linear.hpp"
@@ -23,6 +27,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace strata::glm {
@@ -33,22 +38,28 @@ struct ExpertCacheOptions {
     double decay = 0.95;            ///< per-token decay of the use scores
     std::string profile;            ///< scores file: loaded at start, written by save_profile()
     bool disabled = false;
+    int max_slots = 0;              ///< at most this many slots of its own per layer, 0 = as many as fit (a test setting)
 };
 
 struct ExpertSlots {
     bool cacheable = false;
     int dev = -1;
-    int n_slots = 0;
+    int n_slots = 0;                         ///< n_own in `d`, then the lent ones
+    int n_own = 0;
     size_t blob = 0, up_off = 0, down_off = 0;
-    uint8_t* d = nullptr;                    ///< n_slots * blob device bytes
+    uint8_t* d = nullptr;                    ///< n_own * blob device bytes
+    std::vector<uint8_t*> loan;              ///< slot n_own + i at loan[i], in the prompt path's buffers
     std::vector<int32_t> slot_of;            ///< per expert: its slot, or -1
     std::vector<int32_t> expert_in;          ///< per slot: its expert, -1 when free, kLoading while it is copied
     gpu::DevMatrix gate, up, down;           ///< the shapes and kernels; `w` set per slot by matrices()
+
+    uint8_t* at(int slot) const { return slot < n_own ? d + (size_t) slot * blob : loan[(size_t) (slot - n_own)]; }
 };
 
 class ExpertCache {
 public:
     static constexpr int32_t kLoading = -2;   ///< expert_in of a slot whose copy is in flight
+    static constexpr int32_t kLent = -3;      ///< expert_in of a lent slot while the prompt path has its buffer
 
     ExpertCache(const Model& model, const ExpertCacheOptions& opt);
     ~ExpertCache();
@@ -56,6 +67,17 @@ public:
     /// Carves the slots of the MoE layers on `dev` out of what is free there (minus the reserve). `layers` are
     /// the layers that device runs. Returns the device bytes used.
     size_t allocate(int dev, const std::vector<int64_t>& layers);
+    /// More slots for the MoE layers in `layers` (on `dev`), in `chunks` (device buffers the prompt path uses only
+    /// while it runs a prompt): each holds as many experts' blobs as fit, shared out evenly over the layers. Call
+    /// after allocate and before warm_start. Returns the device bytes the slots cover.
+    size_t add_loans(int dev, const std::vector<int64_t>& layers,
+                     const std::vector<std::pair<uint8_t*, size_t>>& chunks);
+    bool has_loans() const { return lent_slots_ > 0; }
+    /// The prompt path takes its buffers back: the queued copies land, and the lent slots' experts leave the
+    /// cache (kLent until return_loans). No kernel may be reading them (the caller's streams are idle).
+    void reclaim_loans();
+    /// The buffers are the cache's again (the prompt path's work on them is done): the lent slots are free.
+    void return_loans();
     /// Fills the slots from the loaded profile (if any): the highest-scored experts of each layer.
     void warm_start();
 
@@ -68,7 +90,7 @@ public:
     /// A free slot of layer `il` for expert `e` (now mapped to it), or -1. The caller fills it (the prompt path
     /// copies the expert there while it streams it in).
     int claim_free(int64_t il, int e);
-    uint8_t* slot_ptr(int64_t il, int slot) const { return L_[(size_t) il].d + (size_t) slot * L_[(size_t) il].blob; }
+    uint8_t* slot_ptr(int64_t il, int slot) const { return L_[(size_t) il].at(slot); }
 
     /// Counts this token's routing of layer `il` (k experts).
     void record(int64_t il, const int32_t* ids, int k);
@@ -89,6 +111,9 @@ public:
     /// Copies queued by maintain(): into an occupied slot (a swap) and into a free one (a fill).
     int64_t swaps_queued() const { return swaps_queued_; }
     int64_t fills_queued() const { return fills_queued_; }
+    /// Lent slots (all layers), and the experts the prompt path's reclaims took out of them.
+    int64_t lent_slots() const { return lent_slots_; }
+    int64_t lent_dropped() const { return lent_dropped_; }
     std::string summary() const;
     int64_t total_slots() const;
     size_t total_bytes() const;
@@ -109,6 +134,7 @@ private:
     std::vector<std::vector<float>> score_;           ///< [layer][expert]
     std::vector<std::vector<int32_t>> missed_;        ///< this token's misses per layer
     int64_t hits_ = 0, lookups_ = 0, tick_ = 0, swaps_queued_ = 0, fills_queued_ = 0;
+    int64_t lent_slots_ = 0, lent_dropped_ = 0;
     bool verify_ = false;                             ///< STRATA_GLM_VERIFY=1: every copy and, every 512 tokens,
                                                       ///< every cached slot checked against RAM
     bool sync_swaps_ = false;                         ///< STRATA_GLM_SYNC_SWAPS=1: a token's swaps finish before

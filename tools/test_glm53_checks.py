@@ -85,6 +85,11 @@ STUBS = {
                      '  *" --decode-graphs "*) if [ "$FAKE_GRAPH_FAILS" = 1 ]; then\n'
                      '         echo "decode graphs: layer 1 runs without a graph (its capture failed: x)" >&2; fi\n'
                      '     echo "check-cpu: top-1 agreement 40/40: PASS";;\n'
+                     # FAKE_NO_LOANS: the buffers held no expert, so nothing was lent (and the prompt passed)
+                     '  *" --lend-prompt-buffers "*) echo "expert cache: 6 slots over 2 layers (0.00 GB)$(\n'
+                     '         [ "$FAKE_NO_LOANS" = 1 ] || echo "; 4 of them (0.00 GB) in the prompt path\'s buffers '
+                     'between prompts")" >&2\n'
+                     '     echo "check-prefill: top-1 agreement 5/5: PASS";;\n'
                      '  *" --pin-experts "*) echo "experts in page-locked RAM: 2 of 2 MoE layers, 0.1 GB" >&2\n'
                      '     echo "check-prefill: top-1 agreement 5/5: PASS";;\n'
                      '  *" --prefill "*) echo "check-prefill: top-1 agreement 5/5: PASS";;\n'
@@ -193,7 +198,7 @@ class Checks(unittest.TestCase):
         self.assertEqual(out.count("vs llama.cpp: rows 40"), len(GPU_MODELS), out)
         # each model's runs: decode, the prompt path, it 6 rows at a time, both with the latent cache in RAM, and
         # the prompt path with the experts page-locked, on one card and on every card, decoding with the GPUs
-        # helping the CPU, and decoding with CUDA graphs
+        # helping the CPU, decoding with CUDA graphs, and the prompt buffers lent to the expert cache
         for line in ("prefill: check-prefill: top-1 agreement 5/5: PASS",
                      "prefill, 6 rows at a time: check-prefill: top-1 agreement 5/5: PASS",
                      "latent cache in RAM: check-cpu: top-1 agreement 40/40: PASS",
@@ -202,10 +207,12 @@ class Checks(unittest.TestCase):
                      "check-prefill: top-1 agreement 5/5: PASS",
                      "prefill, experts on every card: check-prefill: top-1 agreement 5/5: PASS",
                      "decode, GPUs helping the CPU: check-cpu: top-1 agreement 40/40: PASS",
-                     "decode, CUDA graphs: check-cpu: top-1 agreement 40/40: PASS"):
+                     "decode, CUDA graphs: check-cpu: top-1 agreement 40/40: PASS",
+                     "prefill, buffers lent to the cache: 4 of them (0.00 GB) in the prompt path's buffers; "
+                     "check-prefill: top-1 agreement 5/5: PASS"):
             found = re.findall("^" + re.escape(line) + "$", out, re.M)
             self.assertEqual(len(found), len(GPU_MODELS), line + "\n" + out)
-        self.assertEqual(out.count("check-prefill:"), 5 * len(GPU_MODELS), out)
+        self.assertEqual(out.count("check-prefill:"), 6 * len(GPU_MODELS), out)
         self.assertIn("parking: 6 turns, all PASS", out)
         self.assertNotIn("Traceback", out)
 
@@ -215,6 +222,13 @@ class Checks(unittest.TestCase):
         self.assertNotEqual(rc, 0, out)
         self.assertEqual(out.count("decode, CUDA graphs FAILED:"), len(GPU_MODELS), out)
         self.assertIn("decode graphs: layer 1 runs without a graph", out)
+
+    def test_gpu_check_fails_when_nothing_was_lent(self):
+        # the prompt passed, but the buffers held no expert: --lend-prompt-buffers was not tested
+        rc, out = self.run_script("glm53_gpu_check.sh", FAKE_SMI="0, 23900\\n", FAKE_NO_LOANS="1")
+        self.assertNotEqual(rc, 0, out)
+        self.assertEqual(out.count("prefill, buffers lent to the cache FAILED:"), len(GPU_MODELS), out)
+        self.assertIn("expert cache: 6 slots over 2 layers (0.00 GB)", out)
 
     def test_gpu_check_shows_each_models_result_after_many_layer_lines(self):
         # strata-glm prints a line for every position where a layer parts from the CPU; the check-cpu line after

@@ -25,6 +25,12 @@
 // --decode-graphs: each layer's ops up to the routing that do not depend on the position (a KDA layer's attention
 // half and the router, an MLA layer's from its FFN half on; a dense layer's all) are captured as a CUDA graph at the
 // first decoded token and launched as one from then on, instead of one call into the driver per op.
+// --lend-prompt-buffers: between prompts the prompt path's large buffers (the chunk's streams, the arena, the copy-ahead
+// pools) hold more slots of the VRAM expert cache. A prompt of --lend-min-prompt tokens or more (64) takes them back,
+// and their experts leave the cache; the next decoded token gives them back empty, and the misses fill them again
+// from RAM. A shorter prompt runs token by token and leaves the cache as it is.
+// --cache-max-slots N: at most N VRAM cache slots of its own per layer (a test setting: the GPU check's small models
+// would otherwise fit every expert in them, leaving nothing to lend).
 #include "strata/glm/check.hpp"
 #include "strata/glm/cpu_ref.hpp"
 #include "strata/glm/engine.hpp"
@@ -120,6 +126,7 @@ int usage() {
                  "                  [--max-swaps N] [--cache-decay D] [--no-expert-cache] [--prefill] [--prefill-chunk N]\n"
                  "                  [--pin-experts [--pin-keep-free GB]] [--prefill-rows N] [--kv-in-ram]\n"
                  "                  [--prefill-spread] [--decode-help N] [--decode-graphs]\n"
+                 "                  [--lend-prompt-buffers [--lend-min-prompt N]] [--cache-max-slots N]\n"
                  "       strata-glm -m MODEL.gguf --serve [--ctx N] [--eos-ids A,B] [--park-mib N] [--no-warm]\n"
                  "                  [--checkpoint-min N] [same GPU and cache options]\n");
     return 2;
@@ -153,6 +160,7 @@ int main(int argc, char** argv) {
         else if (a == "--max-swaps" && (v = next())) opt.cache.max_swaps_per_token = std::atoi(v);
         else if (a == "--cache-decay" && (v = next())) opt.cache.decay = std::atof(v);
         else if (a == "--no-expert-cache") opt.cache.disabled = true;
+        else if (a == "--cache-max-slots" && (v = next())) opt.cache.max_slots = std::max(0, std::atoi(v));
         else if (a == "--serve") serve = true;
         else if (a == "--no-warm") warm = false;
         else if (a == "--pin-experts") pin = true;
@@ -164,6 +172,8 @@ int main(int argc, char** argv) {
         else if (a == "--prefill-spread") opt.prefill_spread = true;
         else if (a == "--decode-help" && (v = next())) opt.decode_help = std::max(0, std::atoi(v));
         else if (a == "--decode-graphs") opt.decode_graphs = true;
+        else if (a == "--lend-prompt-buffers") opt.lend_prompt_buffers = true;
+        else if (a == "--lend-min-prompt" && (v = next())) opt.lend_min_prompt = std::max(0, std::atoi(v));
         else if (a == "--eos-ids" && (v = next())) eos = parse_list<int32_t>(v);
         else if (a == "--park-mib" && (v = next())) so.park_bytes = (size_t) (std::max(0.0, std::atof(v)) * 1048576.0);
         else if (a == "--checkpoint-min" && (v = next())) so.checkpoint_min = std::atoll(v);

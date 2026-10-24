@@ -14,6 +14,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace strata::glm {
@@ -110,6 +111,9 @@ struct DevCtx {
     float *px = nullptr, *pxn = nullptr, *py = nullptr;
     uint8_t* arena = nullptr;                ///< the mixer's or the FFN's buffers, one at a time
     size_t arena_bytes = 0;
+    /// the large buffers only a prompt chunk uses (bytes each): with --lend-prompt-buffers they hold expert-cache
+    /// slots between prompts (ExpertCache::add_loans)
+    std::vector<std::pair<uint8_t*, size_t>> lendable;
     int32_t *d_idx = nullptr, *d_slot = nullptr;
     // past the indexer's dense range: each query's cells [T][max_sel] and their count, and which full indexer
     // layer's selection they are (Impl::sel_version)
@@ -204,6 +208,10 @@ struct GpuEngine::Impl {
     // --decode-graphs: per layer
     std::vector<DecodeGraph> dg;
     int64_t graph_recaptures = 0;
+    // --lend-prompt-buffers: the prompt path has its buffers back from the expert cache (from a prompt until the next
+    // decoded token); prefill is running; how often a prompt took them back, and the short prompts that did not
+    bool loans_out = false, in_prefill = false;
+    int64_t loan_reclaims = 0, short_prompts = 0;
     bool spread = false;                         ///< --prefill-spread with more than one card
     std::vector<std::vector<char>> same_link;    ///< cards that share one link to RAM (measure_links)
     std::vector<std::vector<int>> help_order;    ///< per card: the cards that help it, its own first (--decode-help)

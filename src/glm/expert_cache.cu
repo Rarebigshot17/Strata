@@ -102,13 +102,15 @@ size_t ExpertCache::allocate(int dev, const std::vector<int64_t>& layers) {
     ok(cudaMemGetInfo(&fr, &tot), "cudaMemGetInfo");
     const size_t reserve = (size_t) (opt_.vram_reserve_gb * 1e9);
     const size_t budget = fr > reserve ? fr - reserve : 0;
-    const int n = (int) std::min<size_t>(budget / per_round, (size_t) c.n_expert);
+    int n = (int) std::min<size_t>(budget / per_round, (size_t) c.n_expert);
+    if (opt_.max_slots > 0) n = std::min(n, opt_.max_slots);
     if (n <= 0) return 0;
     size_t used = 0;
     for (int64_t il : mine) {
         ExpertSlots& s = L_[(size_t) il];
         s.dev = dev;
         s.n_slots = n;
+        s.n_own = n;
         ok(cudaMalloc(&s.d, (size_t) n * s.blob), "cudaMalloc for the expert cache");
         s.expert_in.assign((size_t) n, -1);
         used += (size_t) n * s.blob;
@@ -116,11 +118,83 @@ size_t ExpertCache::allocate(int dev, const std::vector<int64_t>& layers) {
     return used;
 }
 
+size_t ExpertCache::add_loans(int dev, const std::vector<int64_t>& layers,
+                              const std::vector<std::pair<uint8_t*, size_t>>& chunks) {
+    if (opt_.disabled) return 0;
+    const Config& c = m_.config();
+    std::vector<int64_t> mine;
+    size_t blob = 0;
+    for (int64_t il : layers) {
+        const ExpertSlots& s = L_[(size_t) il];
+        if (c.is_dense(il) || !s.cacheable) continue;
+        mine.push_back(il);
+        blob = std::max(blob, s.blob);
+    }
+    if (mine.empty() || blob == 0) return 0;
+    // the blobs each buffer holds, one after another from its start (cudaMalloc's alignment, blobs of 256s)
+    std::vector<uint8_t*> at;
+    for (const auto& [p, n] : chunks)
+        for (size_t o = 0; p && o + blob <= n; o += blob) at.push_back(p + o);
+    int per = (int) (at.size() / mine.size());
+    size_t used = 0, next = 0;
+    for (int64_t il : mine) {
+        ExpertSlots& s = L_[(size_t) il];
+        const int k = std::min<int>(per, (int) c.n_expert - s.n_own);
+        if (k <= 0) continue;
+        if (s.n_slots == 0) {   // no slots of its own (allocate found no room): lent ones only
+            s.dev = dev;
+            s.n_own = 0;
+            s.expert_in.clear();
+        }
+        for (int i = 0; i < k; ++i) s.loan.push_back(at[next++]);
+        s.n_slots = s.n_own + (int) s.loan.size();
+        s.expert_in.resize((size_t) s.n_slots, -1);
+        lent_slots_ += k;
+        used += (size_t) k * s.blob;
+    }
+    return used;
+}
+
+void ExpertCache::reclaim_loans() {
+    // copies queued into lent slots are dropped rather than waited for (after a prompt the misses queue up to every
+    // lent slot's fill); the one in flight, and the copies into the cache's own slots, land first
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        std::deque<Copy> keep;
+        for (const Copy& j : todo_) {
+            ExpertSlots& s = L_[(size_t) j.il];
+            if (j.slot < s.n_own) {
+                keep.push_back(j);
+                continue;
+            }
+            s.slot_of[(size_t) j.e] = -1;
+            s.expert_in[(size_t) j.slot] = -1;
+        }
+        todo_.swap(keep);
+    }
+    drain();
+    for (auto& s : L_)
+        for (int i = s.n_own; i < s.n_slots; ++i) {
+            const int ex = s.expert_in[(size_t) i];
+            if (ex >= 0) {
+                s.slot_of[(size_t) ex] = -1;
+                ++lent_dropped_;
+            }
+            s.expert_in[(size_t) i] = kLent;
+        }
+}
+
+void ExpertCache::return_loans() {
+    for (auto& s : L_)
+        for (int i = s.n_own; i < s.n_slots; ++i)
+            if (s.expert_in[(size_t) i] == kLent) s.expert_in[(size_t) i] = -1;
+}
+
 void ExpertCache::copy_expert(int64_t il, int e, int slot, void* stream) {
     const ExpertSlots& s = L_[(size_t) il];
     const LayerWeights& w = m_.layer(il);
     ok(cudaSetDevice(s.dev), "cudaSetDevice");
-    uint8_t* dst = s.d + (size_t) slot * s.blob;
+    uint8_t* dst = s.at(slot);
     const Tensor g = w.gate_exps.slice2(e), u = w.up_exps.slice2(e), d = w.down_exps.slice2(e);
     const cudaStream_t st = (cudaStream_t) stream;
     ok(cudaMemcpyAsync(dst, g.data, s.up_off, cudaMemcpyHostToDevice, st), "expert copy");
@@ -144,7 +218,7 @@ bool ExpertCache::check_slot(int64_t il, int slot, int e, const char* what) cons
     const LayerWeights& w = m_.layer(il);
     std::vector<uint8_t> got(s.blob);
     ok(cudaSetDevice(s.dev), "cudaSetDevice");
-    ok(cudaMemcpy(got.data(), s.d + (size_t) slot * s.blob, s.blob, cudaMemcpyDeviceToHost), "slot check");
+    ok(cudaMemcpy(got.data(), s.at(slot), s.blob, cudaMemcpyDeviceToHost), "slot check");
     const Tensor g = w.gate_exps.slice2(e), u = w.up_exps.slice2(e), d = w.down_exps.slice2(e);
     const struct {
         const char* name;
@@ -246,7 +320,7 @@ int ExpertCache::slot(int64_t il, int e) const {
 void ExpertCache::matrices(int64_t il, int slot, gpu::DevMatrix& gate, gpu::DevMatrix& up,
                            gpu::DevMatrix& down) const {
     const ExpertSlots& s = L_[(size_t) il];
-    uint8_t* base = s.d + (size_t) slot * s.blob;
+    uint8_t* base = s.at(slot);
     gate = s.gate;
     gate.w = base;
     up = s.up;
@@ -320,7 +394,7 @@ void ExpertCache::maintain() {
             float vscore = 0.0f;
             for (int i = 0; i < s.n_slots; ++i) {
                 const int ex = s.expert_in[(size_t) i];
-                if (ex == kLoading) continue;
+                if (ex == kLoading || ex == kLent) continue;
                 if (ex < 0) { victim = i; vscore = -1.0f; break; }
                 if (victim < 0 || sc[(size_t) ex] < vscore) { victim = i; vscore = sc[(size_t) ex]; }
             }
@@ -392,10 +466,18 @@ std::string ExpertCache::summary() const {
             ++layers;
             bytes += (size_t) s.n_slots * s.blob;
         }
-    char buf[200];
+    size_t lent = 0;
+    for (const auto& s : L_) lent += s.loan.size() * s.blob;
+    char buf[300];
     std::snprintf(buf, sizeof buf, "expert cache: %lld slots over %lld layers (%.2f GB)%s", (long long) slots,
                   (long long) layers, bytes / 1e9, loaded_profile_ ? ", filled from the profile" : "");
-    return buf;
+    std::string out = buf;
+    if (lent_slots_ > 0) {
+        std::snprintf(buf, sizeof buf, "; %lld of them (%.2f GB) in the prompt path's buffers between prompts",
+                      (long long) lent_slots_, lent / 1e9);
+        out += buf;
+    }
+    return out;
 }
 
 }  // namespace strata::glm

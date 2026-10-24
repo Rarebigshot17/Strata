@@ -268,6 +268,16 @@ GpuEngine::GpuEngine(const Model& model, const EngineOptions& opt) : impl_(new I
             if (I.ctx_of_layer[(size_t) il] == (int) di) layers.push_back(il);
         cache_bytes[di] = I.cache->allocate(I.ctx[di].id, layers);
     }
+    // --lend-prompt-buffers: between prompts the prompt path's large buffers hold more slots of the cache
+    std::vector<size_t> lent_bytes(I.ctx.size(), 0);
+    if (opt.lend_prompt_buffers && opt.prefill_chunk > 1)
+        for (size_t di = 0; di < I.ctx.size(); ++di) {
+            std::vector<int64_t> layers;
+            for (int64_t il = 0; il < c.n_layer; ++il)
+                if (I.ctx_of_layer[(size_t) il] == (int) di) layers.push_back(il);
+            lent_bytes[di] = I.cache->add_loans(I.ctx[di].id, layers, I.ctx[di].lendable);
+            cache_bytes[di] += lent_bytes[di];
+        }
     I.cache->warm_start();
 
     // ---- host side: the CPU experts and the pinned exchange buffers
@@ -329,7 +339,13 @@ GpuEngine::GpuEngine(const Model& model, const EngineOptions& opt) : impl_(new I
         else std::snprintf(line, sizeof line, "GPU %d: layers %lld-%lld%s, %.2f GB weights and buffers, %.2f GB expert cache",
                            I.ctx[di].id, (long long) first, (long long) last, (int) di == I.out_ctx ? " + output head" : "",
                            bytes / 1e9, cache_bytes[di] / 1e9);
-        placement_.push_back(line);
+        std::string pl = line;
+        if (lent_bytes[di] > 0) {
+            std::snprintf(line, sizeof line, " (%.2f GB of it in the prompt buffers, between prompts)",
+                          lent_bytes[di] / 1e9);
+            pl += line;
+        }
+        placement_.push_back(pl);
     }
     placement_.push_back(I.cache->summary());
     if (I.opt.kv_in_ram) {
@@ -389,6 +405,11 @@ GpuEngine::~GpuEngine() {
         std::fprintf(stderr, "expert cache over the run: %lld swaps and %lld fills queued, %.1f%% of lookups hit\n",
                      (long long) I.cache->swaps_queued(), (long long) I.cache->fills_queued(),
                      I.cache->lookups() ? 100.0 * (double) I.cache->hits() / (double) I.cache->lookups() : 0.0);
+        if (I.cache->has_loans())
+            std::fprintf(stderr, "lent prompt buffers: %lld slots; %lld prompts took them back (%lld experts left the "
+                                 "cache), %lld short ones ran token by token\n",
+                         (long long) I.cache->lent_slots(), (long long) I.loan_reclaims,
+                         (long long) I.cache->lent_dropped(), (long long) I.short_prompts);
     }
     for (auto& g : impl_->dg)
         if (g.exec) cudaGraphExecDestroy(g.exec);
@@ -568,6 +589,17 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
     if (I.prof_eval_left > 0 && !I.prof_on && t >= I.prof_eval_from) {
         ok(cudaProfilerStart(), "cudaProfilerStart");
         I.prof_on = true;
+    }
+    if (I.loans_out && !I.in_prefill) {
+        // --lend-prompt-buffers: the prompt is done; once every card's work on its buffers is (the chunks' streams,
+        // their copy and transfer streams), the cache has them back, empty, and fills them as this token's misses
+        // and the next ones come in
+        for (auto& dc : I.ctx) {
+            ok(cudaSetDevice(dc.id), "cudaSetDevice");
+            ok(cudaDeviceSynchronize(), "sync");
+        }
+        I.cache->return_loans();
+        I.loans_out = false;
     }
     const auto t_eval0 = tclock::now();
 

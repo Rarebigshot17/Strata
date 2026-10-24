@@ -14,8 +14,9 @@
 # in host RAM (decode and prompt), with the experts page-locked and no VRAM cache, and that again with every card
 # sharing each layer's experts (--prefill-spread; the same as the run before on one card), decoding with the GPUs
 # taking 3 of each layer's missed experts from the CPU (--decode-help 3), decoding with each layer's fixed ops
-# replayed as CUDA graphs (--decode-graphs; it fails if a layer fell back to launching op by op), then the GPU's
-# logits against llama.cpp's.
+# replayed as CUDA graphs (--decode-graphs; it fails if a layer fell back to launching op by op), the prompt path's
+# buffers lent to the expert cache between prompts (--lend-prompt-buffers with one slot of its own per layer; it fails
+# if nothing was lent), then the GPU's logits against llama.cpp's.
 # Last, conversation parking (tools/glm53_park_check.py), also with the latent cache in host RAM.
 #
 # The GPU quantizes activations to q8_1 like llama.cpp's CUDA backend, so on quantized weights its logits differ from
@@ -151,6 +152,19 @@ for m in glm5-next-moe v1 v1-bare q4_0 q8_0; do
         echo "decode, GPUs helping the CPU FAILED:"
         grep -E "layer .* differs|strata-glm:|CUDA" "$W/help_$m.txt" | head -6
         grep -E "^check-cpu" "$W/help_$m.txt"; fail=1
+    fi
+    # the prompt path's buffers lent to the expert cache: one slot of its own per layer and the rest in the buffers
+    # (chunks of 128, so the small model's buffers hold some experts), which the prompt takes back; the 4 decoded
+    # tokens give them back and fill them from RAM, and read experts from them
+    if "$SB/strata-glm" -m "$W/$m.gguf" --tokens-file "$W/ids.txt" --prefill --prefill-chunk 128 --check-cpu \
+            --cache-max-slots 1 --lend-prompt-buffers --lend-min-prompt 4 > "$W/lend_$m.txt" 2>&1 \
+            && grep -q "in the prompt path's buffers between prompts" "$W/lend_$m.txt"; then
+        echo "prefill, buffers lent to the cache: $(grep -o "[0-9]* of them ([0-9.]* GB) in the prompt path's buffers" \
+            "$W/lend_$m.txt"); $(grep check-prefill "$W/lend_$m.txt")"
+    else
+        echo "prefill, buffers lent to the cache FAILED:"
+        grep -E "expert cache|strata-glm:|CUDA" "$W/lend_$m.txt" | head -4
+        grep check-prefill "$W/lend_$m.txt"; fail=1
     fi
     # decoding with each layer's ops up to the routing captured once and replayed as a CUDA graph, the VRAM cache on
     if "$SB/strata-glm" -m "$W/$m.gguf" --tokens-file "$W/ids.txt" --check-cpu --decode-graphs \
