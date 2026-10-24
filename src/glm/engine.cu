@@ -271,6 +271,7 @@ GpuEngine::GpuEngine(const Model& model, const EngineOptions& opt) : impl_(new I
     const int threads = opt.cpu_threads > 0 ? opt.cpu_threads : ThreadPool::physical_cores();
     I.pool = std::make_unique<ThreadPool>(threads);
     I.timing = std::getenv("STRATA_GLM_TIMING") && std::atoi(std::getenv("STRATA_GLM_TIMING")) > 0;
+    if (I.timing) I.prev_ids.assign((size_t) (c.n_layer * c.n_expert_used), -1);
     I.experts = std::make_unique<CpuExperts>(model, *I.pool);
     I.h_x = halloc<float>((size_t) E);
     I.h_yr = halloc<float>((size_t) E);
@@ -356,6 +357,14 @@ GpuEngine::~GpuEngine() {
                      (long long) I.t_tokens, I.t_eval * ms, I.t_route_wait * ms, I.t_cpu * ms, I.t_help_wait * ms,
                      I.t_logits_wait * ms, I.t_maintain * ms,
                      (I.t_eval - I.t_route_wait - I.t_cpu - I.t_help_wait - I.t_logits_wait - I.t_maintain) * ms);
+        if (I.r_layers > 0) {
+            const double nl = (double) I.r_layers;
+            std::fprintf(stderr,
+                         "routing over %lld MoE layers of tokens that follow a token: experts per layer %.2f for the "
+                         "token and %.2f for it and the one before together, of them on the CPU %.2f and %.2f\n",
+                         (long long) I.r_layers, (double) I.c.n_expert_used, I.r_union / nl, I.r_miss / nl,
+                         I.r_union_miss / nl);
+        }
     }
     for (auto& d : impl_->ctx)
         if (d.stream) cudaStreamDestroy(d.stream);
@@ -699,6 +708,23 @@ const std::vector<float>& GpuEngine::eval(int32_t token, Trace* trace) {
                 if (I.cache->slot(il, I.h_ids[j]) >= 0) continue;
                 I.miss_ids.push_back(I.h_ids[j]);
                 I.miss_w.push_back(I.h_w[j]);
+            }
+            if (I.timing) {
+                // the last token's experts that this one does not use, and those of them not cached now
+                int32_t* prev = I.prev_ids.data() + (size_t) il * (size_t) KU;
+                if (prev[0] >= 0) {
+                    int64_t u = KU, um = (int64_t) I.miss_ids.size();
+                    for (int j = 0; j < KU; ++j) {
+                        if (std::find(I.h_ids, I.h_ids + KU, prev[j]) != I.h_ids + KU) continue;
+                        ++u;
+                        if (I.cache->slot(il, prev[j]) < 0) ++um;
+                    }
+                    ++I.r_layers;
+                    I.r_union += u;
+                    I.r_miss += (int64_t) I.miss_ids.size();
+                    I.r_union_miss += um;
+                }
+                std::copy(I.h_ids, I.h_ids + KU, prev);
             }
             // the GPU's share: launched by this thread while the other CPU threads start on the missed experts
             const auto launch_gpu = [&] {

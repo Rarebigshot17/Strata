@@ -163,6 +163,10 @@ struct GpuEngine::Impl {
     bool timing = false;
     double t_eval = 0, t_route_wait = 0, t_cpu = 0, t_logits_wait = 0, t_maintain = 0, t_help_wait = 0;
     int64_t t_tokens = 0;
+    // and how two tokens in a row route (what one pass over a token and its draft would compute): per layer, the
+    // last token's experts; over the MoE layers seen, one token's experts and misses and the pair's
+    std::vector<int32_t> prev_ids;
+    int64_t r_layers = 0, r_union = 0, r_miss = 0, r_union_miss = 0;
     // host side
     float *h_x = nullptr, *h_w = nullptr, *h_yr = nullptr;
     int32_t* h_ids = nullptr;
