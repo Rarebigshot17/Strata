@@ -412,6 +412,17 @@ int main(int argc, char** argv) {
             };
             int64_t drafts = 0, taken = 0;
             double s_draft = 0, s_pass = 0, s_one = 0, s_two = 0;
+            // the drafts by the MTP block's probability of its own draft (softmax of its logits): how many, how many
+            // taken, in bands below 0.5, 0.8, 0.95 and above
+            const double band_top[4] = {0.5, 0.8, 0.95, 1.01};
+            int64_t band_n[4] = {0, 0, 0, 0}, band_taken[4] = {0, 0, 0, 0};
+            const auto draft_prob = [&] {
+                const std::vector<float>& ml = eng.mtp_logits();
+                const float mx = *std::max_element(ml.begin(), ml.end());
+                double sum = 0;
+                for (float v : ml) sum += std::exp((double) v - mx);
+                return 1.0 / sum;
+            };
             const auto drafted = [&](const std::vector<int32_t>& pr, std::vector<int32_t>& toks) {
                 eng.reset();
                 int32_t x = am(eng.prefill(pr.data(), (int64_t) pr.size()).data());
@@ -421,6 +432,9 @@ int main(int argc, char** argv) {
                     const auto b = clk::now();
                     const int32_t d = eng.mtp_draft(x);
                     s_draft += since(b);
+                    const double pd = draft_prob();
+                    const int band = pd < band_top[0] ? 0 : pd < band_top[1] ? 1 : pd < band_top[2] ? 2 : 3;
+                    ++band_n[band];
                     const auto e = clk::now();
                     const float* lg = eng.eval_pair(x, d);
                     s_pass += since(e);
@@ -428,6 +442,7 @@ int main(int argc, char** argv) {
                     const int32_t y = am(lg);
                     if (y == d) {                    // the draft is the next token: the second row gives the one after
                         ++taken;
+                        ++band_taken[band];
                         toks.push_back(d);
                         x = am(lg + V);
                         if ((int) toks.size() < N) toks.push_back(x);
@@ -477,6 +492,11 @@ int main(int argc, char** argv) {
                         1e3 * s_one / nt, 1e3 * s_two / nt, 1e3 * s_draft / (double) std::max<int64_t>(drafts, 1),
                         1e3 * s_pass / (double) std::max<int64_t>(drafts, 1), (long long) drafts, (long long) taken,
                         100.0 * (double) taken / (double) std::max<int64_t>(drafts, 1));
+            std::printf("drafts by the MTP block's probability of its draft: below 0.5 %lld (%lld taken), 0.5-0.8 %lld "
+                        "(%lld), 0.8-0.95 %lld (%lld), 0.95 and above %lld (%lld)\n", (long long) band_n[0],
+                        (long long) band_taken[0], (long long) band_n[1], (long long) band_taken[1],
+                        (long long) band_n[2], (long long) band_taken[2], (long long) band_n[3],
+                        (long long) band_taken[3]);
             std::printf("check-generate: %zu prompt%s (%zu tokens), %d tokens each, %s with drafts as one at a time: "
                         "%s\n", prompts.size(), prompts.size() == 1 ? "" : "s", prompt_tokens, N,
                         same ? "the same" : "NOT the same", same ? "PASS" : "FAIL");
