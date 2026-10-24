@@ -27,10 +27,13 @@
 // token and launched as one from then on, instead of one call into the driver per op; --no-decode-graphs launches
 // them op by op (the same values: on napster-ai, 2026-10-24, 300 tokens' logits bitwise the same, and 1.6% faster
 // with the graphs). --decode-graphs is the default, and is still taken.
-// --lend-prompt-buffers: between prompts the prompt path's large buffers (the chunk's streams, the arena, the copy-ahead
-// pools) hold more slots of the VRAM expert cache. A prompt of --lend-min-prompt tokens or more (64) takes them back,
-// and their experts leave the cache; the next decoded token gives them back empty, and the misses fill them again
-// from RAM. A shorter prompt runs token by token and leaves the cache as it is.
+// Between prompts the prompt path's large buffers (the chunk's streams, the arena, the copy-ahead pools) hold more
+// slots of the VRAM expert cache. A prompt of --lend-min-prompt tokens or more (64) takes them back, and their experts
+// leave the cache; the next decoded token gives them back empty, and the misses fill them again from RAM. A shorter
+// prompt runs token by token and leaves the cache as it is. On napster-ai (2026-10-24, chunk 4096) the cache grew
+// from 23.2 to 31.2 GB and decoding went from 15.1 / 15.2 / 14.4 to 17.7 / 17.6 / 16.0 tokens/s on three prompts,
+// the 1,971-token one taking the buffers back. --no-lend-prompt-buffers keeps them for the prompt path alone;
+// --lend-prompt-buffers is the default, and is still taken.
 // --cache-max-slots N: at most N VRAM cache slots of its own per layer (a test setting: the GPU check's small models
 // would otherwise fit every expert in them, leaving nothing to lend).
 #include "strata/glm/check.hpp"
@@ -128,7 +131,7 @@ int usage() {
                  "                  [--max-swaps N] [--cache-decay D] [--no-expert-cache] [--prefill] [--prefill-chunk N]\n"
                  "                  [--pin-experts [--pin-keep-free GB]] [--prefill-rows N] [--kv-in-ram]\n"
                  "                  [--prefill-spread] [--decode-help N] [--no-decode-graphs]\n"
-                 "                  [--lend-prompt-buffers [--lend-min-prompt N]] [--cache-max-slots N]\n"
+                 "                  [--no-lend-prompt-buffers] [--lend-min-prompt N] [--cache-max-slots N]\n"
                  "       strata-glm -m MODEL.gguf --serve [--ctx N] [--eos-ids A,B] [--park-mib N] [--no-warm]\n"
                  "                  [--checkpoint-min N] [same GPU and cache options]\n");
     return 2;
@@ -176,6 +179,7 @@ int main(int argc, char** argv) {
         else if (a == "--decode-graphs") opt.decode_graphs = true;
         else if (a == "--no-decode-graphs") opt.decode_graphs = false;
         else if (a == "--lend-prompt-buffers") opt.lend_prompt_buffers = true;
+        else if (a == "--no-lend-prompt-buffers") opt.lend_prompt_buffers = false;
         else if (a == "--lend-min-prompt" && (v = next())) opt.lend_min_prompt = std::max(0, std::atoi(v));
         else if (a == "--eos-ids" && (v = next())) eos = parse_list<int32_t>(v);
         else if (a == "--park-mib" && (v = next())) so.park_bytes = (size_t) (std::max(0.0, std::atof(v)) * 1048576.0);
