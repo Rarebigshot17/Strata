@@ -319,6 +319,7 @@ void GpuEngine::setup_prefill() {
                 ok(cudaEventRecord(d.ev_copied[k], d.stream), "cudaEventRecord");
             }
             ok(cudaStreamCreateWithFlags(&d.copy_stream, cudaStreamNonBlocking), "cudaStreamCreate");
+            ok(cudaEventCreateWithFlags(&d.ev_handoff, cudaEventDisableTiming), "cudaEventCreate");
         }
     }
     if (I.blob_max)
@@ -496,6 +497,11 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
             ok(cudaStreamSynchronize(from.stream), "sync");
             ok(cudaMemcpyPeerAsync(to.pR, to.id, from.pR, from.id, (size_t) (T * hc * E) * sizeof(float), to.stream),
                "peer copy");
+            if (to.copy_stream) {
+                // the card's copies from RAM (the copy-ahead just below) queue after the hand-over, not before it
+                ok(cudaEventRecord(to.ev_handoff, to.stream), "cudaEventRecord");
+                ok(cudaStreamWaitEvent(to.copy_stream, to.ev_handoff, 0), "cudaStreamWaitEvent");
+            }
             cur = ci;
         }
         DevCtx& d = I.ctx[(size_t) ci];
@@ -1090,7 +1096,6 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
                     if (staged) ok(cudaEventRecord(d.ev_free[b], d.stream), "cudaEventRecord");
                     if (streamed) b ^= 1;     // the other pair of buffers for the next streamed expert
                 }
-                if (pf) ok(cudaEventRecord(d.ev_pf_free, d.stream), "cudaEventRecord");
                 for (auto& th : helper_threads) th.join();
                 for (const auto& e : helper_err)
                     if (e) std::rethrow_exception(e);
@@ -1100,6 +1105,13 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
                     ok(cudaStreamWaitEvent(d.stream, I.ctx[(size_t) k].ev_y, 0), "cudaStreamWaitEvent");
                     gpu::add(d.py, d.y_recv[(size_t) k], (int) (T * E), s);
                 }
+                // this card's pool is free for the next layer's copy-ahead only now, after the helpers' sums have
+                // come in. A card's copies from RAM appear to run about in the order they become ready, so a
+                // copy-ahead that started when this card's own experts were done would hold the link until all of
+                // it was in, and the sums (and so the next attention half) would wait behind it (napster-ai,
+                // 2026-10-24, the copy-ahead recorded here earlier: RAM->card overlapped kernels 3-5% of its time,
+                // and no card computed for 28-37% of the chunk)
+                if (pf) ok(cudaEventRecord(d.ev_pf_free, d.stream), "cudaEventRecord");
             }
         }
         gpu::hc_post_rows(d.py, d.pR, d.ppc, d.pR2, T, (int) hc, (int) E, s);

@@ -117,6 +117,7 @@ struct DevCtx {
     uint8_t* dstage[2] = {nullptr, nullptr};
     cudaStream_t copy_stream = nullptr;
     cudaEvent_t ev_copied[2] = {nullptr, nullptr}, ev_free[2] = {nullptr, nullptr};
+    cudaEvent_t ev_handoff = nullptr;        ///< the chunk's streams handed over to this card (copy_stream waits)
     // --prefill-spread: as a helper, this card's share of another card's layer (its rows' tokens and weights, its
     // partial sum); as the layer's card, the partial sums it receives (one per other card, by ctx index)
     int sms = 0;                             ///< multiprocessors, for sharing the experts out
