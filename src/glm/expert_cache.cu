@@ -328,9 +328,11 @@ void ExpertCache::maintain() {
             if (vscore < 0.0f) {
                 if (fills >= 4 * opt_.max_swaps_per_token) continue;
                 ++fills;
+                ++fills_queued_;
             } else {
                 if (swaps >= opt_.max_swaps_per_token || !(sc[(size_t) e] > 1.2f * vscore + 0.5f)) continue;
                 ++swaps;
+                ++swaps_queued_;
             }
             const int old = s.expert_in[(size_t) victim];
             if (old >= 0) s.slot_of[(size_t) old] = -1;   // no kernel reads it now: the token's work is done

@@ -86,6 +86,9 @@ public:
 
     int64_t hits() const { return hits_; }
     int64_t lookups() const { return lookups_; }
+    /// Copies queued by maintain(): into an occupied slot (a swap) and into a free one (a fill).
+    int64_t swaps_queued() const { return swaps_queued_; }
+    int64_t fills_queued() const { return fills_queued_; }
     std::string summary() const;
     int64_t total_slots() const;
     size_t total_bytes() const;
@@ -105,7 +108,7 @@ private:
     std::vector<ExpertSlots> L_;
     std::vector<std::vector<float>> score_;           ///< [layer][expert]
     std::vector<std::vector<int32_t>> missed_;        ///< this token's misses per layer
-    int64_t hits_ = 0, lookups_ = 0, tick_ = 0;
+    int64_t hits_ = 0, lookups_ = 0, tick_ = 0, swaps_queued_ = 0, fills_queued_ = 0;
     bool verify_ = false;                             ///< STRATA_GLM_VERIFY=1: every copy and, every 512 tokens,
                                                       ///< every cached slot checked against RAM
     bool sync_swaps_ = false;                         ///< STRATA_GLM_SYNC_SWAPS=1: a token's swaps finish before

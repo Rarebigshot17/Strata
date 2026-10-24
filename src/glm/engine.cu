@@ -365,6 +365,9 @@ GpuEngine::~GpuEngine() {
                          (long long) I.r_layers, (double) I.c.n_expert_used, I.r_union / nl, I.r_miss / nl,
                          I.r_union_miss / nl);
         }
+        std::fprintf(stderr, "expert cache over the run: %lld swaps and %lld fills queued, %.1f%% of lookups hit\n",
+                     (long long) I.cache->swaps_queued(), (long long) I.cache->fills_queued(),
+                     I.cache->lookups() ? 100.0 * (double) I.cache->hits() / (double) I.cache->lookups() : 0.0);
     }
     for (auto& d : impl_->ctx)
         if (d.stream) cudaStreamDestroy(d.stream);
