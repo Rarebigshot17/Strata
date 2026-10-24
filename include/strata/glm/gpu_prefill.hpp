@@ -14,6 +14,8 @@ void hc_weights_rows(const float* mixes, const float* scale, const float* base, 
 void hc_mix_rows(const float* R, const float* pc, float* x, int T, int hc, int n_embd, void* stream);
 void hc_post_rows(const float* y, const float* R, const float* pc, float* R_out, int T, int hc, int n_embd,
                   void* stream);
+/// hc_head per token: the mean of each token's hc streams (T x hc x n_embd) into T x n_embd.
+void hc_mean_rows(const float* R, float* x, int T, int hc, int n_embd, void* stream);
 
 // KDA
 /// The causal conv over T tokens: the window state ((K-1) x n) holds the inputs before the chunk and is left

@@ -125,6 +125,17 @@ __global__ void k_hc_mix_rows(const float* R, const float* pc, float* x, int T, 
     x[idx] = acc;
 }
 
+__global__ void k_hc_mean_rows(const float* R, float* x, int T, int hc, int n) {
+    const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= (int64_t) T * n) return;
+    const int64_t t = idx / n;
+    const int e = (int) (idx % n);
+    const float* Rt = R + t * hc * n;
+    float acc = Rt[e];                                  // k_hc_mean's order, per token
+    for (int h = 1; h < hc; ++h) acc += Rt[(size_t) h * n + e];
+    x[idx] = acc * (1.0f / (float) hc);
+}
+
 __global__ void k_hc_post_rows(const float* y, const float* R, const float* pc, float* out, int T, int hc, int n) {
     const int64_t idx = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= (int64_t) T * hc * n) return;
@@ -522,6 +533,11 @@ void hc_weights_rows(const float* mixes, const float* scale, const float* base, 
 void hc_mix_rows(const float* R, const float* pc, float* x, int T, int hc, int n_embd, void* stream) {
     k_hc_mix_rows<<<grid((int64_t) T * n_embd, 256), 256, 0, S(stream)>>>(R, pc, x, T, hc, n_embd);
     check("hc_mix_rows");
+}
+
+void hc_mean_rows(const float* R, float* x, int T, int hc, int n_embd, void* stream) {
+    k_hc_mean_rows<<<grid((int64_t) T * n_embd, 256), 256, 0, S(stream)>>>(R, x, T, hc, n_embd);
+    check("hc_mean_rows");
 }
 
 void hc_post_rows(const float* y, const float* R, const float* pc, float* R_out, int T, int hc, int n_embd,

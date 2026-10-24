@@ -64,8 +64,8 @@ with open(sys.argv[1], "wb") as f:
 # every stub logs its name, CUDA_VISIBLE_DEVICES and CUDA_DEVICE_ORDER, then its arguments
 STUB_HEAD = """#!/bin/sh
 echo "$(basename "$0") CVD=<${CUDA_VISIBLE_DEVICES-unset}> ORDER=<${CUDA_DEVICE_ORDER-unset}> $*" >> "$FAKE/calls.log"
-out=""; prev=""
-for a in "$@"; do [ "$prev" = "--out" ] && out="$a"; prev="$a"; done
+out=""; mtp_out=""; prev=""
+for a in "$@"; do [ "$prev" = "--out" ] && out="$a"; [ "$prev" = "--mtp-out" ] && mtp_out="$a"; prev="$a"; done
 gpu_full() { [ "$FAKE_GPU_FULL" = 1 ] && [ "${CUDA_VISIBLE_DEVICES-unset}" != "" ]; }
 """
 
@@ -76,9 +76,11 @@ STUBS = {
     "lb/bin/llama-strata-ref": 'if gpu_full || [ "$FAKE_REF_FAILS" = 1 ]; then\n'
                                '    echo "CUDA error: out of memory" >&2; echo "  in ggml_cuda_set_device" >&2\n'
                                '    exit 1\n'
-                               'fi\npython3 "$FAKE/write_logits.py" "$out" ref\n',
+                               'fi\npython3 "$FAKE/write_logits.py" "$out" ref\n'
+                               '[ -z "$mtp_out" ] || python3 "$FAKE/write_logits.py" "$mtp_out" ref\n',
     "sb/strata-glm-ref": 'python3 "$FAKE/write_logits.py" "$out"\n',
     "sb/strata-glm": 'if gpu_full; then echo "strata-glm: cudaSetDevice: out of memory" >&2; exit 1; fi\n'
+                     '[ -z "$mtp_out" ] || python3 "$FAKE/write_logits.py" "$mtp_out"\n'
                      'case " $* " in\n'
                      '  *" --decode-help "*) echo "check-cpu: top-1 agreement 40/40: PASS";;\n'
                      # FAKE_PAIRS_DIFFER: a pair's row differed from one token at a time
@@ -87,6 +89,22 @@ STUBS = {
                      'time, worst |diff| 0.002: FAIL"; exit 1; fi\n'
                      '     echo "check-pairs: 40 rows (5 pairs taken back), 40 bitwise the same as one token at a time, '
                      'worst |diff| 0: PASS";;\n'
+                     # FAKE_GENERATE_DIFFERS: decoding with drafts chose another token than one at a time
+                     '  *" --check-generate "*) if [ "$FAKE_GENERATE_DIFFERS" = 1 ]; then\n'
+                     '         echo "token 7 differs: 12 one at a time, 30 with drafts"\n'
+                     '         echo "check-generate: 1 prompt (40 tokens), 24 tokens each, NOT the same with drafts '
+                     'as one at a time: FAIL"; exit 1; fi\n'
+                     '     echo "check-generate: 1 prompt (40 tokens), 24 tokens each, the same with drafts as one at a '
+                     'time: PASS";;\n'
+                     # the MTP block against the CPU reference (FAKE_MTP_DIFFERS: its logits differed), after the
+                     # trunk's own line
+                     '  *" --mtp "*"--check-cpu "*) case " $* " in\n'
+                     '         *" --prefill "*) echo "check-prefill: top-1 agreement 5/5: PASS";;\n'
+                     '         *) echo "check-cpu: top-1 agreement 40/40: PASS";;\n'
+                     '     esac\n'
+                     '     if [ "$FAKE_MTP_DIFFERS" = 1 ]; then\n'
+                     '         echo "check-mtp: worst logits relative diff 0.31 (limit 0.005): FAIL"; exit 1; fi\n'
+                     '     echo "check-mtp: top-1 agreement 40/40: PASS";;\n'
                      # FAKE_GRAPH_FAILS: a layer's capture failed, so it ran op by op (and passed)
                      '  *" --decode-graphs "*) if [ "$FAKE_GRAPH_FAILS" = 1 ]; then\n'
                      '         echo "decode graphs: layer 1 runs without a graph (its capture failed: x)" >&2; fi\n'
@@ -116,10 +134,13 @@ PY_STUBS = {
                                    "with open(os.environ['FAKE'] + '/calls.log', 'a') as f:\n"
                                    "    f.write('tiny_variant ' + ' '.join(sys.argv[1:]) + '\\n')\n",
     "tools/glm53_park_check.py": "print('parking: 6 turns, all PASS')\n",
+    "tools/glm53_add_mtp.py": "import os, shutil, sys\nshutil.copy(sys.argv[1], sys.argv[2])\n"
+                              "with open(os.environ['FAKE'] + '/calls.log', 'a') as f:\n"
+                              "    f.write('add_mtp ' + ' '.join(sys.argv[1:]) + '\\n')\n",
 }
 
 MODELS = ["glm5-next-moe", "v1", "v2", "v1-bare", "q4_0"]
-GPU_MODELS = ["glm5-next-moe", "v1", "v1-bare", "q4_0", "q8_0"]
+GPU_MODELS = ["glm5-next-moe", "v1", "v1-bare", "q4_0", "q8_0", "v1-heads"]
 
 
 @unittest.skipIf(BASH is None, "needs bash")
@@ -201,7 +222,8 @@ class Checks(unittest.TestCase):
     def test_gpu_check_passes_on_free_cards(self):
         rc, out = self.run_script("glm53_gpu_check.sh", FAKE_SMI="0, 23900\\n1, 11800\\n2, 9800\\n")
         self.assertEqual(rc, 0, out)
-        self.assertEqual(out.count("vs llama.cpp: rows 40"), len(GPU_MODELS), out)
+        self.assertEqual(len(re.findall("^vs llama.cpp: rows 40", out, re.M)), len(GPU_MODELS), out)
+        self.assertEqual(len(re.findall("^MTP vs llama.cpp: rows 40", out, re.M)), len(GPU_MODELS), out)
         # each model's runs: decode, the prompt path, it 6 rows at a time, both with the latent cache in RAM, and
         # the prompt path with the experts page-locked, on one card and on every card, decoding with the GPUs
         # helping the CPU, decoding with CUDA graphs, and the prompt buffers lent to the expert cache
@@ -219,12 +241,38 @@ class Checks(unittest.TestCase):
                      "decode in pairs, experts on the CPU: check-pairs: 40 rows (5 pairs taken back), 40 bitwise the "
                      "same as one token at a time, worst |diff| 0: PASS",
                      "prefill, buffers lent to the cache: 4 of them (0.00 GB) in the prompt path's buffers; "
-                     "check-prefill: top-1 agreement 5/5: PASS"):
+                     "check-prefill: top-1 agreement 5/5: PASS",
+                     "MTP block: check-mtp: top-1 agreement 40/40: PASS",
+                     "MTP block after the prompt: check-mtp: top-1 agreement 40/40: PASS",
+                     "MTP block after the prompt, latent cache in RAM: check-mtp: top-1 agreement 40/40: PASS",
+                     "decode with drafts: check-generate: 1 prompt (40 tokens), 24 tokens each, the same with drafts "
+                     "as one at a time: PASS"):
             found = re.findall("^" + re.escape(line) + "$", out, re.M)
             self.assertEqual(len(found), len(GPU_MODELS), line + "\n" + out)
         self.assertEqual(out.count("check-prefill:"), 6 * len(GPU_MODELS), out)
         self.assertIn("parking: 6 turns, all PASS", out)
         self.assertNotIn("Traceback", out)
+        # every model has the MTP block GLM-5.3-Flash has; v1-heads with its optional tensors
+        adds = self.calls("add_mtp")
+        self.assertEqual(len(adds), 2, adds)
+        self.assertRegex(adds[0], r"/base\.gguf \S+/glm5-next-moe\.gguf$")
+        self.assertRegex(adds[1], r"/base\.gguf \S+/heads\.gguf --shared-head --embed-tokens$")
+        for line in self.calls("llama-strata-ref"):
+            self.assertIn(" --mtp-out ", line)
+
+    def test_gpu_check_fails_when_the_mtp_block_differs(self):
+        rc, out = self.run_script("glm53_gpu_check.sh", FAKE_SMI="0, 23900\\n", FAKE_MTP_DIFFERS="1")
+        self.assertNotEqual(rc, 0, out)
+        self.assertEqual(len(re.findall("^MTP block FAILED:$", out, re.M)), len(GPU_MODELS), out)
+        self.assertEqual(len(re.findall("^MTP block after the prompt(, latent cache in RAM)? FAILED:$", out, re.M)),
+                         2 * len(GPU_MODELS), out)
+        self.assertIn("check-mtp: worst logits relative diff 0.31 (limit 0.005): FAIL", out)
+
+    def test_gpu_check_fails_when_drafts_change_the_tokens(self):
+        rc, out = self.run_script("glm53_gpu_check.sh", FAKE_SMI="0, 23900\\n", FAKE_GENERATE_DIFFERS="1")
+        self.assertNotEqual(rc, 0, out)
+        self.assertEqual(len(re.findall("^decode with drafts FAILED:$", out, re.M)), len(GPU_MODELS), out)
+        self.assertIn("token 7 differs: 12 one at a time, 30 with drafts", out)
 
     def test_gpu_check_fails_when_a_layer_runs_without_its_graph(self):
         # the check-cpu line passes, but a layer fell back to launching op by op: --decode-graphs was not tested there
@@ -290,7 +338,8 @@ class Checks(unittest.TestCase):
             self.assertIn(" -fa off ", line)
         for line in self.calls("strata-glm"):
             self.assertIn("CVD=<unset>", line)
-        self.assertEqual(out.count("(100.00% with 1 tie)"), len(GPU_MODELS), out)
+        # the logits and the MTP block's
+        self.assertEqual(out.count("(100.00% with 1 tie)"), 2 * len(GPU_MODELS), out)
 
     def vs_llama(self, out):
         """{model: its "vs llama.cpp" line} from the GPU check's output."""
@@ -342,7 +391,7 @@ class Checks(unittest.TestCase):
         rc, out = self.run_script("glm53_gpu_check.sh", FAKE_SMI_FAILS="1")
         self.assertEqual(rc, 0, out)
         self.assertIn("nvidia-smi", out.splitlines()[0])
-        self.assertEqual(out.count("vs llama.cpp: rows 40"), len(GPU_MODELS), out)
+        self.assertEqual(len(re.findall("^vs llama.cpp: rows 40", out, re.M)), len(GPU_MODELS), out)
 
     def test_gpu_check_a_missing_reference_is_a_fail_line_not_a_traceback(self):
         rc, out = self.run_script("glm53_gpu_check.sh", FAKE_REF_FAILS="1", FAKE_SMI="0, 23900\\n")

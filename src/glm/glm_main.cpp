@@ -36,9 +36,16 @@
 // --lend-prompt-buffers is the default, and is still taken.
 // --cache-max-slots N: at most N VRAM cache slots of its own per layer (a test setting: the GPU check's small models
 // would otherwise fit every expert in them, leaving nothing to lend).
-// --mtp: decode passes of a token and its draft (GpuEngine::eval_pair, drop_last). --check-pairs (with --tokens-file)
-// runs the tokens in pairs, some taken back, against the same engine one token at a time, and passes when every
-// row of logits is bitwise the same.
+// --mtp: decode passes of a token and its draft (GpuEngine::eval_pair, drop_last), and the model's MTP block when it
+// has one. --check-pairs (with --tokens-file) runs the tokens in pairs, some taken back, against the same engine one
+// token at a time, and passes when every row of logits is bitwise the same. With an MTP block, --check-cpu also
+// compares the block's logits at every position (its draft from the token there and the hidden state before) with
+// the CPU reference's (check-mtp; after the prompt in chunks with --prefill, at the decoded tokens), and --mtp-out
+// PATH writes them, the layout of --out and `llama-strata-ref --mtp-out`. --check-generate N (with --mtp and an MTP
+// block) reads each line of the tokens file as a prompt, then decodes N tokens greedily one at a time and again with
+// the block's drafts (mtp_draft, eval_pair, drop_last when the draft is not the next token), the expert cache warmed
+// by a first run and then kept as it is for both; it passes when both give the same tokens, and reports the drafts
+// taken and the time. --out then writes the replies' token ids, a line each.
 #include "strata/glm/check.hpp"
 #include "strata/glm/cpu_ref.hpp"
 #include "strata/glm/engine.hpp"
@@ -136,7 +143,7 @@ int usage() {
                  "                  [--pin-experts [--pin-keep-free GB]] [--prefill-rows N] [--kv-in-ram]\n"
                  "                  [--prefill-spread] [--decode-help N] [--no-decode-graphs]\n"
                  "                  [--no-lend-prompt-buffers] [--lend-min-prompt N] [--cache-max-slots N]\n"
-                 "                  [--mtp [--check-pairs]]\n"
+                 "                  [--mtp [--check-pairs] [--mtp-out MTP.bin] [--check-generate N]]\n"
                  "       strata-glm -m MODEL.gguf --serve [--ctx N] [--eos-ids A,B] [--park-mib N] [--no-warm]\n"
                  "                  [--checkpoint-min N] [same GPU and cache options]\n");
     return 2;
@@ -145,9 +152,10 @@ int usage() {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string model_path, ids_path, out_path;
+    std::string model_path, ids_path, out_path, mtp_path;
     strata::glm::EngineOptions opt;
     bool check_cpu = false, serve = false, use_prefill = false, warm = true, pin = false, check_pairs = false;
+    int check_generate = 0;
     double pin_keep_gb = 16.0;
     long long max_tokens = 0;
     std::vector<int32_t> eos;
@@ -184,6 +192,8 @@ int main(int argc, char** argv) {
         else if (a == "--decode-graphs") opt.decode_graphs = true;
         else if (a == "--mtp") opt.mtp = true;
         else if (a == "--check-pairs") check_pairs = true;
+        else if (a == "--mtp-out" && (v = next())) mtp_path = v;
+        else if (a == "--check-generate" && (v = next())) check_generate = std::max(1, std::atoi(v));
         else if (a == "--no-decode-graphs") opt.decode_graphs = false;
         else if (a == "--lend-prompt-buffers") opt.lend_prompt_buffers = true;
         else if (a == "--no-lend-prompt-buffers") opt.lend_prompt_buffers = false;
@@ -238,7 +248,7 @@ int main(int argc, char** argv) {
         if (max_tokens > 0 && (long long) ids.size() > max_tokens) ids.resize((size_t) max_tokens);
         // the prompt check decodes a few tokens past the prompt on both engines: room for them too
         const int check_decode = use_prefill && check_cpu ? 4 : 0;
-        const int64_t n_ctx = (int64_t) ids.size() + check_decode;
+        const int64_t n_ctx = (int64_t) ids.size() + check_decode + (check_generate > 0 ? check_generate + 2 : 0);
         if (n_ctx > opt.max_ctx) opt.max_ctx = n_ctx;
 
         const auto t0 = std::chrono::steady_clock::now();
@@ -316,12 +326,126 @@ int main(int argc, char** argv) {
             }
             const double s_pairs = std::chrono::duration<double>(std::chrono::steady_clock::now() - p0).count();
             std::printf("one token at a time: %.2f ms a token; pairs: %.2f ms a pass (%zu passes, the cache frozen in "
-                        "both)\n", 1e3 * s_one / (double) ids.size(), 1e3 * s_pairs / (double) std::max<size_t>(passes, 1),
-                        passes);
+                        "both)\n", 1e3 * s_one / (double) ids.size(),
+                        1e3 * s_pairs / (double) std::max<size_t>(passes, 1), passes);
             const bool pass = same == rows;
             std::printf("check-pairs: %zu rows (%zu pairs taken back), %zu bitwise the same as one token at a time, "
                         "worst |diff| %.3g: %s\n", rows, taken_back, same, worst, pass ? "PASS" : "FAIL");
             return pass ? 0 : 1;
+        }
+
+        if (check_generate > 0) {
+            // each prompt (in chunks), then N tokens chosen greedily: one at a time, and with the MTP block's drafts,
+            // each checked by a pass over the token and its draft (the draft is taken when it is the token the first
+            // row of logits chooses, else drop_last). Bitwise the same logits, so the same tokens: a first run warms
+            // the expert cache, which then keeps what it holds, so both place every expert alike.
+            if (!eng.mtp_ready()) {
+                std::fprintf(stderr, "--check-generate needs --mtp and a model with an MTP block\n");
+                return 2;
+            }
+            std::vector<std::vector<int32_t>> prompts;
+            {
+                std::ifstream in(ids_path);
+                for (std::string line; std::getline(in, line);) {
+                    for (char& ch : line)
+                        if (ch == ',') ch = ' ';
+                    std::istringstream is(line);
+                    std::vector<int32_t> p;
+                    for (long long v; is >> v;) p.push_back((int32_t) v);
+                    if (!p.empty()) prompts.push_back(std::move(p));
+                }
+            }
+            using clk = std::chrono::steady_clock;
+            const auto since = [](clk::time_point a) { return std::chrono::duration<double>(clk::now() - a).count(); };
+            const int N = check_generate;
+            const int64_t V = c.n_vocab;
+            const auto am = [&](const float* v) { return (int32_t) (std::max_element(v, v + V) - v); };
+            const auto plain = [&](const std::vector<int32_t>& pr, std::vector<int32_t>& toks) {
+                eng.reset();
+                int32_t x = am(eng.prefill(pr.data(), (int64_t) pr.size()).data());
+                toks.assign(1, x);
+                const auto a = clk::now();
+                while ((int) toks.size() < N) toks.push_back(x = am(eng.eval(x).data()));
+                return since(a);
+            };
+            int64_t drafts = 0, taken = 0;
+            double s_draft = 0, s_pass = 0, s_one = 0, s_two = 0;
+            const auto drafted = [&](const std::vector<int32_t>& pr, std::vector<int32_t>& toks) {
+                eng.reset();
+                int32_t x = am(eng.prefill(pr.data(), (int64_t) pr.size()).data());
+                toks.assign(1, x);
+                const auto a = clk::now();
+                while ((int) toks.size() < N) {
+                    const auto b = clk::now();
+                    const int32_t d = eng.mtp_draft(x);
+                    s_draft += since(b);
+                    const auto e = clk::now();
+                    const float* lg = eng.eval_pair(x, d);
+                    s_pass += since(e);
+                    ++drafts;
+                    const int32_t y = am(lg);
+                    if (y == d) {                    // the draft is the next token: the second row gives the one after
+                        ++taken;
+                        toks.push_back(d);
+                        x = am(lg + V);
+                        if ((int) toks.size() < N) toks.push_back(x);
+                    } else {
+                        eng.drop_last();
+                        toks.push_back(x = y);
+                    }
+                }
+                return since(a);
+            };
+            bool same = true;
+            std::vector<std::vector<int32_t>> replies;
+            size_t prompt_tokens = 0;
+            for (size_t k = 0; k < prompts.size(); ++k) {
+                const std::vector<int32_t>& pr = prompts[k];
+                prompt_tokens += pr.size();
+                std::vector<int32_t> warm_toks, one, two;
+                eng.freeze_cache(false);
+                plain(pr, warm_toks);
+                eng.freeze_cache();
+                const int64_t d0 = drafts, k0 = taken;
+                const double o = plain(pr, one), w = drafted(pr, two);
+                s_one += o;
+                s_two += w;
+                size_t first_diff = 0;
+                const size_t nb = std::min(one.size(), two.size());
+                while (first_diff < nb && one[first_diff] == two[first_diff]) ++first_diff;
+                const double per = 1e3 / (double) std::max(N - 1, 1);
+                std::printf("prompt %zu (%zu tokens): one token at a time %.2f ms a token, with drafts %.2f ms a "
+                            "token; %lld of %lld drafts taken; %s\n", k + 1, pr.size(), o * per, w * per,
+                            (long long) (taken - k0), (long long) (drafts - d0),
+                            one == two ? "the same tokens" : "NOT the same tokens");
+                if (one != two) {
+                    same = false;
+                    std::printf("token %zu differs: %d one at a time, %d with drafts\n", first_diff,
+                                first_diff < one.size() ? one[first_diff] : -1,
+                                first_diff < two.size() ? two[first_diff] : -1);
+                }
+                replies.push_back(std::move(two));
+            }
+            const double nt = (double) prompts.size() * std::max(N - 1, 1);
+            std::printf("one token at a time: %.2f ms a token; with drafts: %.2f ms a token (a draft %.2f ms, a pass "
+                        "over a token and its draft %.2f ms; %lld drafts, %lld taken, %.1f%%)\n",
+                        1e3 * s_one / nt, 1e3 * s_two / nt, 1e3 * s_draft / (double) std::max<int64_t>(drafts, 1),
+                        1e3 * s_pass / (double) std::max<int64_t>(drafts, 1), (long long) drafts, (long long) taken,
+                        100.0 * (double) taken / (double) std::max<int64_t>(drafts, 1));
+            std::printf("check-generate: %zu prompt%s (%zu tokens), %d tokens each, %s with drafts as one at a time: "
+                        "%s\n", prompts.size(), prompts.size() == 1 ? "" : "s", prompt_tokens, N,
+                        same ? "the same" : "NOT the same", same ? "PASS" : "FAIL");
+            if (out) {
+                // the drafted replies' token ids, a line each
+                std::fclose(out);
+                if (FILE* f = std::fopen(out_path.c_str(), "w")) {
+                    for (const auto& r : replies)
+                        for (size_t k = 0; k < r.size(); ++k)
+                            std::fprintf(f, "%d%s", r[k], k + 1 < r.size() ? "," : "\n");
+                    std::fclose(f);
+                }
+            }
+            return same && !prompts.empty() ? 0 : 1;
         }
 
         if (use_prefill) {
@@ -341,37 +465,77 @@ int main(int argc, char** argv) {
             }
             const auto am = [](const std::vector<float>& v) { return (int32_t) (std::max_element(v.begin(), v.end()) - v.begin()); };
             const strata::glm::CheckLimits lim = strata::glm::check_limits(quantized_weights(model));
-            strata::glm::LogitCheck chk;
-            std::vector<float> lc;
-            for (int32_t id : ids) lc = ref->eval(id);
+            strata::glm::LogitCheck chk, mchk;
+            const bool mtp = eng.mtp_ready();
+            std::vector<float> lc, h_prev((size_t) c.n_embd, 0.0f);
+            for (int32_t id : ids) {
+                if (mtp) ref->mtp_eval(id, h_prev.data());          // the CPU's MTP rows, the whole block each
+                lc = ref->eval(id);
+                h_prev = ref->h();
+            }
             double dl = chk.add(lc, lg);
             std::printf("after the prompt: logits relative diff %.3g, KL %.3g, top-1 %s\n", dl,
                         strata::glm::kl_div(lc, lg), am(lc) == am(lg) ? "same" : "DIFFERENT");
             for (int step = 0; step < check_decode; ++step) {
                 const int32_t next = am(lc);
+                if (mtp) {
+                    // the MTP block reads the rows the prompt's chunks wrote for it
+                    eng.mtp_draft(next);
+                    const std::vector<float>& mg = eng.mtp_logits();
+                    const std::vector<float>& mc = ref->mtp_eval(next, h_prev.data());
+                    const double dm = mchk.add(mc, mg);
+                    std::printf("decode %d: MTP logits relative diff %.3g, KL %.3g, top-1 %s\n", step, dm,
+                                strata::glm::kl_div(mc, mg), am(mc) == am(mg) ? "same" : "DIFFERENT");
+                }
                 lc = ref->eval(next);
+                h_prev = ref->h();
                 lg = eng.eval(next);
                 dl = chk.add(lc, lg);
                 std::printf("decode %d: logits relative diff %.3g, KL %.3g, top-1 %s\n", step, dl,
                             strata::glm::kl_div(lc, lg), am(lc) == am(lg) ? "same" : "DIFFERENT");
             }
-            const bool pass = chk.pass(lim);
+            const bool pass = chk.pass(lim), mpass = !mtp || mchk.pass(lim);
             std::printf("check-prefill: %s: %s\n", chk.summary(lim).c_str(), pass ? "PASS" : "FAIL");
-            return pass ? 0 : 1;
+            if (mtp) std::printf("check-mtp: %s: %s\n", mchk.summary(lim).c_str(), mpass ? "PASS" : "FAIL");
+            return pass && mpass ? 0 : 1;
         }
 
         strata::glm::Trace tg, tc;
         const strata::glm::CheckLimits lim = strata::glm::check_limits(quantized_weights(model));
-        strata::glm::LogitCheck chk;
+        strata::glm::LogitCheck chk, mchk;
         strata::glm::LayerCheck layers = strata::glm::layer_check(lim);
         double gpu_s = 0;
+        // with an MTP block: its logits at every position (the draft from the token there and the hidden state the
+        // trunk left before it), against the CPU reference's and into --mtp-out
+        const bool mtp = eng.mtp_ready();
+        if (!mtp_path.empty() && !mtp) {
+            std::fprintf(stderr, "--mtp-out needs --mtp and a model with an MTP block\n");
+            return 2;
+        }
+        FILE* mout = mtp_path.empty() ? nullptr : std::fopen(mtp_path.c_str(), "wb");
+        if (!mtp_path.empty() && !mout) {
+            std::fprintf(stderr, "cannot write %s\n", mtp_path.c_str());
+            return 1;
+        }
+        if (mout) {
+            const int32_t hdr[2] = {(int32_t) c.n_vocab, (int32_t) ids.size()};
+            std::fwrite(hdr, sizeof hdr, 1, mout);
+        }
+        std::vector<float> h_prev((size_t) c.n_embd, 0.0f);
         for (size_t i = 0; i < ids.size(); ++i) {
+            if (mtp) {
+                eng.mtp_draft(ids[i]);
+                const std::vector<float>& mg = eng.mtp_logits();
+                if (mout) std::fwrite(mg.data(), sizeof(float), mg.size(), mout);
+                if (check_cpu) mchk.add(ref->mtp_eval(ids[i], h_prev.data()), mg);
+            }
             const auto a = std::chrono::steady_clock::now();
             const std::vector<float>& lg = eng.eval(ids[i], check_cpu ? &tg : nullptr);
             gpu_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - a).count();
             if (out) std::fwrite(lg.data(), sizeof(float), lg.size(), out);
             if (check_cpu) {
                 const std::vector<float>& lc = ref->eval(ids[i], &tc);
+                h_prev = ref->h();
                 const double dl = chk.add(lc, lg);
                 const auto am = [](const std::vector<float>& v) { return std::max_element(v.begin(), v.end()) - v.begin(); };
                 for (size_t l = 0; l < tc.layer_out.size(); ++l) {
@@ -391,14 +555,16 @@ int main(int argc, char** argv) {
             std::fflush(stdout);
         }
         if (out) std::fclose(out);
+        if (mout) std::fclose(mout);
         std::printf("%zu tokens, %.2f tokens/s (one at a time), expert cache hit rate %.1f%%\n", ids.size(),
                     (double) ids.size() / gpu_s, 100.0 * eng.cache_hit_rate());
         eng.save_profile();
         if (check_cpu) {
-            const bool pass = chk.pass(lim);
+            const bool pass = chk.pass(lim), mpass = !mtp || mchk.pass(lim);
             std::printf("check-cpu: %s; worst layer diff %.3g: %s\n", chk.summary(lim).c_str(), layers.worst,
                         pass ? "PASS" : "FAIL");
-            return pass ? 0 : 1;
+            if (mtp) std::printf("check-mtp: %s: %s\n", mchk.summary(lim).c_str(), mpass ? "PASS" : "FAIL");
+            return pass && mpass ? 0 : 1;
         }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "strata-glm: %s\n", e.what());

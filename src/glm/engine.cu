@@ -92,9 +92,10 @@ GpuEngine::GpuEngine(const Model& model, const EngineOptions& opt) : impl_(new I
     }
     I.out_ctx = I.ctx_of_layer.back();
 
-    // ---- scratch sizes
+    // ---- scratch sizes (the MTP block's too, when it runs: --mtp and the model has one)
+    const bool mtp = opt.mtp && model.has_mtp();
     int64_t maxH = 0, maxDI = 0, maxF = c.n_ff;
-    for (int64_t il = 0; il < c.n_layer; ++il) {
+    for (int64_t il = 0; il < c.n_layer + (mtp ? 1 : 0); ++il) {
         maxH = std::max(maxH, c.n_head[(size_t) il]);
         if (c.is_kda(il)) maxDI = std::max(maxDI, c.n_head[(size_t) il] * c.kda_head_dim);
         maxF = std::max(maxF, c.n_ff_exp[(size_t) il] * std::max<int64_t>(c.n_expert_shared, 1));
@@ -103,7 +104,7 @@ GpuEngine::GpuEngine(const Model& model, const EngineOptions& opt) : impl_(new I
     I.max_sel = std::min<int64_t>(opt.max_ctx, c.indexer_top_k + P - 1);
     I.max_pools = opt.max_ctx / P + 1;
     const int64_t max_in = std::max({hc * E, maxDI, maxF, maxH * c.head_v_mla, c.q_lora_rank, c.kv_lora_rank,
-                                     c.kda_head_dim, maxH * c.head_k_mla, maxH * c.kv_lora_rank});
+                                     c.kda_head_dim, maxH * c.head_k_mla, maxH * c.kv_lora_rank, mtp ? 2 * E : 0});
 
     I.ctx.resize(devs.size());
     for (size_t di = 0; di < devs.size(); ++di) {
@@ -165,21 +166,24 @@ GpuEngine::GpuEngine(const Model& model, const EngineOptions& opt) : impl_(new I
         if ((int) di == I.out_ctx) d.out_logits = dalloc<float>(kNMax * (size_t) c.n_vocab, b);
     }
 
-    // ---- weights and per-layer state, each on its layer's device
-    I.L.resize((size_t) c.n_layer);
-    for (int64_t il = 0; il < c.n_layer; ++il) {
+    // ---- weights and per-layer state, each on its layer's device; the MTP block (I.L[n_layer], no mHC) on the output
+    // head's, whose hidden states it reads
+    I.L.resize((size_t) (c.n_layer + (mtp ? 1 : 0)));
+    for (int64_t il = 0; il < (int64_t) I.L.size(); ++il) {
         DevLayer& l = I.L[(size_t) il];
         const LayerWeights& w = model.layer(il);
-        const DevCtx& d = I.ctx[(size_t) I.ctx_of_layer[(size_t) il]];
+        const DevCtx& d = I.ctx[(size_t) (il < c.n_layer ? I.ctx_of_layer[(size_t) il] : I.out_ctx)];
         l.dev = d.id;
         ok(cudaSetDevice(d.id), "cudaSetDevice");
         size_t* b = &l.bytes;
-        l.hc_attn_fn = gpu::upload(w.hc_attn_fn, b);
-        l.hc_ffn_fn = gpu::upload(w.hc_ffn_fn, b);
-        l.hc_attn_scale = gpu::upload_f32(w.hc_attn_scale, b);
-        l.hc_attn_base = gpu::upload_f32(w.hc_attn_base, b);
-        l.hc_ffn_scale = gpu::upload_f32(w.hc_ffn_scale, b);
-        l.hc_ffn_base = gpu::upload_f32(w.hc_ffn_base, b);
+        if (il < c.n_layer) {
+            l.hc_attn_fn = gpu::upload(w.hc_attn_fn, b);
+            l.hc_ffn_fn = gpu::upload(w.hc_ffn_fn, b);
+            l.hc_attn_scale = gpu::upload_f32(w.hc_attn_scale, b);
+            l.hc_attn_base = gpu::upload_f32(w.hc_attn_base, b);
+            l.hc_ffn_scale = gpu::upload_f32(w.hc_ffn_scale, b);
+            l.hc_ffn_base = gpu::upload_f32(w.hc_ffn_base, b);
+        }
         l.attn_norm = gpu::upload_f32(w.attn_norm, b);
         l.ffn_norm = gpu::upload_f32(w.ffn_norm, b);
         l.wo = gpu::upload(w.wo, b);
@@ -260,6 +264,26 @@ GpuEngine::GpuEngine(const Model& model, const EngineOptions& opt) : impl_(new I
         ok(cudaSetDevice(d.id), "cudaSetDevice");
         I.output = gpu::upload(model.output(), &d.bytes);
         I.output_norm = gpu::upload_f32(model.output_norm(), &d.bytes);
+        if (mtp) {
+            // the MTP block's own tensors and buffers (its layer is I.L[n_layer], above)
+            MtpState& M = I.mtp;
+            const NextnWeights& nx = model.nextn();
+            size_t* b = &I.L.back().bytes;
+            M.on = true;
+            M.eh_proj = gpu::upload(nx.eh_proj, b);
+            M.enorm = gpu::upload_f32(nx.enorm, b);
+            M.hnorm = gpu::upload_f32(nx.hnorm, b);
+            M.head_norm = gpu::upload_f32(nx.shared_head_norm.ok() ? nx.shared_head_norm : model.output_norm(), b);
+            if (nx.shared_head_head.ok()) M.head = gpu::upload(nx.shared_head_head, b);
+            M.embd = nx.embed_tokens.ok() ? &nx.embed_tokens : &model.tok_embd();
+            M.h_prev = dalloc<float>((size_t) E, b);
+            M.h_pass = dalloc<float>(kNMax * (size_t) E, b);
+            M.cat = dalloc<float>(2 * (size_t) E, b);
+            M.cur = dalloc<float>((size_t) E, b);
+            M.emb = dalloc<float>(kNMax * (size_t) E, b);
+            M.h_emb = halloc<float>(kNMax * (size_t) E);
+            M.logits.resize((size_t) c.n_vocab);
+        }
     }
 
     // ---- the prompt path's buffers, then the VRAM expert cache: what is left on each device, minus the reserve
@@ -340,11 +364,14 @@ GpuEngine::GpuEngine(const Model& model, const EngineOptions& opt) : impl_(new I
                 last = il;
                 bytes += I.L[(size_t) il].bytes;
             }
+        const bool head_here = (int) di == I.out_ctx;
+        if (head_here && I.mtp.on) bytes += I.L.back().bytes;
         char line[200];
         if (first < 0) std::snprintf(line, sizeof line, "GPU %d: no layers (%.2f GB)", I.ctx[di].id, bytes / 1e9);
         else std::snprintf(line, sizeof line, "GPU %d: layers %lld-%lld%s, %.2f GB weights and buffers, %.2f GB expert cache",
-                           I.ctx[di].id, (long long) first, (long long) last, (int) di == I.out_ctx ? " + output head" : "",
-                           bytes / 1e9, cache_bytes[di] / 1e9);
+                           I.ctx[di].id, (long long) first, (long long) last,
+                           head_here ? (I.mtp.on ? " + output head + MTP block" : " + output head") : "", bytes / 1e9,
+                           cache_bytes[di] / 1e9);
         std::string pl = line;
         if (lent_bytes[di] > 0) {
             std::snprintf(line, sizeof line, " (%.2f GB of it in the prompt buffers, between prompts)",
@@ -356,9 +383,9 @@ GpuEngine::GpuEngine(const Model& model, const EngineOptions& opt) : impl_(new I
     placement_.push_back(I.cache->summary());
     if (I.opt.kv_in_ram) {
         char line[160];
-        std::snprintf(line, sizeof line, "latent cache in page-locked RAM: %.2f GB (%zu MLA layers)",
+        std::snprintf(line, sizeof line, "latent cache in page-locked RAM: %.2f GB (%zu MLA layers%s)",
                       (double) I.kv_host.size() * (double) I.opt.max_ctx * (double) c.kv_lora_rank * 2.0 / 1e9,
-                      I.kv_host.size());
+                      I.kv_host.size() - (I.mtp.on ? 1 : 0), I.mtp.on ? " and the MTP block" : "");
         placement_.push_back(line);
     }
     if (I.opt.prefill_chunk > 1) {
@@ -387,9 +414,9 @@ size_t GpuEngine::cache_bytes() const { return impl_->cache->total_bytes(); }
 
 void GpuEngine::save_profile() const { impl_->cache->save_profile(); }
 
-void GpuEngine::freeze_cache() {
+void GpuEngine::freeze_cache(bool on) {
     impl_->cache->drain();
-    impl_->cache->freeze();
+    impl_->cache->freeze(on);
 }
 
 GpuEngine::~GpuEngine() {
@@ -408,6 +435,9 @@ GpuEngine::~GpuEngine() {
         if (I.t_pairs > 0)
             std::fprintf(stderr, "of them %lld passes of a token and its draft (2 tokens each)\n",
                          (long long) I.t_pairs);
+        if (I.mtp.drafts > 0)
+            std::fprintf(stderr, "MTP drafts: %lld, %.2f ms each\n", (long long) I.mtp.drafts,
+                         1e3 * I.mtp.t_draft / (double) I.mtp.drafts);
         if (I.r_layers > 0) {
             const double nl = (double) I.r_layers;
             std::fprintf(stderr,
@@ -454,6 +484,11 @@ void GpuEngine::reset() {
         }
         // the MLA cache and the pooled keys are only read below the current position: nothing to clear
     }
+    if (I.mtp.on) {                                    // the hidden state before position 0
+        ok(cudaSetDevice(I.L.back().dev), "cudaSetDevice");
+        ok(cudaMemset(I.mtp.h_prev, 0, (size_t) c.n_embd * sizeof(float)), "cudaMemset");
+        I.mtp.drafted = -1;
+    }
     // the clears ran on the legacy stream, which the engine's non-blocking streams do not wait for
     for (auto& d : I.ctx) {
         ok(cudaSetDevice(d.id), "cudaSetDevice");
@@ -463,10 +498,12 @@ void GpuEngine::reset() {
 
 namespace {
 
-/// Per layer (empty where the layer has none). conv holds the three windows one after another.
+/// Per layer, the MTP block's last (empty where the layer has none). conv holds the three windows one after another.
+/// mtp_h: the trunk's hidden state at pos - 1, which the MTP block reads next.
 struct GpuSnapshot : Snapshot {
     std::vector<std::vector<float>> S, conv, pend_k, pend_g, pooled;
     std::vector<std::vector<uint16_t>> cache;
+    std::vector<float> mtp_h;
 };
 
 }  // namespace
@@ -481,7 +518,7 @@ std::shared_ptr<Snapshot> GpuEngine::snapshot(bool full) {
     auto sn = std::make_shared<GpuSnapshot>();
     sn->pos = pos_;
     sn->full = full;
-    const size_t NL = (size_t) c.n_layer;
+    const size_t NL = I.L.size();
     for (auto* v : {&sn->S, &sn->conv, &sn->pend_k, &sn->pend_g, &sn->pooled}) v->resize(NL);
     sn->cache.resize(NL);
     size_t bytes = 0;
@@ -491,7 +528,11 @@ std::shared_ptr<Snapshot> GpuEngine::snapshot(bool full) {
         bytes += n * sizeof(dst[0]);
     };
     const int64_t ID = c.indexer_head_size, P = c.indexer_kpool;
-    for (int64_t il = 0; il < c.n_layer; ++il) {
+    if (I.mtp.on) {
+        ok(cudaSetDevice(I.L.back().dev), "cudaSetDevice");
+        down(sn->mtp_h, I.mtp.h_prev, (size_t) c.n_embd);
+    }
+    for (int64_t il = 0; il < (int64_t) NL; ++il) {
         const DevLayer& l = I.L[(size_t) il];
         const size_t i = (size_t) il;
         ok(cudaSetDevice(l.dev), "cudaSetDevice");
@@ -523,8 +564,8 @@ std::shared_ptr<Snapshot> GpuEngine::snapshot(bool full) {
 size_t GpuEngine::snapshot_bytes(bool full) const {
     const Config& c = impl_->c;
     const int64_t ID = c.indexer_head_size, P = c.indexer_kpool;
-    size_t b = 0;
-    for (int64_t il = 0; il < c.n_layer; ++il) {
+    size_t b = impl_->mtp.on ? (size_t) c.n_embd * sizeof(float) : 0;
+    for (int64_t il = 0; il < (int64_t) impl_->L.size(); ++il) {
         const size_t i = (size_t) il;
         if (c.is_kda(il)) {
             const int64_t H = c.n_head[i], D = c.kda_head_dim;
@@ -544,7 +585,7 @@ void GpuEngine::restore(const Snapshot& snap) {
     Impl& I = *impl_;
     const Config& c = I.c;
     const auto* sn = dynamic_cast<const GpuSnapshot*>(&snap);
-    if (!sn || sn->S.size() != (size_t) c.n_layer) throw std::runtime_error("GpuEngine::restore: not this engine's snapshot");
+    if (!sn || sn->S.size() != I.L.size()) throw std::runtime_error("GpuEngine::restore: not this engine's snapshot");
     if (sn->pos > I.opt.max_ctx) throw std::runtime_error("GpuEngine::restore: the snapshot is longer than the context");
     for (auto& d : I.ctx) {                            // nothing may still be reading the state
         ok(cudaSetDevice(d.id), "cudaSetDevice");
@@ -556,7 +597,12 @@ void GpuEngine::restore(const Snapshot& snap) {
         ok(cudaMemcpy(dst, src.data() + at, n * sizeof(src[0]), cudaMemcpyHostToDevice), "cudaMemcpy");
     };
     const int64_t ID = c.indexer_head_size, P = c.indexer_kpool;
-    for (int64_t il = 0; il < c.n_layer; ++il) {
+    if (I.mtp.on) {
+        ok(cudaSetDevice(I.L.back().dev), "cudaSetDevice");
+        up(I.mtp.h_prev, sn->mtp_h, (size_t) c.n_embd);
+        I.mtp.drafted = -1;
+    }
+    for (int64_t il = 0; il < (int64_t) I.L.size(); ++il) {
         const DevLayer& l = I.L[(size_t) il];
         const size_t i = (size_t) il;
         ok(cudaSetDevice(l.dev), "cudaSetDevice");
@@ -622,12 +668,228 @@ void GpuEngine::drop_last() {
             ok(cudaMemcpyAsync(l.conv_st[j], l.conv_bak[j], (size_t) ((c.ssm_d_conv - 1) * DI) * sizeof(float),
                                cudaMemcpyDeviceToDevice, d.stream), "drop_last");
     }
+    if (I.mtp.on) {
+        // the MTP block reads the first token's hidden state next; its row at the second position is written again
+        // by the next draft or pass there
+        DevCtx& d = I.ctx[(size_t) I.out_ctx];
+        ok(cudaSetDevice(d.id), "cudaSetDevice");
+        ok(cudaMemcpyAsync(I.mtp.h_prev, I.mtp.h_pass, (size_t) c.n_embd * sizeof(float), cudaMemcpyDeviceToDevice,
+                           d.stream), "hidden state");
+    }
     for (auto& d : I.ctx) {
         ok(cudaSetDevice(d.id), "cudaSetDevice");
         ok(cudaStreamSynchronize(d.stream), "sync");
     }
     I.pair_backup = false;
     --pos_;
+}
+
+bool GpuEngine::mtp_ready() const { return impl_->mtp.on; }
+
+const std::vector<float>& GpuEngine::mtp_logits() const { return impl_->mtp.logits; }
+
+void GpuEngine::mtp_input(int32_t token, const float* h, int slot) {
+    Impl& I = *impl_;
+    const Config& c = I.c;
+    MtpState& M = I.mtp;
+    const int64_t E = c.n_embd;
+    DevCtx& d = I.ctx[(size_t) I.out_ctx];
+    const DevLayer& l = I.L.back();
+    void* s = d.stream;
+    // the embedding, dequantized on the host into the pinned slot (the caller's stream sync frees it again)
+    float* he = M.h_emb + (size_t) slot * E;
+    float* de = M.emb + (size_t) slot * E;
+    const Tensor& te = *M.embd;
+    if (te.type == GGML_TYPE_F32) std::memcpy(he, te.row(token), (size_t) E * sizeof(float));
+    else ggml_get_type_traits((ggml_type) te.type)->to_float(te.row(token), he, E);
+    ok(cudaMemcpyAsync(de, he, (size_t) E * sizeof(float), cudaMemcpyHostToDevice, d.stream), "MTP embedding");
+    // mtp_enorm, mtp_hnorm, concatenated (embedding first), eh_proj: the block's input; then mtp_attn_norm
+    gpu::rms_norm(de, M.cat, (int) E, c.rms_eps, M.enorm, s);
+    gpu::rms_norm(h, M.cat + E, (int) E, c.rms_eps, M.hnorm, s);
+    gpu::gemv(M.eh_proj, M.cat, M.cur, d.q8, s);
+    gpu::rms_norm(M.cur, d.xn, (int) E, c.rms_eps, l.attn_norm, s);
+}
+
+void GpuEngine::mtp_rows(const int32_t* tok, int n, int64_t t, const float* h_first, const float* h_rows) {
+    Impl& I = *impl_;
+    const Config& c = I.c;
+    const MtpState& M = I.mtp;
+    const int64_t E = c.n_embd, KL = c.kv_lora_rank, ID = c.indexer_head_size, P = c.indexer_kpool;
+    DevCtx& d = I.ctx[(size_t) I.out_ctx];
+    DevLayer& l = I.L.back();
+    void* s = d.stream;
+    for (int j = 0; j < n; ++j) {
+        const int64_t p = t + j;
+        if (p == M.drafted && tok[j] == M.drafted_tok) continue;     // mtp_draft wrote this one
+        mtp_input(tok[j], j == 0 ? h_first : h_rows + (size_t) (j - 1) * E, j);
+        // what later positions' attention reads, as mla_decode writes it: the latent row, the indexer's key and gate,
+        // and the pool the position completes
+        gpu::gemv(l.kv_a, d.xn, d.kv, d.q8, s);
+        gpu::rms_norm(d.kv, d.kv, (int) KL, c.rms_eps, l.kv_a_norm, s);
+        gpu::store_f16_row(d.kv, l.cache, p, (int) KL, s);
+        if (l.head && p < I.max_sel) gpu::store_f16_row(d.kv, l.head, p, (int) KL, s);
+        gpu::gemv(l.idx_k, d.xn, d.ik, d.q8, s);
+        gpu::layer_norm(d.ik, l.pend_k + (p % P) * ID, (int) ID, c.norm_eps, l.idx_k_norm, l.idx_k_norm_b, s);
+        gpu::gemv(l.idx_gate, d.xn, l.pend_g + (p % P) * ID, d.q8, s);
+        if ((p + 1) % P == 0) gpu::kpool(l.pend_k, l.pend_g, l.idx_ape, l.pooled + (p / P) * ID, (int) P, (int) ID, s);
+    }
+}
+
+int32_t GpuEngine::mtp_draft(int32_t token) {
+    Impl& I = *impl_;
+    const Config& c = I.c;
+    MtpState& M = I.mtp;
+    if (!M.on) throw std::runtime_error("mtp_draft needs --mtp and a model with an MTP block");
+    const int64_t p = pos_, im = c.n_layer, E = c.n_embd, KU = c.n_expert_used;
+    if (p >= I.opt.max_ctx) throw std::runtime_error("the sequence is longer than the context (--ctx)");
+    if (token < 0 || token >= c.n_vocab) throw std::runtime_error("token id outside the vocabulary");
+    const auto t0 = std::chrono::steady_clock::now();
+    NvtxRange r_draft("MTP draft");
+    DevCtx& d = I.ctx[(size_t) I.out_ctx];
+    DevLayer& l = I.L.back();
+    void* s = d.stream;
+    const cudaStream_t st = d.stream;
+    ok(cudaSetDevice(d.id), "cudaSetDevice");
+
+    // graph_mtp at position p: the input, the attention (which writes the block's row p), the residual
+    mtp_input(token, M.h_prev, 0);
+    mla_decode(im, I.out_ctx, 1, p);
+    gpu::add(d.y, M.cur, (int) E, s);                                   // mtp_ffn_inp
+    ok(cudaMemcpyAsync(M.cur, d.y, (size_t) E * sizeof(float), cudaMemcpyDeviceToDevice, st), "MTP residual");
+    gpu::rms_norm(M.cur, d.xn, (int) E, c.rms_eps, l.ffn_norm, s);       // mtp_ffn_norm
+
+    // the routed experts on the CPU (they are not in the VRAM cache), the shared expert on the GPU meanwhile
+    gpu::gemv(l.gate_inp, d.xn, d.logits_e, d.q8, s);
+    gpu::route(d.logits_e, l.exp_probs_b, (int) c.n_expert, (int) KU, c.expert_gating_func, c.expert_weights_norm,
+               c.expert_weights_scale, d.ids, d.wexp, s);
+    ok(cudaMemcpyAsync(I.h_x, d.xn, (size_t) E * sizeof(float), cudaMemcpyDeviceToHost, st), "x");
+    ok(cudaMemcpyAsync(I.h_ids, d.ids, (size_t) KU * sizeof(int32_t), cudaMemcpyDeviceToHost, st), "ids");
+    ok(cudaMemcpyAsync(I.h_w, d.wexp, (size_t) KU * sizeof(float), cudaMemcpyDeviceToHost, st), "w");
+    ok(cudaStreamSynchronize(d.stream), "sync");
+    const auto shared = [&] {
+        if (c.n_expert_shared <= 0) return;
+        const int64_t FS = c.n_ff_exp[(size_t) im] * c.n_expert_shared;
+        gpu::gemv2(l.gate_shexp, l.up_shexp, d.xn, d.fg, d.fu, d.q8, s);
+        gpu::swiglu(d.fg, d.fu, d.fact, (int) FS, c.clamp_shexp[(size_t) im], s);
+        gpu::gemv(l.down_shexp, d.fact, d.ysh, d.q8, s);
+    };
+    I.experts->run(im, I.h_x, I.h_ids, I.h_w, (int) KU, I.h_yr, shared);
+    ok(cudaMemcpyAsync(d.y, I.h_yr, (size_t) E * sizeof(float), cudaMemcpyHostToDevice, st), "MTP experts");
+    if (c.n_expert_shared > 0) gpu::add(d.y, d.ysh, (int) E, s);         // mtp_ffn_out
+    gpu::add(d.y, M.cur, (int) E, s);                                   // mtp_post_ffn
+
+    // shared_head_norm (else output_norm), shared_head_head (else the output head), the most likely token
+    gpu::rms_norm(d.y, d.xn, (int) E, c.rms_eps, M.head_norm, s);
+    gpu::gemv(M.head.w ? M.head : I.output, d.xn, d.out_logits, d.q8, s);
+    ok(cudaMemcpyAsync(M.logits.data(), d.out_logits, (size_t) c.n_vocab * sizeof(float), cudaMemcpyDeviceToHost, st),
+       "MTP logits");
+    ok(cudaStreamSynchronize(d.stream), "sync");
+    M.drafted = p;
+    M.drafted_tok = token;
+    if (I.timing) {
+        M.t_draft += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        ++M.drafts;
+    }
+    return (int32_t) (std::max_element(M.logits.begin(), M.logits.end()) - M.logits.begin());
+}
+
+void GpuEngine::mla_decode(int64_t il, int ci, int n, int64_t t) {
+    Impl& I = *impl_;
+    const Config& c = I.c;
+    const int64_t E = c.n_embd, H = c.n_head[(size_t) il];
+    DevCtx& d = I.ctx[(size_t) ci];
+    DevLayer& l = I.L[(size_t) il];
+    void* s = d.stream;
+    const int64_t QL = c.q_lora_rank, KL = c.kv_lora_rank, HK = c.head_k_mla, HV = c.head_v_mla;
+    const int64_t KVW = l.kv_a.n_out, MS = I.max_sel;
+    gpu::gemv_n(l.q_a, d.xn, d.qr, n, d.q8, s);
+    for (int j = 0; j < n; ++j) gpu::rms_norm(d.qr + j * QL, d.qr + j * QL, (int) QL, c.rms_eps, l.q_a_norm, s);
+    gpu::gemv_n(l.q_b, d.qr, d.qm, n, d.q8, s);
+    gpu::gemv_n(l.kv_a, d.xn, d.kv, n, d.q8, s);
+    for (int j = 0; j < n; ++j) {
+        float* kvj = d.kv + j * KVW;
+        gpu::rms_norm(kvj, kvj, (int) KL, c.rms_eps, l.kv_a_norm, s);
+        gpu::store_f16_row(kvj, l.cache, t + j, (int) KL, s);
+        if (l.head && t + j < MS) gpu::store_f16_row(kvj, l.head, t + j, (int) KL, s);
+    }
+    for (int j = 0; j < n; ++j) {
+        const float* qmj = d.qm + j * (H * HK);
+        float* qaj = d.q_abs + j * (H * KL);
+        if (l.k_b.n_in == HK && l.k_b.n_out == H * KL) {
+            gpu::gemv_heads(l.k_b, (int) H, qmj, qaj, d.q8, s);
+        } else {
+            for (int64_t h = 0; h < H; ++h)
+                gpu::gemv(l.k_b.rows(h * KL, KL), qmj + h * HK, qaj + h * KL, d.q8, s);
+        }
+    }
+    gpu::round_f16(d.q_abs, (int) (n * H * KL), s);
+
+    if (c.indexer_full[(size_t) il]) {
+        // ---- the k-pool indexer: each token's key and gate, the pool it completes, its selection, in order
+        const int64_t IH = c.indexer_n_head, ID = c.indexer_head_size, P = c.indexer_kpool;
+        gpu::gemv_n(l.idx_q_b, d.qr, d.iq, n, d.q8, s);
+        gpu::gemv_n(l.idx_k, d.xn, d.ik, n, d.q8, s);
+        for (int j = 0; j < n; ++j) {
+            const int64_t tj = t + j;
+            gpu::layer_norm(d.ik + j * ID, l.pend_k + (tj % P) * ID, (int) ID, c.norm_eps, l.idx_k_norm,
+                            l.idx_k_norm_b, s);
+            gpu::gemv(l.idx_gate, d.xn + j * E, l.pend_g + (tj % P) * ID, d.q8, s);
+            if ((tj + 1) % P == 0)
+                gpu::kpool(l.pend_k, l.pend_g, l.idx_ape, l.pooled + (tj / P) * ID, (int) P, (int) ID, s);
+            // the n_top best of the nv complete pools on the GPU (gpu_prefill.hpp's topk_pools_rows, as the
+            // prompt path selects: ties to the lower pool, cells in pool order, then the tail), so the host
+            // neither waits for the scores nor sorts them: one sort of (t+1)/4 pools for each of the 11 layers
+            // with an indexer of their own took most of a token's time at 458K tokens of context (napster-ai)
+            const int64_t nv = (tj + 1) / P, n_top = c.indexer_top_k / P;
+            if (nv > n_top) {
+                gpu::gemv(l.idx_proj, d.xn + j * E, d.wts + j * IH, d.q8, s);
+                gpu::scale(d.wts + j * IH, (int) IH, 1.0f / std::sqrt((float) (ID * IH)), s);
+                gpu::kpool_scores(d.iq + j * (IH * ID), l.pooled, d.wts + j * IH, d.pscore, (int) nv, (int) IH,
+                                  (int) ID, s);
+            }
+            gpu::topk_pools_rows(d.pscore, std::max<int64_t>(nv, 1), 1, tj, (int) P, (int) n_top,
+                                 c.indexer_select_tail, (int) MS, d.sel + j * MS, d.n_sel1 + j, s);
+        }
+        d.dec_sel_have = ++I.dec_sel_version;
+        I.dec_sel_ctx = ci;
+    } else if (d.dec_sel_have != I.dec_sel_version) {
+        // a shared indexer layer on another device than the last full one: its selections from there (that
+        // device's stream finished when the layers moved on from it)
+        const DevCtx& from = I.ctx[(size_t) I.dec_sel_ctx];
+        ok(cudaMemcpyPeerAsync(d.sel, d.id, from.sel, from.id, (size_t) (n * MS) * sizeof(int32_t),
+                               d.stream), "selection");
+        d.dec_sel_have = I.dec_sel_version;
+    }
+    for (int j = 0; j < n; ++j) {
+        // the cells selected: every one up to t while the pools fit in n_top, else n_top pools, and the tail
+        const int64_t tj = t + j, P = c.indexer_kpool, nv = (tj + 1) / P,
+                      n_top = std::max<int64_t>(c.indexer_top_k / P, 0);
+        const int n_sel = (int) (std::min(nv, n_top) * P + (c.indexer_select_tail ? (tj + 1) % P : 0));
+        if (n_sel == 0 || n_sel > MS) throw std::runtime_error("indexer selection of an unexpected size");
+
+        // --kv-in-ram: the selected rows read from host memory into kvsel, then attended in order; in the
+        // dense range every selected cell is in the VRAM head
+        const uint16_t* kc = l.cache;
+        const int32_t* ks = d.sel + j * MS;
+        if (l.head && tj < MS) {
+            kc = l.head;
+        } else if (l.head) {
+            gpu::gather_host_rows(l.cache, d.sel + j * MS, nullptr, n_sel, (int) KL, d.kvsel, s);
+            kc = d.kvsel;
+            ks = d.iota;
+        }
+        float* latj = d.lat + j * (H * KL);
+        gpu::mla_attend(d.q_abs + j * (H * KL), kc, ks, n_sel, d.scores, latj, (int) H, (int) KL,
+                        1.0f / std::sqrt((float) HK), s);
+        float* hdj = d.heads + j * (H * HV);
+        if (l.v_b.n_in == KL && l.v_b.n_out == H * HV) {
+            gpu::gemv_heads(l.v_b, (int) H, latj, hdj, d.q8, s);
+        } else {
+            for (int64_t h = 0; h < H; ++h)
+                gpu::gemv(l.v_b.rows(h * HV, HV), latj + h * KL, hdj + h * HV, d.q8, s);
+        }
+    }
+    gpu::gemv_n(l.wo, d.heads, d.y, n, d.q8, s);
 }
 
 void GpuEngine::eval_n(const int32_t* tok, int n, Trace* trace) {
@@ -972,96 +1234,7 @@ void GpuEngine::eval_n(const int32_t* tok, int n, Trace* trace) {
             // op by op; token j is at position t + j and attends the cells up to it, so the second token's latent
             // row, stored with the first's, is never among the first's
             attn_head();
-            const int64_t QL = c.q_lora_rank, KL = c.kv_lora_rank, HK = c.head_k_mla, HV = c.head_v_mla;
-            const int64_t KVW = l.kv_a.n_out, MS = I.max_sel;
-            gpu::gemv_n(l.q_a, d.xn, d.qr, n, d.q8, s);
-            for (int j = 0; j < n; ++j) gpu::rms_norm(d.qr + j * QL, d.qr + j * QL, (int) QL, c.rms_eps, l.q_a_norm, s);
-            gpu::gemv_n(l.q_b, d.qr, d.qm, n, d.q8, s);
-            gpu::gemv_n(l.kv_a, d.xn, d.kv, n, d.q8, s);
-            for (int j = 0; j < n; ++j) {
-                float* kvj = d.kv + j * KVW;
-                gpu::rms_norm(kvj, kvj, (int) KL, c.rms_eps, l.kv_a_norm, s);
-                gpu::store_f16_row(kvj, l.cache, t + j, (int) KL, s);
-                if (l.head && t + j < MS) gpu::store_f16_row(kvj, l.head, t + j, (int) KL, s);
-            }
-            for (int j = 0; j < n; ++j) {
-                const float* qmj = d.qm + j * (H * HK);
-                float* qaj = d.q_abs + j * (H * KL);
-                if (l.k_b.n_in == HK && l.k_b.n_out == H * KL) {
-                    gpu::gemv_heads(l.k_b, (int) H, qmj, qaj, d.q8, s);
-                } else {
-                    for (int64_t h = 0; h < H; ++h)
-                        gpu::gemv(l.k_b.rows(h * KL, KL), qmj + h * HK, qaj + h * KL, d.q8, s);
-                }
-            }
-            gpu::round_f16(d.q_abs, (int) (n * H * KL), s);
-
-            if (c.indexer_full[(size_t) il]) {
-                // ---- the k-pool indexer: each token's key and gate, the pool it completes, its selection, in order
-                const int64_t IH = c.indexer_n_head, ID = c.indexer_head_size, P = c.indexer_kpool;
-                gpu::gemv_n(l.idx_q_b, d.qr, d.iq, n, d.q8, s);
-                gpu::gemv_n(l.idx_k, d.xn, d.ik, n, d.q8, s);
-                for (int j = 0; j < n; ++j) {
-                    const int64_t tj = t + j;
-                    gpu::layer_norm(d.ik + j * ID, l.pend_k + (tj % P) * ID, (int) ID, c.norm_eps, l.idx_k_norm,
-                                    l.idx_k_norm_b, s);
-                    gpu::gemv(l.idx_gate, d.xn + j * E, l.pend_g + (tj % P) * ID, d.q8, s);
-                    if ((tj + 1) % P == 0)
-                        gpu::kpool(l.pend_k, l.pend_g, l.idx_ape, l.pooled + (tj / P) * ID, (int) P, (int) ID, s);
-                    // the n_top best of the nv complete pools on the GPU (gpu_prefill.hpp's topk_pools_rows, as the
-                    // prompt path selects: ties to the lower pool, cells in pool order, then the tail), so the host
-                    // neither waits for the scores nor sorts them: one sort of (t+1)/4 pools for each of the 11 layers
-                    // with an indexer of their own took most of a token's time at 458K tokens of context (napster-ai)
-                    const int64_t nv = (tj + 1) / P, n_top = c.indexer_top_k / P;
-                    if (nv > n_top) {
-                        gpu::gemv(l.idx_proj, d.xn + j * E, d.wts + j * IH, d.q8, s);
-                        gpu::scale(d.wts + j * IH, (int) IH, 1.0f / std::sqrt((float) (ID * IH)), s);
-                        gpu::kpool_scores(d.iq + j * (IH * ID), l.pooled, d.wts + j * IH, d.pscore, (int) nv, (int) IH,
-                                          (int) ID, s);
-                    }
-                    gpu::topk_pools_rows(d.pscore, std::max<int64_t>(nv, 1), 1, tj, (int) P, (int) n_top,
-                                         c.indexer_select_tail, (int) MS, d.sel + j * MS, d.n_sel1 + j, s);
-                }
-                d.dec_sel_have = ++I.dec_sel_version;
-                I.dec_sel_ctx = ci;
-            } else if (d.dec_sel_have != I.dec_sel_version) {
-                // a shared indexer layer on another device than the last full one: its selections from there (that
-                // device's stream finished when the layers moved on from it)
-                const DevCtx& from = I.ctx[(size_t) I.dec_sel_ctx];
-                ok(cudaMemcpyPeerAsync(d.sel, d.id, from.sel, from.id, (size_t) (n * MS) * sizeof(int32_t),
-                                       d.stream), "selection");
-                d.dec_sel_have = I.dec_sel_version;
-            }
-            for (int j = 0; j < n; ++j) {
-                // the cells selected: every one up to t while the pools fit in n_top, else n_top pools, and the tail
-                const int64_t tj = t + j, P = c.indexer_kpool, nv = (tj + 1) / P,
-                              n_top = std::max<int64_t>(c.indexer_top_k / P, 0);
-                const int n_sel = (int) (std::min(nv, n_top) * P + (c.indexer_select_tail ? (tj + 1) % P : 0));
-                if (n_sel == 0 || n_sel > MS) throw std::runtime_error("indexer selection of an unexpected size");
-
-                // --kv-in-ram: the selected rows read from host memory into kvsel, then attended in order; in the
-                // dense range every selected cell is in the VRAM head
-                const uint16_t* kc = l.cache;
-                const int32_t* ks = d.sel + j * MS;
-                if (l.head && tj < MS) {
-                    kc = l.head;
-                } else if (l.head) {
-                    gpu::gather_host_rows(l.cache, d.sel + j * MS, nullptr, n_sel, (int) KL, d.kvsel, s);
-                    kc = d.kvsel;
-                    ks = d.iota;
-                }
-                float* latj = d.lat + j * (H * KL);
-                gpu::mla_attend(d.q_abs + j * (H * KL), kc, ks, n_sel, d.scores, latj, (int) H, (int) KL,
-                                1.0f / std::sqrt((float) HK), s);
-                float* hdj = d.heads + j * (H * HV);
-                if (l.v_b.n_in == KL && l.v_b.n_out == H * HV) {
-                    gpu::gemv_heads(l.v_b, (int) H, latj, hdj, d.q8, s);
-                } else {
-                    for (int64_t h = 0; h < H; ++h)
-                        gpu::gemv(l.v_b.rows(h * HV, HV), latj + h * KL, hdj + h * HV, d.q8, s);
-                }
-            }
-            gpu::gemv_n(l.wo, d.heads, d.y, n, d.q8, s);
+            mla_decode(il, ci, n, t);
             attn_tail();
             nvtx_pop();
             decode_segment(d, graphs[(size_t) il], il, ffn_head);
@@ -1253,6 +1426,17 @@ void GpuEngine::eval_n(const int32_t* tok, int n, Trace* trace) {
     float* lg = n == 1 ? I.logits.data() : I.plogits.data();
     ok(cudaMemcpyAsync(lg, d.out_logits, (size_t) (n * c.n_vocab) * sizeof(float), cudaMemcpyDeviceToHost, d.stream),
        "logits");
+    if (I.mtp.on) {
+        // --mtp: the MTP block's rows for this pass's positions, from its tokens and the hidden states before them;
+        // the pass's own hidden states kept (xn is scratch for the block), the last one for the next position's
+        MtpState& M = I.mtp;
+        ok(cudaMemcpyAsync(M.h_pass, d.xn, (size_t) (n * E) * sizeof(float), cudaMemcpyDeviceToDevice, d.stream),
+           "hidden states");
+        mtp_rows(tok, n, t, M.h_prev, M.h_pass);
+        ok(cudaMemcpyAsync(M.h_prev, M.h_pass + (n - 1) * E, (size_t) E * sizeof(float), cudaMemcpyDeviceToDevice,
+                           d.stream), "hidden state");
+        M.drafted = -1;
+    }
     const auto t_lw = tclock::now();
     ok(cudaStreamSynchronize(d.stream), "sync");
     const auto t_m = tclock::now();

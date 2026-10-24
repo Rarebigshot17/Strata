@@ -102,8 +102,8 @@ public:
     /// Writes the scores to the profile path (no-op without one).
     void save_profile() const;
     /// From now on no copies are queued: the cache keeps the experts it holds (a test setting: two runs then place
-    /// each expert alike).
-    void freeze() { frozen_ = true; }
+    /// each expert alike); freeze(false) lets it change again.
+    void freeze(bool on = true) { frozen_ = on; }
 
     /// STRATA_GLM_VERIFY: the bytes in `slot` of layer `il` against expert `e` in RAM; prints the first difference.
     bool check_slot(int64_t il, int slot, int e, const char* what) const;

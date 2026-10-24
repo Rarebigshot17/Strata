@@ -34,7 +34,7 @@ struct EngineOptions {
     bool decode_graphs = true;       ///< a decoded token's fixed runs of ops as one CUDA graph per layer (--no-decode-graphs)
     bool lend_prompt_buffers = true; ///< between prompts the prompt buffers hold expert-cache slots (--no-lend-prompt-buffers)
     int lend_min_prompt = 64;        ///< with that, a shorter prompt runs token by token (--lend-min-prompt)
-    bool mtp = false;                ///< a token and its draft in one pass, and the MTP layer (--mtp)
+    bool mtp = false;                ///< a token and its draft in one pass, and the model's MTP block (--mtp)
     ExpertCacheOptions cache;
 };
 
@@ -53,6 +53,14 @@ public:
     const float* eval_pair(int32_t a, int32_t b);
     /// Right after eval_pair: takes its second token back (pos() goes back by one), as if only `a` had run.
     void drop_last();
+    /// --mtp on a model with an MTP block (Model::has_mtp): mtp_draft works, and every pass (eval, eval_pair, the
+    /// prompt's chunks) writes the block's rows for its positions, from its tokens and the trunk's hidden states.
+    bool mtp_ready() const;
+    /// The MTP block at pos(): `token` (sampled from the last logits, not run yet) with the hidden state the trunk
+    /// left at pos() - 1. Returns the block's most likely next token, the draft for eval_pair(token, draft); its
+    /// logits in mtp_logits(). The pass over `token` at pos() keeps the row this wrote.
+    int32_t mtp_draft(int32_t token);
+    const std::vector<float>& mtp_logits() const;
     /// Runs `n` prompt tokens in chunks; returns the last one's logits. `progress(done)` after each chunk; false
     /// from it stops early (the state then holds the tokens read so far, pos() says how many).
     const std::vector<float>& prefill(const int32_t* ids, int64_t n,
@@ -75,12 +83,24 @@ public:
     uint64_t ticks() const { return ticks_.load(std::memory_order_relaxed); }
     /// Writes the expert use profile (when --expert-profile names a file).
     void save_profile() const;
-    /// The expert cache's copies land, and it then keeps what it holds (--check-pairs: two runs place experts alike).
-    void freeze_cache();
+    /// The expert cache's copies land, and it then keeps what it holds (--check-pairs: two runs place experts alike);
+    /// freeze_cache(false) lets it change again.
+    void freeze_cache(bool on = true);
 
 private:
     /// eval and eval_pair: `n` tokens (1 or 2) at the next positions
     void eval_n(const int32_t* tok, int n, Trace* trace);
+    /// eval_n's MLA attention: layer `il` (or the MTP block, il == n_layer) on device `ci`, `n` tokens at positions
+    /// t..t+n-1, from the device's normed input xn to its y
+    void mla_decode(int64_t il, int ci, int n, int64_t t);
+    /// --mtp: the MTP block's input at one position into its `cur`: eh_proj of [enorm(token's embedding), hnorm(h)],
+    /// then attn_norm into the output device's xn; `slot` (< kNMax) is the embedding's staging row
+    void mtp_input(int32_t token, const float* h, int slot);
+    /// --mtp: the MTP block's rows (its latent row, its indexer's key and gate) at positions t..t+n-1 of a decode
+    /// pass, the hidden state before position t being `h_first` and before t + j the pass's row j - 1
+    void mtp_rows(const int32_t* tok, int n, int64_t t, const float* h_first, const float* h_rows);
+    /// --mtp: the same for a prompt chunk of T tokens at t0 (engine_prefill.cu), from the streams it left
+    void mtp_rows_chunk(const int32_t* ids, int T, int64_t t0);
     /// T prompt tokens; `sparse`: past the indexer's dense range, each query attends its own selection
     bool run_chunk(const int32_t* ids, int T, bool sparse);
     void setup_prefill();                        ///< the chunk buffers, before the expert cache takes the rest

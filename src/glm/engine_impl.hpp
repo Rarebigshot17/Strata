@@ -159,6 +159,25 @@ struct DevCtx {
     cudaEvent_t ev_pf_free = nullptr;
 };
 
+/// --mtp on a model with an MTP block: the block on the output head's device, its layer I.L[n_layer]. Cell p of its
+/// latent cache and indexer holds what the block makes of the token at p and the trunk's hidden state at p - 1; every
+/// pass writes its own positions' (mtp_rows, mtp_rows_chunk), mtp_draft its position's with the whole block.
+struct MtpState {
+    bool on = false;
+    DevMatrix eh_proj, head;                 ///< head: shared_head_head (absent: the output head)
+    float *enorm = nullptr, *hnorm = nullptr, *head_norm = nullptr;
+    const Tensor* embd = nullptr;            ///< embed_tokens, or token_embd
+    float* h_prev = nullptr;                 ///< the trunk's hidden state at pos() - 1 (zeros at 0)
+    float* h_pass = nullptr;                 ///< the last decode pass's (kNMax rows), for drop_last
+    float *cat = nullptr, *cur = nullptr, *emb = nullptr;   ///< [enorm(emb), hnorm(h)], eh_proj's output, emb
+    float* h_emb = nullptr;                  ///< pinned: kNMax embedding rows
+    int64_t drafted = -1;                    ///< the position mtp_draft wrote last, with this token
+    int32_t drafted_tok = -1;
+    std::vector<float> logits;               ///< mtp_draft's
+    double t_draft = 0;                      ///< STRATA_GLM_TIMING: seconds in mtp_draft, and the drafts
+    int64_t drafts = 0;
+};
+
 struct GpuEngine::Impl {
     const Model& m;
     const Config& c;
@@ -216,6 +235,7 @@ struct GpuEngine::Impl {
     // --mtp: the logits of the last pair, and whether drop_last may take its second token back
     std::vector<float> plogits;
     bool pair_backup = false;
+    MtpState mtp;
     int64_t graph_recaptures = 0;
     // --lend-prompt-buffers: the prompt path has its buffers back from the expert cache (from a prompt until the next
     // decoded token); prefill is running; how often a prompt took them back, and the short prompts that did not

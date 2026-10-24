@@ -17,8 +17,14 @@
 # replayed as CUDA graphs (--decode-graphs; it fails if a layer fell back to launching op by op), the prompt path's
 # buffers lent to the expert cache between prompts (--lend-prompt-buffers with one slot of its own per layer; it fails
 # if nothing was lent), decoding in pairs (--mtp --check-pairs: a token and the next in one pass, some second tokens
-# taken back, bitwise against one token at a time; with the VRAM cache and with every expert on the CPU), then the
-# GPU's logits against llama.cpp's.
+# taken back, bitwise against one token at a time; with the VRAM cache and with every expert on the CPU), the MTP
+# block's logits at every position against the CPU reference's (--mtp --check-cpu: one token at a time, and after
+# the prompt in chunks, with the latent cache in VRAM and in host RAM), greedy decoding with the MTP block's drafts
+# against one token at a time (--check-generate: the same tokens), then the GPU's logits and its MTP block's against
+# llama.cpp's.
+#
+# test-llama-archs writes no MTP block, which GLM-5.3-Flash has: glm53_add_mtp.py adds one to every model, and v1-heads
+# is v1 with the block's optional tensors (its own head norm and head, its own embedding).
 # Last, conversation parking (tools/glm53_park_check.py), also with the latent cache in host RAM.
 #
 # The GPU quantizes activations to q8_1 like llama.cpp's CUDA backend, so on quantized weights its logits differ from
@@ -76,10 +82,14 @@ else
 fi
 
 "$LB/bin/test-llama-archs" -a glm5-next -o "$W/" > /dev/null 2>&1 || { echo "test-llama-archs failed"; exit 1; }
-python3 "$HERE/glm53_tiny_variant.py" "$W/glm5-next-moe.gguf" "$W/v1.gguf" \
-    glm5-next.attention.indexer.top_k=8 glm5-next.swiglu_clamp_exp=0.05 glm5-next.swiglu_clamp_shexp=0.03 \
-    glm5-next.expert_weights_scale=2.5 glm5-next.expert_weights_norm=true \
-    glm5-next.hyper_connection.sinkhorn_iterations=20 > /dev/null || exit 1
+mv "$W/glm5-next-moe.gguf" "$W/base.gguf"
+python3 "$HERE/glm53_add_mtp.py" "$W/base.gguf" "$W/glm5-next-moe.gguf" > /dev/null || exit 1
+python3 "$HERE/glm53_add_mtp.py" "$W/base.gguf" "$W/heads.gguf" --shared-head --embed-tokens > /dev/null || exit 1
+V1=(glm5-next.attention.indexer.top_k=8 glm5-next.swiglu_clamp_exp=0.05 glm5-next.swiglu_clamp_shexp=0.03
+    glm5-next.expert_weights_scale=2.5 glm5-next.expert_weights_norm=true
+    glm5-next.hyper_connection.sinkhorn_iterations=20)
+python3 "$HERE/glm53_tiny_variant.py" "$W/glm5-next-moe.gguf" "$W/v1.gguf" "${V1[@]}" > /dev/null || exit 1
+python3 "$HERE/glm53_tiny_variant.py" "$W/heads.gguf" "$W/v1-heads.gguf" "${V1[@]}" > /dev/null || exit 1
 # v1 without the keys the released GGUF does not carry (glm53_selftest.sh): the engine must take llama.cpp's defaults
 python3 "$HERE/glm53_tiny_variant.py" "$W/v1.gguf" "$W/v1-bare.gguf" \
     -glm5-next.attention.indexer.kpool_select_tail -glm5-next.attention.indexer.types > /dev/null || exit 1
@@ -88,7 +98,7 @@ python3 "$HERE/glm53_tiny_variant.py" "$W/v1.gguf" "$W/v1-bare.gguf" \
 python3 -c "import random; random.seed(1); print(','.join(str(random.randrange(128)) for _ in range(40)))" > "$W/ids.txt"
 
 fail=0
-for m in glm5-next-moe v1 v1-bare q4_0 q8_0; do
+for m in glm5-next-moe v1 v1-bare q4_0 q8_0 v1-heads; do
     echo "== $m"
     if ! "$SB/strata-glm" -m "$W/$m.gguf" --tokens-file "$W/ids.txt" --out "$W/gpu_$m.bin" --check-cpu > "$W/log_$m.txt" 2>&1; then
         fail=1
@@ -180,6 +190,33 @@ for m in glm5-next-moe v1 v1-bare q4_0 q8_0; do
             grep -E "^check-pairs|strata-glm:|CUDA" "$W/pairs${nc:+_cpu}_$m.txt" | head -4; fail=1
         fi
     done
+    # the MTP block (--mtp): its logits at every position, from the token there and the hidden state before, against
+    # the CPU reference's, one token at a time (and into a file for llama.cpp's below); then at 4 decoded tokens after
+    # the prompt in chunks of 16, 6 rows at a time, which wrote the block's rows for the prompt (mtp_rows_chunk),
+    # with the latent cache in VRAM and in host RAM
+    if "$SB/strata-glm" -m "$W/$m.gguf" --tokens-file "$W/ids.txt" --mtp --check-cpu --mtp-out "$W/mtpgpu_$m.bin" \
+            > "$W/mtp_$m.txt" 2>&1; then
+        echo "MTP block: $(grep -E "^check-mtp" "$W/mtp_$m.txt")"
+    else
+        echo "MTP block FAILED:"; grep -E "^check-|strata-glm:|CUDA" "$W/mtp_$m.txt" | head -4; fail=1
+    fi
+    for kv in "" "--kv-in-ram"; do
+        label="MTP block after the prompt${kv:+, latent cache in RAM}"
+        if "$SB/strata-glm" -m "$W/$m.gguf" --tokens-file "$W/ids.txt" --mtp --prefill --prefill-chunk 16 \
+                --prefill-rows 6 --check-cpu $kv > "$W/mtppp${kv:+_kv}_$m.txt" 2>&1; then
+            echo "$label: $(grep -E "^check-mtp" "$W/mtppp${kv:+_kv}_$m.txt")"
+        else
+            echo "$label FAILED:"; grep -E "^check-|strata-glm:|CUDA" "$W/mtppp${kv:+_kv}_$m.txt" | head -4; fail=1
+        fi
+    done
+    # 24 tokens decoded greedily after the 40-token prompt, with the MTP block's drafts (each taken or taken back) and
+    # one at a time: the same tokens
+    if "$SB/strata-glm" -m "$W/$m.gguf" --tokens-file "$W/ids.txt" --mtp --check-generate 24 --prefill-chunk 16 \
+            > "$W/gen_$m.txt" 2>&1; then
+        echo "decode with drafts: $(grep -E "^check-generate" "$W/gen_$m.txt")"
+    else
+        echo "decode with drafts FAILED:"; grep -E "^check-|^token|strata-glm:|CUDA" "$W/gen_$m.txt" | head -4; fail=1
+    fi
     # decoding with each layer's ops up to the routing captured once and replayed as a CUDA graph (the default since
     # 2026-10-24, named here so the run says so), the VRAM cache on
     if "$SB/strata-glm" -m "$W/$m.gguf" --tokens-file "$W/ids.txt" --check-cpu --decode-graphs \
@@ -191,7 +228,7 @@ for m in glm5-next-moe v1 v1-bare q4_0 q8_0; do
         grep -E "^check-cpu" "$W/graphs_$m.txt"; fail=1
     fi
     CUDA_VISIBLE_DEVICES= "$LB/bin/llama-strata-ref" -m "$W/$m.gguf" --tokens-file "$W/ids.txt" -c 256 -b 1 -ub 1 \
-        -fa off -ctk f32 -ctv f32 --out "$W/ref_$m.bin" > "$W/ref_$m.txt" 2>&1
+        -fa off -ctk f32 -ctv f32 --out "$W/ref_$m.bin" --mtp-out "$W/refmtp_$m.bin" > "$W/ref_$m.txt" 2>&1
     if [ ! -s "$W/ref_$m.bin" ]; then
         echo "FAIL vs llama.cpp: llama-strata-ref wrote no logits:"; tail -4 "$W/ref_$m.txt"; fail=1
     elif [ ! -s "$W/gpu_$m.bin" ]; then
@@ -202,6 +239,16 @@ for m in glm5-next-moe v1 v1-bare q4_0 q8_0; do
         res=$(python3 "$HERE/glm53_compare.py" "$W/ref_$m.bin" "$W/gpu_$m.bin" --kl-max 1e-5 --top1-min 0 \
             --rel-diff-max "$rel") || fail=1
         echo "vs llama.cpp: $(echo "$res" | tail -2 | tr '\n' ' ')"
+    fi
+    # the MTP block's logits against llama.cpp's MTP head (draft-mtp's graph), by the same rule
+    if [ ! -s "$W/refmtp_$m.bin" ]; then
+        echo "FAIL MTP vs llama.cpp: llama-strata-ref wrote no MTP logits:"; tail -4 "$W/ref_$m.txt"; fail=1
+    elif [ ! -s "$W/mtpgpu_$m.bin" ]; then
+        echo "FAIL MTP vs llama.cpp: strata-glm wrote no MTP logits (its lines above)"; fail=1
+    else
+        res=$(python3 "$HERE/glm53_compare.py" "$W/refmtp_$m.bin" "$W/mtpgpu_$m.bin" --kl-max 1e-5 --top1-min 0 \
+            --rel-diff-max "$rel") || fail=1
+        echo "MTP vs llama.cpp: $(echo "$res" | tail -2 | tr '\n' ' ')"
     fi
 done
 # conversations parked in host memory and restored (over every GPU the layers are split across), against fresh

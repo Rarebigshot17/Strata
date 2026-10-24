@@ -302,8 +302,9 @@ void GpuEngine::setup_prefill() {
         }
         // the largest weight a product dequantizes on this device, and the largest activation it converts
         size_t welems = (size_t) (E * maxF);
-        for (int64_t il = 0; il < c.n_layer; ++il) {
-            if (I.ctx_of_layer[(size_t) il] != (int) di) continue;
+        if (I.mtp.on && (int) di == I.out_ctx) welems = std::max(welems, (size_t) (2 * E * E));   // eh_proj
+        for (int64_t il = 0; il < (int64_t) I.L.size(); ++il) {   // the MTP block's too, on the output device
+            if ((il < c.n_layer ? I.ctx_of_layer[(size_t) il] : I.out_ctx) != (int) di) continue;
             const DevLayer& l = I.L[(size_t) il];
             for (const DevMatrix* m : {&l.hc_attn_fn, &l.hc_ffn_fn, &l.wo, &l.wq, &l.wk, &l.wv, &l.f_a, &l.f_b,
                                        &l.beta, &l.g_a, &l.g_b, &l.q_a, &l.q_b, &l.kv_a, &l.k_b, &l.v_b, &l.idx_q_b,
@@ -1160,6 +1161,7 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
     gpu::gemv(I.output, d.xn, d.out_logits, d.q8, d.stream);
     ok(cudaMemcpyAsync(I.logits.data(), d.out_logits, (size_t) c.n_vocab * sizeof(float), cudaMemcpyDeviceToHost,
                        d.stream), "logits");
+    if (I.mtp.on) mtp_rows_chunk(ids, T, t0);
     {
         NvtxRange r_end("chunk end: wait for every card");
         for (auto& dc : I.ctx) {
@@ -1176,6 +1178,92 @@ bool GpuEngine::run_chunk(const int32_t* ids, int T, bool sparse) {
         std::fprintf(stderr, "STRATA_GLM_PROFILE: stopped after the chunk at %lld\n", (long long) t0);
     }
     return true;
+}
+
+void GpuEngine::mtp_rows_chunk(const int32_t* ids, int T, int64_t t0) {
+    Impl& I = *impl_;
+    const Config& c = I.c;
+    MtpState& M = I.mtp;
+    const int64_t E = c.n_embd, hc = c.hc, KL = c.kv_lora_rank, ID = c.indexer_head_size, P = c.indexer_kpool;
+    DevCtx& d = I.ctx[(size_t) I.out_ctx];
+    DevLayer& l = I.L.back();
+    void* s = d.stream;
+    const cudaStream_t st = d.stream;
+    gpu::GemmCtx& G = *d.gemm;
+    NvtxRange r_mtp("MTP rows");
+    // the chunk's hidden states (hc_head, output_norm) into pxn, row j at t0 + j; the trunk is done with pxn and py
+    gpu::hc_mean_rows(d.pR, d.py, T, (int) hc, (int) E, s);
+    gpu::rms_norm_rows(d.py, d.pxn, T, (int) E, c.rms_eps, I.output_norm, s);
+    // the tokens' embeddings (embed_tokens, else token_embd) into py; a pageable source is staged before the call
+    // returns, as run_chunk's
+    {
+        std::vector<float> emb((size_t) T * E);
+        const Tensor& te = *M.embd;
+        for (int t = 0; t < T; ++t) {
+            float* row = emb.data() + (size_t) t * E;
+            if (te.type == GGML_TYPE_F32) std::memcpy(row, te.row(ids[t]), (size_t) E * sizeof(float));
+            else ggml_get_type_traits((ggml_type) te.type)->to_float(te.row(ids[t]), row, E);
+        }
+        ok(cudaMemcpyAsync(d.py, emb.data(), emb.size() * sizeof(float), cudaMemcpyHostToDevice, st),
+           "MTP embeddings");
+    }
+    // Ta rows at a time: [enorm(embedding), hnorm(the hidden state before)] through eh_proj and attn_norm, then what
+    // later positions' attention reads, as run_chunk writes it for a trunk layer: the latent rows, the indexer's keys
+    // and gates, the pools they complete (the one being filled carries over)
+    const int Ta = I.prefill_rows;
+    const size_t f = sizeof(float);
+    for (int a0 = 0; a0 < T; a0 += Ta) {
+        const int ta = std::min(Ta, T - a0);
+        const int64_t tp = t0 + a0, r = tp % P;
+        Bump A{d.arena, d.arena_bytes};
+        float* cat = A.take<float>((size_t) ta * 2 * E);
+        float* tmp = A.take<float>((size_t) ta * E);
+        float* cur = A.take<float>((size_t) ta * E);
+        float* xn = A.take<float>((size_t) ta * E);
+        float* kv = A.take<float>((size_t) ta * KL);
+        float* ik = A.take<float>((size_t) ta * ID);
+        float* kb = A.take<float>((size_t) (P + ta) * ID);
+        float* gb = A.take<float>((size_t) (P + ta) * ID);
+        // the hidden states before the rows: the chunk's own, and before its first row the one the last pass left
+        const float* hb = a0 > 0 ? d.pxn + (size_t) (a0 - 1) * E : nullptr;
+        if (a0 == 0) {
+            float* h0 = A.take<float>((size_t) ta * E);
+            ok(cudaMemcpyAsync(h0, M.h_prev, E * f, cudaMemcpyDeviceToDevice, st), "hidden state");
+            if (ta > 1)
+                ok(cudaMemcpyAsync(h0 + E, d.pxn, (size_t) (ta - 1) * E * f, cudaMemcpyDeviceToDevice, st),
+                   "hidden states");
+            hb = h0;
+        }
+        gpu::rms_norm_rows(d.py + (size_t) a0 * E, tmp, ta, (int) E, c.rms_eps, M.enorm, s);
+        ok(cudaMemcpy2DAsync(cat, 2 * E * f, tmp, E * f, E * f, ta, cudaMemcpyDeviceToDevice, st), "MTP input");
+        gpu::rms_norm_rows(hb, tmp, ta, (int) E, c.rms_eps, M.hnorm, s);
+        ok(cudaMemcpy2DAsync(cat + E, 2 * E * f, tmp, E * f, E * f, ta, cudaMemcpyDeviceToDevice, st), "MTP input");
+        G.gemm(M.eh_proj, cat, ta, cur, s);
+        gpu::rms_norm_rows(cur, xn, ta, (int) E, c.rms_eps, l.attn_norm, s);
+        G.gemm(l.kv_a, xn, ta, kv, s);
+        gpu::rms_norm_rows(kv, kv, ta, (int) KL, c.rms_eps, l.kv_a_norm, s);
+        gpu::store_f16_rows(kv, l.cache, tp, ta, (int) KL, s);
+        if (l.head && tp < I.max_sel)
+            gpu::store_f16_rows(kv, l.head, tp, (int) std::min<int64_t>(ta, I.max_sel - tp), (int) KL, s);
+        if (r) {
+            ok(cudaMemcpyAsync(kb, l.pend_k, (size_t) (r * ID) * f, cudaMemcpyDeviceToDevice, st), "pending keys");
+            ok(cudaMemcpyAsync(gb, l.pend_g, (size_t) (r * ID) * f, cudaMemcpyDeviceToDevice, st), "pending gates");
+        }
+        G.gemm(l.idx_k, xn, ta, ik, s);
+        gpu::layer_norm_rows(ik, kb + r * ID, ta, (int) ID, c.norm_eps, l.idx_k_norm, l.idx_k_norm_b, s);
+        G.gemm(l.idx_gate, xn, ta, gb + r * ID, s);
+        const int64_t n_done = (r + ta) / P, rem = (r + ta) % P;
+        gpu::kpool_rows(kb, gb, l.idx_ape, l.pooled, (tp - r) / P, (int) n_done, 0, (int) P, (int) ID, s);
+        if (rem) {
+            ok(cudaMemcpyAsync(l.pend_k, kb + n_done * P * ID, (size_t) (rem * ID) * f, cudaMemcpyDeviceToDevice, st),
+               "pending keys");
+            ok(cudaMemcpyAsync(l.pend_g, gb + n_done * P * ID, (size_t) (rem * ID) * f, cudaMemcpyDeviceToDevice, st),
+               "pending gates");
+        }
+    }
+    // the hidden state at the chunk's last position, for the next one's row
+    ok(cudaMemcpyAsync(M.h_prev, d.pxn + (size_t) (T - 1) * E, E * f, cudaMemcpyDeviceToDevice, st), "hidden state");
+    M.drafted = -1;
 }
 
 }  // namespace strata::glm
