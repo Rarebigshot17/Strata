@@ -133,6 +133,44 @@ void gemv2(const DevMatrix& a, const DevMatrix& b, const float* x, float* ya, fl
     gemv(b, x, yb, q8, stream);
 }
 
+void gemv_n(const DevMatrix& m, const float* x, float* y, int n, void* q8, void* stream) {
+    if (n == 1) {
+        gemv(m, x, y, q8, stream);
+        return;
+    }
+    switch (m.path) {
+        case DevMatrix::Mmvq:
+            strata::kernels::native_quantize_q8_1(x, q8, (int) m.n_in, n, stream);
+            strata::kernels::native_mmvq(m.type, m.w, q8, y, (int) m.n_in, (int) m.n_out, n, stream);
+            break;
+        case DevMatrix::IqMmvq:
+            strata::kernels::quantize_q8_1_rows(x, n, m.n_in, q8, stream);
+            strata::kernels::iq_mmvq(m.type, m.w, q8, y, (int) m.n_in, (int) m.n_out, n, stream);
+            break;
+        default:
+            for (int j = 0; j < n; ++j) gemv(m, x + j * m.n_in, y + j * m.n_out, q8, stream);
+            return;
+    }
+    cuda_ok(cudaGetLastError(), "gemv_n");
+}
+
+void gemv2_n(const DevMatrix& a, const DevMatrix& b, const float* x, float* ya, float* yb, int n, void* q8,
+             void* stream) {
+    if (n == 1) {
+        gemv2(a, b, x, ya, yb, q8, stream);
+        return;
+    }
+    if (a.path == DevMatrix::Mmvq && b.path == DevMatrix::Mmvq && a.n_in == b.n_in) {
+        strata::kernels::native_quantize_q8_1(x, q8, (int) a.n_in, n, stream);
+        strata::kernels::native_mmvq(a.type, a.w, q8, ya, (int) a.n_in, (int) a.n_out, n, stream);
+        strata::kernels::native_mmvq(b.type, b.w, q8, yb, (int) b.n_in, (int) b.n_out, n, stream);
+        cuda_ok(cudaGetLastError(), "gemv2_n");
+        return;
+    }
+    gemv_n(a, x, ya, n, q8, stream);
+    gemv_n(b, x, yb, n, q8, stream);
+}
+
 void quantize_for(const DevMatrix& m, const float* x, void* q8, void* stream) {
     if (m.path == DevMatrix::Mmvq) strata::kernels::native_quantize_q8_1(x, q8, (int) m.n_in, 1, stream);
     else if (m.path == DevMatrix::IqMmvq) strata::kernels::quantize_q8_1_rows(x, 1, m.n_in, q8, stream);

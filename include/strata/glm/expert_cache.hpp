@@ -101,6 +101,9 @@ public:
     void drain();
     /// Writes the scores to the profile path (no-op without one).
     void save_profile() const;
+    /// From now on no copies are queued: the cache keeps the experts it holds (a test setting: two runs then place
+    /// each expert alike).
+    void freeze() { frozen_ = true; }
 
     /// STRATA_GLM_VERIFY: the bytes in `slot` of layer `il` against expert `e` in RAM; prints the first difference.
     bool check_slot(int64_t il, int slot, int e, const char* what) const;
@@ -140,6 +143,7 @@ private:
     bool sync_swaps_ = false;                         ///< STRATA_GLM_SYNC_SWAPS=1: a token's swaps finish before
                                                       ///< maintain() returns (a test setting)
     bool loaded_profile_ = false;
+    bool frozen_ = false;
     // the copy thread: copies queued by maintain(), done ones handed back; all under mu_
     std::thread copier_;
     std::mutex mu_;

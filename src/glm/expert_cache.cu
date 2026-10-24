@@ -353,6 +353,10 @@ void ExpertCache::record(int64_t il, const int32_t* ids, int k) {
 
 void ExpertCache::maintain() {
     apply_done();
+    if (frozen_) {
+        for (auto& miss : missed_) miss.clear();
+        return;
+    }
     const Config& c = m_.config();
     if (verify_ && tick_ % 512 == 0) {
         // every cached slot against RAM (the slots being copied into are skipped)

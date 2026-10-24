@@ -10,6 +10,8 @@
 #include "strata/glm/model.hpp"
 
 #include <cstdint>
+#include <functional>
+#include <utility>
 #include <vector>
 
 namespace strata::glm {
@@ -22,6 +24,11 @@ public:
     /// `side` runs on the calling thread while the others start on the experts (ThreadPool::parallel_for).
     void run(int64_t il, const float* x, const int32_t* ids, const float* weights, int k, float* out,
              const std::function<void()>& side = nullptr);
+    /// run() for `n` tokens at once: token t's experts ids[t][0..k[t]) with weights w[t], its activation x[t], its sum
+    /// into out[t] (zeros when k[t] is 0). An expert two tokens share has its rows read from RAM once for both, and
+    /// each token's sum is bitwise run()'s on it alone (the same products, summed in its own routing order).
+    void run_multi(int64_t il, int n, const float* const* x, const int32_t* const* ids, const float* const* w,
+                   const int* k, float* const* out, const std::function<void()>& side = nullptr);
 
 private:
     const Model& m_;
@@ -29,6 +36,11 @@ private:
     std::vector<uint8_t> xq_g_, xq_u_, hq_;
     std::vector<float> g_, u_;
     std::vector<Tensor> gate_, up_, down_;   ///< the selected experts' matrices
+    // run_multi: per token its quantized activations, and the distinct experts with the tokens (and their routing
+    // slots) that use each
+    std::vector<std::vector<uint8_t>> mxq_g_, mxq_u_;
+    std::vector<int32_t> uniq_;
+    std::vector<std::vector<std::pair<int, int>>> users_;
 };
 
 }  // namespace strata::glm

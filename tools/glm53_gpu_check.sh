@@ -16,7 +16,9 @@
 # taking 3 of each layer's missed experts from the CPU (--decode-help 3), decoding with each layer's fixed ops
 # replayed as CUDA graphs (--decode-graphs; it fails if a layer fell back to launching op by op), the prompt path's
 # buffers lent to the expert cache between prompts (--lend-prompt-buffers with one slot of its own per layer; it fails
-# if nothing was lent), then the GPU's logits against llama.cpp's.
+# if nothing was lent), decoding in pairs (--mtp --check-pairs: a token and the next in one pass, some second tokens
+# taken back, bitwise against one token at a time; with the VRAM cache and with every expert on the CPU), then the
+# GPU's logits against llama.cpp's.
 # Last, conversation parking (tools/glm53_park_check.py), also with the latent cache in host RAM.
 #
 # The GPU quantizes activations to q8_1 like llama.cpp's CUDA backend, so on quantized weights its logits differ from
@@ -166,6 +168,18 @@ for m in glm5-next-moe v1 v1-bare q4_0 q8_0; do
         grep -E "expert cache|strata-glm:|CUDA" "$W/lend_$m.txt" | head -4
         grep check-prefill "$W/lend_$m.txt"; fail=1
     fi
+    # pairs of tokens in one pass (--mtp), against one token at a time, bitwise: with the VRAM cache (warmed, then
+    # kept as it is) and with every expert on the CPU (CpuExperts::run_multi)
+    for nc in "" "--no-expert-cache"; do
+        label="decode in pairs${nc:+, experts on the CPU}"
+        if "$SB/strata-glm" -m "$W/$m.gguf" --tokens-file "$W/ids.txt" --mtp --check-pairs $nc \
+                > "$W/pairs${nc:+_cpu}_$m.txt" 2>&1; then
+            echo "$label: $(grep -E "^check-pairs" "$W/pairs${nc:+_cpu}_$m.txt")"
+        else
+            echo "$label FAILED:"
+            grep -E "^check-pairs|strata-glm:|CUDA" "$W/pairs${nc:+_cpu}_$m.txt" | head -4; fail=1
+        fi
+    done
     # decoding with each layer's ops up to the routing captured once and replayed as a CUDA graph (the default since
     # 2026-10-24, named here so the run says so), the VRAM cache on
     if "$SB/strata-glm" -m "$W/$m.gguf" --tokens-file "$W/ids.txt" --check-cpu --decode-graphs \

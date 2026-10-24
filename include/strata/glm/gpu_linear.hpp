@@ -39,6 +39,13 @@ size_t q8_scratch_bytes(int64_t n_in);
 void gemv(const DevMatrix& m, const float* x, float* y, void* q8, void* stream);
 /// The same activation through two matrices of the same n_in and type (quantized once).
 void gemv2(const DevMatrix& a, const DevMatrix& b, const float* x, float* ya, float* yb, void* q8, void* stream);
+/// gemv on `n` activations at once (column j at x + j * m.n_in, its product at y + j * m.n_out), each column the same
+/// bits as gemv on it alone (the quantized paths' multi-column kernels, native_mmvq_set_multi_exact; the float paths
+/// one column at a time): the weights are read once for all of them. `q8` holds n columns (q8_scratch_bytes * n).
+void gemv_n(const DevMatrix& m, const float* x, float* y, int n, void* q8, void* stream);
+/// gemv2 on `n` activations at once, as gemv_n.
+void gemv2_n(const DevMatrix& a, const DevMatrix& b, const float* x, float* ya, float* yb, int n, void* q8,
+             void* stream);
 /// x quantized the way gemv quantizes it for `m` (nothing for the float paths), into `q8`
 /// (q8_scratch_bytes(m.n_in)), for gemv_pre on any matrix that quantizes_alike(m, ...).
 void quantize_for(const DevMatrix& m, const float* x, void* q8, void* stream);

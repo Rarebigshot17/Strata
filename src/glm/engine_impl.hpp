@@ -60,6 +60,8 @@ struct DevLayer {
     float *conv_w[3] = {nullptr, nullptr, nullptr}, *a = nullptr, *dt_b = nullptr, *o_norm = nullptr;
     float* S = nullptr;                      ///< H x D x D
     float* conv_st[3] = {nullptr, nullptr, nullptr};
+    float* S_bak = nullptr;                  ///< --mtp: S and conv_st after the first token of a pair (drop_last)
+    float* conv_bak[3] = {nullptr, nullptr, nullptr};
     // MLA
     DevMatrix q_a, q_b, kv_a, k_b, v_b;
     float *q_a_norm = nullptr, *kv_a_norm = nullptr;
@@ -75,6 +77,10 @@ struct DevLayer {
     float* exp_probs_b = nullptr;
     size_t bytes = 0;
 };
+
+/// Tokens one decode pass takes at most: one, or a token and its draft (--mtp, GpuEngine::eval_pair). Every per-token
+/// decode buffer holds this many, one after another.
+constexpr size_t kNMax = 2;
 
 /// --decode-graphs: one layer's fixed run of ops as an instantiated CUDA graph, and the residual buffers it reads and
 /// leaves (eval's decode_segment).
@@ -175,7 +181,7 @@ struct GpuEngine::Impl {
     // STRATA_GLM_TIMING=1: where eval's time goes, printed when the engine ends (seconds, tokens)
     bool timing = false;
     double t_eval = 0, t_route_wait = 0, t_cpu = 0, t_logits_wait = 0, t_maintain = 0, t_help_wait = 0;
-    int64_t t_tokens = 0;
+    int64_t t_tokens = 0, t_pairs = 0;
     // and how two tokens in a row route (what one pass over a token and its draft would compute): per layer, the
     // last token's experts; over the MoE layers seen, one token's experts and misses and the pair's
     std::vector<int32_t> prev_ids;
@@ -205,8 +211,11 @@ struct GpuEngine::Impl {
     int64_t prof_eval_from = -1;
     int prof_eval_left = 0;
     std::vector<std::string> nv_attn, nv_ffn;
-    // --decode-graphs: per layer
-    std::vector<DecodeGraph> dg;
+    // --decode-graphs: per layer, for passes of one token and of two (eval_pair)
+    std::vector<DecodeGraph> dg, dg2;
+    // --mtp: the logits of the last pair, and whether drop_last may take its second token back
+    std::vector<float> plogits;
+    bool pair_backup = false;
     int64_t graph_recaptures = 0;
     // --lend-prompt-buffers: the prompt path has its buffers back from the expert cache (from a prompt until the next
     // decoded token); prefill is running; how often a prompt took them back, and the short prompts that did not

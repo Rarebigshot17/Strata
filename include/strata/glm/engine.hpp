@@ -34,6 +34,7 @@ struct EngineOptions {
     bool decode_graphs = true;       ///< a decoded token's fixed runs of ops as one CUDA graph per layer (--no-decode-graphs)
     bool lend_prompt_buffers = true; ///< between prompts the prompt buffers hold expert-cache slots (--no-lend-prompt-buffers)
     int lend_min_prompt = 64;        ///< with that, a shorter prompt runs token by token (--lend-min-prompt)
+    bool mtp = false;                ///< a token and its draft in one pass, and the MTP layer (--mtp)
     ExpertCacheOptions cache;
 };
 
@@ -47,6 +48,11 @@ public:
     void reset();
     /// Runs `token` at the next position; returns the logits (n_vocab floats, host memory).
     const std::vector<float>& eval(int32_t token, Trace* trace = nullptr);
+    /// --mtp: runs `a` and `b` at the next two positions in one pass (b is a draft of the token after a); returns
+    /// both positions' logits, a's then b's (2 x n_vocab floats, host memory). Each is bitwise what eval would give.
+    const float* eval_pair(int32_t a, int32_t b);
+    /// Right after eval_pair: takes its second token back (pos() goes back by one), as if only `a` had run.
+    void drop_last();
     /// Runs `n` prompt tokens in chunks; returns the last one's logits. `progress(done)` after each chunk; false
     /// from it stops early (the state then holds the tokens read so far, pos() says how many).
     const std::vector<float>& prefill(const int32_t* ids, int64_t n,
@@ -69,8 +75,12 @@ public:
     uint64_t ticks() const { return ticks_.load(std::memory_order_relaxed); }
     /// Writes the expert use profile (when --expert-profile names a file).
     void save_profile() const;
+    /// The expert cache's copies land, and it then keeps what it holds (--check-pairs: two runs place experts alike).
+    void freeze_cache();
 
 private:
+    /// eval and eval_pair: `n` tokens (1 or 2) at the next positions
+    void eval_n(const int32_t* tok, int n, Trace* trace);
     /// T prompt tokens; `sparse`: past the indexer's dense range, each query attends its own selection
     bool run_chunk(const int32_t* ids, int T, bool sparse);
     void setup_prefill();                        ///< the chunk buffers, before the expert cache takes the rest

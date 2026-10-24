@@ -81,6 +81,12 @@ STUBS = {
     "sb/strata-glm": 'if gpu_full; then echo "strata-glm: cudaSetDevice: out of memory" >&2; exit 1; fi\n'
                      'case " $* " in\n'
                      '  *" --decode-help "*) echo "check-cpu: top-1 agreement 40/40: PASS";;\n'
+                     # FAKE_PAIRS_DIFFER: a pair's row differed from one token at a time
+                     '  *" --check-pairs "*) if [ "$FAKE_PAIRS_DIFFER" = 1 ]; then\n'
+                     '         echo "check-pairs: 40 rows (5 pairs taken back), 39 bitwise the same as one token at a '
+                     'time, worst |diff| 0.002: FAIL"; exit 1; fi\n'
+                     '     echo "check-pairs: 40 rows (5 pairs taken back), 40 bitwise the same as one token at a time, '
+                     'worst |diff| 0: PASS";;\n'
                      # FAKE_GRAPH_FAILS: a layer's capture failed, so it ran op by op (and passed)
                      '  *" --decode-graphs "*) if [ "$FAKE_GRAPH_FAILS" = 1 ]; then\n'
                      '         echo "decode graphs: layer 1 runs without a graph (its capture failed: x)" >&2; fi\n'
@@ -208,6 +214,10 @@ class Checks(unittest.TestCase):
                      "prefill, experts on every card: check-prefill: top-1 agreement 5/5: PASS",
                      "decode, GPUs helping the CPU: check-cpu: top-1 agreement 40/40: PASS",
                      "decode, CUDA graphs: check-cpu: top-1 agreement 40/40: PASS",
+                     "decode in pairs: check-pairs: 40 rows (5 pairs taken back), 40 bitwise the same as one token at "
+                     "a time, worst |diff| 0: PASS",
+                     "decode in pairs, experts on the CPU: check-pairs: 40 rows (5 pairs taken back), 40 bitwise the "
+                     "same as one token at a time, worst |diff| 0: PASS",
                      "prefill, buffers lent to the cache: 4 of them (0.00 GB) in the prompt path's buffers; "
                      "check-prefill: top-1 agreement 5/5: PASS"):
             found = re.findall("^" + re.escape(line) + "$", out, re.M)
@@ -222,6 +232,12 @@ class Checks(unittest.TestCase):
         self.assertNotEqual(rc, 0, out)
         self.assertEqual(out.count("decode, CUDA graphs FAILED:"), len(GPU_MODELS), out)
         self.assertIn("decode graphs: layer 1 runs without a graph", out)
+
+    def test_gpu_check_fails_when_a_pair_differs(self):
+        rc, out = self.run_script("glm53_gpu_check.sh", FAKE_SMI="0, 23900\\n", FAKE_PAIRS_DIFFER="1")
+        self.assertNotEqual(rc, 0, out)
+        self.assertEqual(out.count("decode in pairs FAILED:"), len(GPU_MODELS), out)
+        self.assertIn("39 bitwise the same as one token at a time, worst |diff| 0.002: FAIL", out)
 
     def test_gpu_check_fails_when_nothing_was_lent(self):
         # the prompt passed, but the buffers held no expert: --lend-prompt-buffers was not tested

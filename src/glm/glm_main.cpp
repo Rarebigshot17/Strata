@@ -36,6 +36,9 @@
 // --lend-prompt-buffers is the default, and is still taken.
 // --cache-max-slots N: at most N VRAM cache slots of its own per layer (a test setting: the GPU check's small models
 // would otherwise fit every expert in them, leaving nothing to lend).
+// --mtp: decode passes of a token and its draft (GpuEngine::eval_pair, drop_last). --check-pairs (with --tokens-file)
+// runs the tokens in pairs, some taken back, against the same engine one token at a time, and passes when every
+// row of logits is bitwise the same.
 #include "strata/glm/check.hpp"
 #include "strata/glm/cpu_ref.hpp"
 #include "strata/glm/engine.hpp"
@@ -48,6 +51,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <memory>
 #include <sstream>
@@ -132,6 +136,7 @@ int usage() {
                  "                  [--pin-experts [--pin-keep-free GB]] [--prefill-rows N] [--kv-in-ram]\n"
                  "                  [--prefill-spread] [--decode-help N] [--no-decode-graphs]\n"
                  "                  [--no-lend-prompt-buffers] [--lend-min-prompt N] [--cache-max-slots N]\n"
+                 "                  [--mtp [--check-pairs]]\n"
                  "       strata-glm -m MODEL.gguf --serve [--ctx N] [--eos-ids A,B] [--park-mib N] [--no-warm]\n"
                  "                  [--checkpoint-min N] [same GPU and cache options]\n");
     return 2;
@@ -142,7 +147,7 @@ int usage() {
 int main(int argc, char** argv) {
     std::string model_path, ids_path, out_path;
     strata::glm::EngineOptions opt;
-    bool check_cpu = false, serve = false, use_prefill = false, warm = true, pin = false;
+    bool check_cpu = false, serve = false, use_prefill = false, warm = true, pin = false, check_pairs = false;
     double pin_keep_gb = 16.0;
     long long max_tokens = 0;
     std::vector<int32_t> eos;
@@ -177,6 +182,8 @@ int main(int argc, char** argv) {
         else if (a == "--prefill-spread") opt.prefill_spread = true;
         else if (a == "--decode-help" && (v = next())) opt.decode_help = std::max(0, std::atoi(v));
         else if (a == "--decode-graphs") opt.decode_graphs = true;
+        else if (a == "--mtp") opt.mtp = true;
+        else if (a == "--check-pairs") check_pairs = true;
         else if (a == "--no-decode-graphs") opt.decode_graphs = false;
         else if (a == "--lend-prompt-buffers") opt.lend_prompt_buffers = true;
         else if (a == "--no-lend-prompt-buffers") opt.lend_prompt_buffers = false;
@@ -258,6 +265,63 @@ int main(int argc, char** argv) {
             // the prompt path gives the logits of its last token only: one row
             const int32_t hdr[2] = {(int32_t) c.n_vocab, use_prefill ? 1 : (int32_t) ids.size()};
             std::fwrite(hdr, sizeof hdr, 1, out);
+        }
+
+        if (check_pairs) {
+            // pairs (eval_pair: a token and the next in one pass; every third one's second token a wrong draft, taken
+            // back with drop_last) against the same engine one token at a time, bitwise. A pass over the tokens first
+            // warms the expert cache, which then keeps what it holds, so both runs place every expert alike.
+            if (!opt.mtp) {
+                std::fprintf(stderr, "--check-pairs needs --mtp\n");
+                return 2;
+            }
+            for (int32_t id : ids) eng.eval(id);
+            eng.freeze_cache();
+            eng.reset();
+            std::vector<std::vector<float>> want;
+            const auto w0 = std::chrono::steady_clock::now();
+            for (int32_t id : ids) want.push_back(eng.eval(id));
+            const double s_one = std::chrono::duration<double>(std::chrono::steady_clock::now() - w0).count();
+            eng.reset();
+            size_t passes = 0;
+            const auto p0 = std::chrono::steady_clock::now();
+            const int64_t V = c.n_vocab;
+            size_t rows = 0, same = 0, taken_back = 0;
+            double worst = 0;
+            const auto cmp = [&](const float* got, const std::vector<float>& w) {
+                ++rows;
+                if (std::memcmp(got, w.data(), w.size() * sizeof(float)) == 0) {
+                    ++same;
+                    return;
+                }
+                for (size_t v = 0; v < w.size(); ++v) worst = std::max(worst, (double) std::fabs(got[v] - w[v]));
+            };
+            for (size_t i = 0, k = 0; i < ids.size();) {
+                if (i + 1 == ids.size()) {
+                    cmp(eng.eval(ids[i]).data(), want[i]);
+                    ++i;
+                } else if (k++ % 3 == 2) {
+                    cmp(eng.eval_pair(ids[i], (int32_t) ((ids[i + 1] + 1) % V)), want[i]);
+                    eng.drop_last();
+                    ++taken_back;
+                    ++passes;
+                    ++i;
+                } else {
+                    const float* lg = eng.eval_pair(ids[i], ids[i + 1]);
+                    cmp(lg, want[i]);
+                    cmp(lg + V, want[i + 1]);
+                    ++passes;
+                    i += 2;
+                }
+            }
+            const double s_pairs = std::chrono::duration<double>(std::chrono::steady_clock::now() - p0).count();
+            std::printf("one token at a time: %.2f ms a token; pairs: %.2f ms a pass (%zu passes, the cache frozen in "
+                        "both)\n", 1e3 * s_one / (double) ids.size(), 1e3 * s_pairs / (double) std::max<size_t>(passes, 1),
+                        passes);
+            const bool pass = same == rows;
+            std::printf("check-pairs: %zu rows (%zu pairs taken back), %zu bitwise the same as one token at a time, "
+                        "worst |diff| %.3g: %s\n", rows, taken_back, same, worst, pass ? "PASS" : "FAIL");
+            return pass ? 0 : 1;
         }
 
         if (use_prefill) {
