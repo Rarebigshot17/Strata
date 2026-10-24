@@ -643,6 +643,7 @@ void CpuRef::mla_layer(int64_t il, const float* x, float* y, int64_t t) {
         const int64_t n_top = c_.indexer_top_k / P;
         std::vector<int64_t> pools((size_t) nv);
         std::iota(pools.begin(), pools.end(), 0);
+        sel_margin_ = INFINITY;
         if (nv > n_top) {
             std::vector<float> score((size_t) nv);
             for (int64_t p = 0; p < nv; ++p) {
@@ -663,6 +664,11 @@ void CpuRef::mla_layer(int64_t il, const float* x, float* y, int64_t t) {
                     const int64_t pk = pools[k];
                     debug_pools_ += " " + std::to_string(pk) + " (" + std::to_string(score[(size_t) pk]) + ")";
                 }
+            }
+            if (n_top > 0) {
+                const double taken = score[(size_t) pools[(size_t) n_top - 1]];
+                const double left = score[(size_t) pools[(size_t) n_top]];
+                sel_margin_ = (taken - left) / std::max(std::fabs(taken), 1e-30);
             }
             pools.resize((size_t) n_top);
         }
@@ -866,6 +872,8 @@ const std::vector<float>& CpuRef::mtp_eval(int32_t token, const float* h_prev) {
     std::vector<float> xn((size_t) E), y((size_t) E), ffn_inp((size_t) E), out((size_t) E);
     rms_norm(cur.data(), xn.data(), E, c_.rms_eps, s.attn_norm.data());       // mtp_attn_norm
     mla_layer(im, xn.data(), y.data(), mtp_pos_);
+    mtp_sel_ = sel_;
+    mtp_margin_ = sel_margin_;
     for (int64_t i = 0; i < E; ++i) ffn_inp[(size_t) i] = y[(size_t) i] + cur[(size_t) i];
     rms_norm(ffn_inp.data(), xn.data(), E, c_.rms_eps, s.ffn_norm.data());     // mtp_ffn_norm
     ffn(im, xn.data(), y.data());                                               // routed experts + shared expert

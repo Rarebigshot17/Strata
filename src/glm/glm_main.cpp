@@ -138,6 +138,34 @@ struct GpuEvaluator : strata::glm::Evaluator {
     void drop_last() override { e.drop_last(); }
 };
 
+/// --check-cpu with the MTP block: its logits at each position against the CPU reference's, by check.hpp's rule. A
+/// position where the GPU's indexer took other cells than the CPU's, on pool scores the CPU had within kSelTie of each
+/// other, is a tie: the GPU's 8-bit activations round those scores apart (napster-ai, the Q4_0 test model,
+/// 2026-10-24: up to 4.0% at the 4 positions printed, and a 0.9% gap that came out the other way), and attending
+/// other cells moves the logits a lot. Ties are counted and left out of the rule; more than a quarter of the rows
+/// being ties fails the check.
+struct MtpCheck {
+    static constexpr double kSelTie = 0.10;
+    strata::glm::LogitCheck chk;
+    int rows = 0, ties = 0;
+    double add(const std::vector<float>& cpu, const std::vector<float>& gpu, std::vector<int32_t> cpu_sel,
+               double cpu_margin, std::vector<int32_t> gpu_sel) {
+        ++rows;
+        std::sort(cpu_sel.begin(), cpu_sel.end());
+        std::sort(gpu_sel.begin(), gpu_sel.end());
+        if (cpu_sel != gpu_sel && cpu_margin < kSelTie) {
+            ++ties;
+            return -1;
+        }
+        return chk.add(cpu, gpu);
+    }
+    bool pass(const strata::glm::CheckLimits& l) const { return chk.pass(l) && 4 * ties <= rows; }
+    std::string summary(const strata::glm::CheckLimits& l) const {
+        return chk.summary(l) + "; " + std::to_string(ties) + " of " + std::to_string(rows) +
+               " rows a selection tie (other cells than the CPU's, on pool scores within 10%), not counted";
+    }
+};
+
 int usage() {
     std::fprintf(stderr,
                  "usage: strata-glm -m MODEL.gguf --tokens-file IDS.txt [--out LOGITS.bin] [--ctx N]\n"
@@ -479,8 +507,10 @@ int main(int argc, char** argv) {
             }
             const auto am = [](const std::vector<float>& v) { return (int32_t) (std::max_element(v.begin(), v.end()) - v.begin()); };
             const strata::glm::CheckLimits lim = strata::glm::check_limits(quantized_weights(model));
-            strata::glm::LogitCheck chk, mchk;
+            strata::glm::LogitCheck chk;
+            MtpCheck mchk;
             const bool mtp = eng.mtp_ready();
+            eng.mtp_keep_selection(mtp);
             std::vector<float> lc, h_prev((size_t) c.n_embd, 0.0f);
             for (int32_t id : ids) {
                 if (mtp) ref->mtp_eval(id, h_prev.data());          // the CPU's MTP rows, the whole block each
@@ -497,9 +527,10 @@ int main(int argc, char** argv) {
                     eng.mtp_draft(next);
                     const std::vector<float>& mg = eng.mtp_logits();
                     const std::vector<float>& mc = ref->mtp_eval(next, h_prev.data());
-                    const double dm = mchk.add(mc, mg);
-                    std::printf("decode %d (token %d): MTP logits relative diff %.3g, KL %.3g, top-1 %s\n", step,
-                                next, dm, strata::glm::kl_div(mc, mg), am(mc) == am(mg) ? "same" : "DIFFERENT");
+                    const double dm = mchk.add(mc, mg, ref->mtp_selection(), ref->mtp_margin(), eng.mtp_selection());
+                    std::printf("decode %d (token %d): MTP logits relative diff %.3g, KL %.3g, top-1 %s%s\n", step,
+                                next, dm < 0 ? strata::glm::rel_diff(mc, mg) : dm, strata::glm::kl_div(mc, mg),
+                                am(mc) == am(mg) ? "same" : "DIFFERENT", dm < 0 ? " (a selection tie)" : "");
                 }
                 lc = ref->eval(next);
                 h_prev = ref->h();
@@ -516,7 +547,8 @@ int main(int argc, char** argv) {
 
         strata::glm::Trace tg, tc;
         const strata::glm::CheckLimits lim = strata::glm::check_limits(quantized_weights(model));
-        strata::glm::LogitCheck chk, mchk;
+        strata::glm::LogitCheck chk;
+        MtpCheck mchk;
         strata::glm::LayerCheck layers = strata::glm::layer_check(lim);
         double gpu_s = 0;
         // with an MTP block: its logits at every position (the draft from the token there and the hidden state the
@@ -536,12 +568,18 @@ int main(int argc, char** argv) {
             std::fwrite(hdr, sizeof hdr, 1, mout);
         }
         std::vector<float> h_prev((size_t) c.n_embd, 0.0f);
+        eng.mtp_keep_selection(mtp && check_cpu);
         for (size_t i = 0; i < ids.size(); ++i) {
             if (mtp) {
                 eng.mtp_draft(ids[i]);
                 const std::vector<float>& mg = eng.mtp_logits();
                 if (mout) std::fwrite(mg.data(), sizeof(float), mg.size(), mout);
-                if (check_cpu) mchk.add(ref->mtp_eval(ids[i], h_prev.data()), mg);
+                if (check_cpu) {
+                    const std::vector<float>& mc = ref->mtp_eval(ids[i], h_prev.data());
+                    if (mchk.add(mc, mg, ref->mtp_selection(), ref->mtp_margin(), eng.mtp_selection()) < 0)
+                        std::printf("position %zu: the MTP block's selection is a tie (logits relative diff %.3g)\n",
+                                    i, strata::glm::rel_diff(mc, mg));
+                }
             }
             const auto a = std::chrono::steady_clock::now();
             const std::vector<float>& lg = eng.eval(ids[i], check_cpu ? &tg : nullptr);

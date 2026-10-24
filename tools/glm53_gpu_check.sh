@@ -24,7 +24,11 @@
 # llama.cpp's.
 #
 # test-llama-archs writes no MTP block, which GLM-5.3-Flash has: glm53_add_mtp.py adds one to every model, and v1-heads
-# is v1 with the block's optional tensors (its own head norm and head, its own embedding).
+# is v1 with the block's optional tensors (its own head norm and head, its own embedding). The small models' pool
+# scores lie close together, and on quantized weights the GPU's rounding can reorder two of them: a position where
+# the block's indexer takes other cells than the CPU's, on scores the CPU had within 10%, counts as a selection tie
+# (strata-glm's check-mtp line says how many) rather than a difference (on the Q4_0 model, 2026-10-24: the CPU had
+# pool 5 at 0.005085 and pool 0 at 0.005041, the GPU 0.004979 and 0.004983).
 # Last, conversation parking (tools/glm53_park_check.py), also with the latent cache in host RAM.
 #
 # The GPU quantizes activations to q8_1 like llama.cpp's CUDA backend, so on quantized weights its logits differ from

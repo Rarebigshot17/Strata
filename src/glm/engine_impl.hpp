@@ -174,6 +174,8 @@ struct MtpState {
     int64_t drafted = -1;                    ///< the position mtp_draft wrote last, with this token
     int32_t drafted_tok = -1;
     std::vector<float> logits;               ///< mtp_draft's
+    bool keep_sel = false;                   ///< mtp_keep_selection: its indexer's cells, into sel
+    std::vector<int32_t> sel;
     double t_draft = 0;                      ///< STRATA_GLM_TIMING: seconds in mtp_draft, and the drafts
     int64_t drafts = 0;
 };

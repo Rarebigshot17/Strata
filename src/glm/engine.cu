@@ -688,6 +688,10 @@ bool GpuEngine::mtp_ready() const { return impl_->mtp.on; }
 
 const std::vector<float>& GpuEngine::mtp_logits() const { return impl_->mtp.logits; }
 
+const std::vector<int32_t>& GpuEngine::mtp_selection() const { return impl_->mtp.sel; }
+
+void GpuEngine::mtp_keep_selection(bool on) { impl_->mtp.keep_sel = on; }
+
 void GpuEngine::mtp_input(int32_t token, const float* h, int slot) {
     Impl& I = *impl_;
     const Config& c = I.c;
@@ -784,6 +788,12 @@ int32_t GpuEngine::mtp_draft(int32_t token) {
     ok(cudaMemcpyAsync(M.logits.data(), d.out_logits, (size_t) c.n_vocab * sizeof(float), cudaMemcpyDeviceToHost, st),
        "MTP logits");
     ok(cudaStreamSynchronize(d.stream), "sync");
+    if (M.keep_sel) {                        // the block's selection is still in sel: nothing after it selects
+        int32_t ns = 0;
+        ok(cudaMemcpy(&ns, d.n_sel1, sizeof ns, cudaMemcpyDeviceToHost), "selection");
+        M.sel.resize((size_t) std::max(ns, 0));
+        ok(cudaMemcpy(M.sel.data(), d.sel, M.sel.size() * sizeof(int32_t), cudaMemcpyDeviceToHost), "selection");
+    }
     M.drafted = p;
     M.drafted_tok = token;
     if (I.timing) {

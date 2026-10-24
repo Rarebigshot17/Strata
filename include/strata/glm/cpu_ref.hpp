@@ -79,6 +79,10 @@ public:
     /// empty them).
     const std::vector<float>& mtp_eval(int32_t token, const float* h_prev);
     int64_t mtp_pos() const { return mtp_pos_; }
+    /// The last mtp_eval's selected cells, and how far apart its indexer's last pool taken and best pool left were:
+    /// (score taken - score left) / |score taken|, infinite when it took every complete pool.
+    const std::vector<int32_t>& mtp_selection() const { return mtp_sel_; }
+    double mtp_margin() const { return mtp_margin_; }
     /// Counts layers run, from any thread (serve_loop's heartbeat).
     uint64_t ticks() const { return ticks_.load(std::memory_order_relaxed); }
     /// Saves the state (snapshot.hpp); `restore` puts one back, pos() included.
@@ -111,6 +115,9 @@ private:
     int64_t mtp_pos_ = 0;
     std::vector<float> mtp_logits_, enorm_, hnorm_, head_norm_;
     std::string debug_pools_;         ///< STRATA_GLM_SEL_DEBUG: the MTP block's best pools, printed with its selection
+    std::vector<int32_t> mtp_sel_;
+    double mtp_margin_ = 0;
+    double sel_margin_ = 0;           ///< mla_layer's last full indexer: mtp_margin()'s measure
 };
 
 }  // namespace strata::glm
