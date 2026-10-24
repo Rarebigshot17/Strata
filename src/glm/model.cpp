@@ -312,10 +312,12 @@ struct Range {
     size_t n;
 };
 
-std::vector<Range> expert_ranges(const Model& m) {
+/// The trunk's routed experts, or (mtp_block) the MTP block's.
+std::vector<Range> expert_ranges(const Model& m, bool mtp_block = false) {
     std::vector<Range> out;
     const Config& c = m.config();
-    for (int64_t il = 0; il < c.n_layer; ++il) {
+    const int64_t from = mtp_block ? c.n_layer : 0, to = mtp_block ? (m.has_mtp() ? c.n_layer + 1 : 0) : c.n_layer;
+    for (int64_t il = from; il < to; ++il) {
         if (c.is_dense(il)) continue;
         const LayerWeights& w = m.layer(il);
         for (const Tensor* t : {&w.gate_exps, &w.up_exps, &w.down_exps})
@@ -339,12 +341,12 @@ void Model::move_experts(int64_t il, const void* gate, const void* up, const voi
     w.down_exps.data = down;
 }
 
-void Model::warm_experts(int threads, const std::function<void(size_t, size_t)>& progress) const {
+void Model::warm_experts(int threads, const std::function<void(size_t, size_t)>& progress, bool mtp_block) const {
     // pieces of 64 MiB, taken by the threads in file order (the disk reads ahead along each)
     const size_t piece = (size_t) 64 << 20;
     std::vector<Range> pieces;
     size_t total = 0;
-    for (const Range& r : expert_ranges(*this)) {
+    for (const Range& r : expert_ranges(*this, mtp_block)) {
         total += r.n;
         for (size_t o = 0; o < r.n; o += piece) pieces.push_back({r.p + o, std::min(piece, r.n - o)});
     }

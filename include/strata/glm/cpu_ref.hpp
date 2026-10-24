@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace strata::glm {
@@ -109,6 +110,7 @@ private:
     std::vector<float> h_;            ///< h(): the last eval's hidden state
     int64_t mtp_pos_ = 0;
     std::vector<float> mtp_logits_, enorm_, hnorm_, head_norm_;
+    std::string debug_pools_;         ///< STRATA_GLM_SEL_DEBUG: the MTP block's best pools, printed with its selection
 };
 
 }  // namespace strata::glm

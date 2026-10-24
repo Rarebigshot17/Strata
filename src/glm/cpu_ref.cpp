@@ -15,6 +15,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <mutex>
@@ -655,6 +656,14 @@ void CpuRef::mla_layer(int64_t il, const float* x, float* y, int64_t t) {
             }
             std::stable_sort(pools.begin(), pools.end(),
                              [&](int64_t a, int64_t b) { return score[(size_t) a] > score[(size_t) b]; });
+            if (il == c_.n_layer && std::getenv("STRATA_GLM_SEL_DEBUG")) {
+                // the MTP block's best pool scores (engine.cu prints the GPU's alike), with the selection below
+                debug_pools_ = "; best pools:";
+                for (size_t k = 0; k < std::min<size_t>(4, pools.size()); ++k) {
+                    const int64_t pk = pools[k];
+                    debug_pools_ += " " + std::to_string(pk) + " (" + std::to_string(score[(size_t) pk]) + ")";
+                }
+            }
             pools.resize((size_t) n_top);
         }
         sel_.clear();
@@ -662,6 +671,12 @@ void CpuRef::mla_layer(int64_t il, const float* x, float* y, int64_t t) {
             for (int64_t m = 0; m < P; ++m) sel_.push_back((int32_t) (p * P + m));
         if (c_.indexer_select_tail)
             for (int64_t k = 0; k < (t + 1) % P; ++k) sel_.push_back((int32_t) (t - k));
+        if (il == c_.n_layer && std::getenv("STRATA_GLM_SEL_DEBUG")) {
+            std::string line = "MTP selection at " + std::to_string(t) + " (CPU):";
+            for (int32_t cell : sel_) line += " " + std::to_string(cell);
+            std::fprintf(stderr, "%s%s\n", line.c_str(), debug_pools_.c_str());
+            debug_pools_.clear();
+        }
     }
 
     // sparse attention over the selected cells, in the latent space. The K cache is f16, so llama.cpp rounds the

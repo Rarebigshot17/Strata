@@ -493,27 +493,64 @@ int serve_loop(Evaluator& ev, const ServeOptions& opt) {
         const double prompt_ms = ms_since(t0);
         const auto t1 = Clock::now();
         const int64_t hits0 = ev.hits(), look0 = ev.lookups();   // the expert cache during decode
-        long long produced = 0;
+        long long produced = 0, drafts = 0, taken = 0;
         if (finish.empty() && max_new == 0) finish = "length";
         if (finish.empty()) {
             Sampler sampler(sp);
             std::vector<int32_t> hist = conv.tokens();
+            const auto finite = [&] {
+                for (float v : conv.logits)
+                    if (!std::isfinite(v)) return false;
+                return true;
+            };
+            // a printed token: why the request ends with it ("" when it goes on)
+            const auto print = [&](int32_t y) -> std::string {
+                out.line("T %d", y);
+                ++produced;
+                hist.push_back(y);
+                if (std::find(opt.eos_ids.begin(), opt.eos_ids.end(), y) != opt.eos_ids.end() ||
+                    std::find(ends.begin(), ends.end(), y) != ends.end()) return "stop";
+                if (in.stopped(gen_no)) return "cancel";
+                if (produced >= max_new || (int64_t) conv.tokens().size() + 1 >= opt.max_ctx) return "length";
+                return "";
+            };
+            const int64_t V = opt.n_vocab > 0 ? opt.n_vocab : (int64_t) conv.logits.size();
+            int32_t next = -1;                       // sampled from a pass's first row, its draft taken back
             try {
                 for (;;) {
-                    bool nonfinite = false;
-                    for (float v : conv.logits)
-                        if (!std::isfinite(v)) { nonfinite = true; break; }
-                    if (nonfinite) { finish = "nonfinite"; break; }
-                    const int32_t y = sampler.sample(conv.logits, hist);
-                    out.line("T %d", y);
-                    ++produced;
-                    hist.push_back(y);
-                    if (std::find(opt.eos_ids.begin(), opt.eos_ids.end(), y) != opt.eos_ids.end() ||
-                        std::find(ends.begin(), ends.end(), y) != ends.end()) { finish = "stop"; break; }
-                    if (in.stopped(gen_no)) { finish = "cancel"; break; }
-                    if (produced >= max_new || (int64_t) conv.tokens().size() + 1 >= opt.max_ctx) { finish = "length"; break; }
-                    conv.logits = ev.eval(y);
+                    int32_t y = next;
+                    next = -1;
+                    if (y < 0) {
+                        if (!finite()) { finish = "nonfinite"; break; }
+                        y = sampler.sample(conv.logits, hist);
+                    }
+                    if (!(finish = print(y)).empty()) break;
+                    // with room for both, and a token after y still to print: y and a draft of the next in one pass
+                    const bool room = (int64_t) conv.tokens().size() + 2 < opt.max_ctx && produced + 1 < max_new;
+                    if (!ev.can_draft() || !room) {
+                        conv.logits = ev.eval(y);
+                        conv.append(&y, 1);
+                        continue;
+                    }
+                    const int32_t d = ev.draft(y);
+                    const float* lg = ev.eval_pair(y, d);
+                    ++drafts;
                     conv.append(&y, 1);
+                    conv.logits.assign(lg, lg + V);
+                    if (!finite()) { ev.drop_last(); finish = "nonfinite"; break; }
+                    const int32_t z = sampler.sample(conv.logits, hist);
+                    if (z != d) {                    // not the draft: its pass is taken back, z printed next
+                        ev.drop_last();
+                        next = z;
+                        continue;
+                    }
+                    ++taken;                         // the draft is the next token, already run
+                    if (!(finish = print(d)).empty()) {
+                        ev.drop_last();              // the request's last token is not taken into the state
+                        break;
+                    }
+                    conv.append(&d, 1);
+                    conv.logits.assign(lg + V, lg + 2 * V);
                 }
             } catch (const std::exception& e) {
                 heartbeat.active(false);
@@ -525,9 +562,9 @@ int serve_loop(Evaluator& ev, const ServeOptions& opt) {
         heartbeat.active(false);
         if (finish == "nonfinite") conv.discard();   // a state that produced NaN is not reused
         const double decode_ms = ms_since(t1);
-        out.line("DONE %lld %zu %.1f %.1f %s 0 0 %zu %lld %lld 0 0 0.0 %zu 0", produced, total, prompt_ms, decode_ms,
-                 finish.c_str(), reuse, (long long) (ev.hits() - hits0), (long long) (ev.lookups() - look0),
-                 at - reuse);
+        out.line("DONE %lld %zu %.1f %.1f %s %lld %lld %zu %lld %lld 0 0 0.0 %zu 0", produced, total, prompt_ms,
+                 decode_ms, finish.c_str(), drafts, taken, reuse, (long long) (ev.hits() - hits0),
+                 (long long) (ev.lookups() - look0), at - reuse);
         if (conv.enabled()) std::fprintf(stderr, "conversations: %s\n", conv.summary().c_str());
     }
     return 0;

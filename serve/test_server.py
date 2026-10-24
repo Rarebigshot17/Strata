@@ -113,6 +113,11 @@ class MaxTokens(unittest.TestCase):
         engine._parse_done("DONE 0 98179 17565 0 cancel 0 0 0 0 0 0 0 0.0 12288 0")
         self.assertEqual(request_line(engine.last), "[strata] request prompt 98179 cached 0 output 0 prompt_read "
                                                     "17565 ms total 17565 ms prefill 699.6 tok/s decode 0.0 tok/s")
+        # --mtp: the drafts, and those that were the next token
+        engine._parse_done("DONE 30 1200 50 300 stop 17 15 1000 40 60 0 0 0.0 200 0")
+        self.assertEqual((engine.last["drafts"], engine.last["drafts_taken"]), (17, 15))
+        line = request_line(engine.last)
+        self.assertTrue(line.endswith(" decode 100.0 tok/s drafts 15/17"), line)
 
     def test_unset_budget_is_the_rest_of_the_context(self):
         cases = {"openai": [{"max_tokens": -1}, {"max_tokens": 0}, {}, {"max_tokens": None},

@@ -158,8 +158,9 @@ public:
     size_t expert_bytes() const;
     /// Reads every routed expert once, so they sit in the page cache: the experts are mapped from the file, and
     /// the first prompt after a start would otherwise fault them in from disk while it runs. `progress(done,
-    /// total)` is called every couple of seconds from the calling thread.
-    void warm_experts(int threads, const std::function<void(size_t, size_t)>& progress) const;
+    /// total)` is called every couple of seconds from the calling thread. `mtp_block`: the MTP block's experts
+    /// instead of the trunk's.
+    void warm_experts(int threads, const std::function<void(size_t, size_t)>& progress, bool mtp_block = false) const;
     /// Points layer `il`'s routed experts at a copy of the same bytes elsewhere (pinned_experts.hpp copies them into
     /// page-locked RAM); everything that reads them through layer() then reads the copy, not the mapped file.
     void move_experts(int64_t il, const void* gate, const void* up, const void* down);

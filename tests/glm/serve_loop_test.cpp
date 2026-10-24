@@ -4,7 +4,8 @@
 // stdin and reads everything the child printed. The fake engine predicts token (last + 1) % 32 and can be slow
 // (with or without progress) or fail, so the cases cover INFO/READY, generation, end of turn, end=, logit_bias,
 // refusals, ERR internal, HB heartbeats (only while the engine progresses) and STOP of a queued request. A second
-// fake keeps snapshots (Conv) for the conversations: parking, checkpoints, --park-mib and the state after end=.
+// fake keeps snapshots (Conv) for the conversations: parking, checkpoints, --park-mib and the state after end=. A
+// third (Draft) drafts: its replies, greedy and sampled, and the state after them must be Conv's.
 // The last cases are strata-glm's signals in --serve mode (serve_signals.hpp) and how an engine ends when its server
 // is gone: idle, during a request, and while it starts.
 #include "strata/glm/serve_loop.hpp"
@@ -128,6 +129,28 @@ struct Conv : Evaluator {
     }
 };
 
+/// Conv that drafts (serve_loop.hpp's DRAFTS): its draft of the token after `tok` is the greedy one when tok % 3 is
+/// not 0 and another one when it is; eval_pair runs both tokens and drop_last takes the second back. Its replies and
+/// states must be Conv's, token for token.
+struct Draft : Conv {
+    std::vector<float> two = std::vector<float>(2 * V, 0.0f);
+    bool can_draft() const override { return true; }
+    int32_t draft(int32_t tok) override {
+        const int32_t g = next(step(h, tok));
+        return tok % 3 ? g : (g + 1) % (V - 1);
+    }
+    const float* eval_pair(int32_t a, int32_t b) override {
+        std::copy_n(eval(a).begin(), V, two.begin());
+        std::copy_n(eval(b).begin(), V, two.begin() + V);
+        return two.data();
+    }
+    void drop_last() override {
+        hist.pop_back();
+        h = 0;
+        for (int32_t t : hist) h = step(h, t);
+    }
+};
+
 /// The child's stdout lines for this input, with `body` running the serve loop (stderr to /dev/null if `quiet`).
 std::vector<std::string> run_child(const std::string& input, const std::function<int()>& body, bool quiet = false) {
     int in[2], out[2];
@@ -183,6 +206,24 @@ std::vector<std::string> run_conv(const std::string& input, size_t park_bytes, i
             opt.park_bytes = park_bytes;
             opt.checkpoint_min = checkpoint_min;
             return serve_loop(ev, opt);
+        },
+        true);
+}
+
+/// The same with Draft (drafts) or Conv, a larger park and no checkpoints.
+std::vector<std::string> run_drafts(const std::string& input, bool drafts) {
+    return run_child(
+        input,
+        [&] {
+            Draft d;
+            Conv c;
+            ServeOptions opt;
+            opt.max_ctx = 4096;
+            opt.n_vocab = V;
+            opt.eos_ids = {31};
+            opt.park_bytes = 1 << 20;
+            opt.checkpoint_min = 1 << 30;
+            return drafts ? serve_loop(d, opt) : serve_loop(c, opt);
         },
         true);
 }
@@ -657,6 +698,62 @@ int main() {
         if (st == -1 && eng > 0) reap(eng);
         expect(reaper && ignored && st != -1 && WIFSIGNALED(st) && WTERMSIG(st) == SIGTERM,
                "serving: SIGTERM is ignored while the server runs, and ends the engine once the server is gone", {});
+    }
+    {
+        // drafts, greedy: the reply is a fresh engine's, the DONE line counts the drafts and those taken (some, not
+        // all), and the next turn (the prompt, the reply, two more tokens) continues the state from the reply's last
+        // token but one, so the state after drafts is the right one
+        const std::vector<int32_t> p1 = {1, 2, 3};
+        const std::vector<int32_t> a1 = Conv::answer(p1, 40);
+        std::vector<int32_t> p2 = p1;
+        p2.insert(p2.end(), a1.begin(), a1.end());
+        p2.insert(p2.end(), {5, 6});
+        const auto l = run_drafts(gen_line(40, p1) + gen_line(20, p2), true);
+        const auto r = replies(l);
+        long drafts = -1, taken = -1;
+        for (const auto& ln : l)
+            if (ln.rfind("DONE 40 ", 0) == 0) {
+                std::istringstream is(ln);
+                std::string w;
+                for (int i = 0; i <= 7 && is >> w; ++i)
+                    if (i == 6) drafts = std::stol(w);
+                    else if (i == 7) taken = std::stol(w);
+            }
+        expect(r.size() == 2 && r[0].toks == a1 && drafts > 0 && taken > 0 && taken < drafts,
+               "drafts, greedy: the same reply, some drafts taken and some not (DONE <drafts> <taken>)", l);
+        expect(r.size() == 2 && r[1].resume == (long) (p1.size() + a1.size() - 1) && r[1].toks == Conv::answer(p2, 20),
+               "drafts: the next turn continues the state the drafts left", l);
+    }
+    {
+        // drafts, sampled (temperature 1, a seed): the same tokens as without drafts, each sampled once from the same
+        // logits; end= ids that end requests at many places (some on a token that was a taken draft), each followed
+        // by a turn that continues its state
+        std::string in;
+        for (int e = 0; e < 12; ++e) {
+            const std::vector<int32_t> p = {7, e, 9};
+            in += gen_line(50, p, -1, " temperature=1.0 seed=" + std::to_string(11 + e) + " end=" +
+                                          std::to_string(e % 30) + "," + std::to_string((e + 13) % 30));
+        }
+        const auto with = replies(run_drafts(in, true)), without = replies(run_drafts(in, false));
+        bool same = with.size() == 12 && without.size() == 12;
+        for (size_t k = 0; same && k < with.size(); ++k) same = with[k].toks == without[k].toks;
+        expect(same, "drafts, sampled with end= ids: the same tokens as without drafts", {});
+        // each reply continued (the prompt, the reply, one more token): its parked conversation resumes from the
+        // reply's last token but one
+        std::string in2;
+        for (int e = 0; e < 12 && same; ++e) {
+            std::vector<int32_t> p = {7, e, 9};
+            p.insert(p.end(), with[(size_t) e].toks.begin(), with[(size_t) e].toks.end());
+            p.push_back(4);
+            in2 += gen_line(5, p);
+        }
+        const auto w2 = replies(run_drafts(in + in2, true)), n2 = replies(run_drafts(in + in2, false));
+        bool cont = same && w2.size() == 24 && n2.size() == 24;
+        for (size_t k = 12; cont && k < 24; ++k)
+            cont = w2[k].toks == n2[k].toks && w2[k].resume == n2[k].resume &&
+                   w2[k].resume == (long) (3 + with[k - 12].toks.size() - 1);
+        expect(cont, "drafts, sampled: the states left are the same as without drafts (the next turns resume alike)",
+               {});
     }
     std::printf(failures ? "%d FAILED\n" : "all passed\n", failures);
     return failures != 0;

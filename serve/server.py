@@ -383,13 +383,17 @@ def start_log_tail(log: str | None, offset: int, n: int = 20) -> str:
 def request_line(last: dict) -> str:
     """STRATA_REQUEST_LINES=1: one stdout line per engine request, from its DONE line, for a supervisor that only sees
     this process's output (a tray, llama-swap): `request prompt P cached C output O prompt_read R ms total S ms prefill X
-    tok/s decode Y tok/s` (prompt_read: the time the engine spent on the prompt, not a time to first token)."""
+    tok/s decode Y tok/s` (prompt_read: the time the engine spent on the prompt, not a time to first token), and
+    ` drafts T/D` when the engine drafted (--mtp): D drafts, T of them the next token."""
     prompt_ms, decode_ms = float(last.get("prompt_ms") or 0.0), float(last.get("decode_ms") or 0.0)
     read, gen = int(last.get("prompt_read") or 0), int(last.get("generated") or 0)
-    return ("[strata] request prompt %d cached %d output %d prompt_read %.0f ms total %.0f ms prefill %.1f tok/s "
+    line = ("[strata] request prompt %d cached %d output %d prompt_read %.0f ms total %.0f ms prefill %.1f tok/s "
             "decode %.1f tok/s" % (last.get("prompt_tokens", 0), last.get("reused") or 0, gen, prompt_ms,
                                    prompt_ms + decode_ms, read / (prompt_ms / 1000) if prompt_ms > 0 else 0.0,
                                    gen / (decode_ms / 1000) if decode_ms > 0 else 0.0))
+    if last.get("drafts"):
+        line += " drafts %d/%d" % (last.get("drafts_taken") or 0, last["drafts"])
+    return line
 
 
 def model_size(path: str | None) -> str:
@@ -841,12 +845,15 @@ class StrataEngine:
         self.info = {**info, **self.info}
 
     def _parse_done(self, line):
-        """`DONE <generated> <prompt> <prompt_ms> <decode_ms> <finish> 0 0 <reused> <hits> <lookups> 0 0 0.0
-        <prompt tokens read> 0` (hits / lookups: the expert cache during decode; the zeros are fields the engine
-        keeps for the line's shape)."""
+        """`DONE <generated> <prompt> <prompt_ms> <decode_ms> <finish> <drafts> <taken> <reused> <hits> <lookups> 0 0
+        0.0 <prompt tokens read> 0` (drafts / taken: the MTP block's drafts and those that were the next token, 0 0
+        without --mtp; hits / lookups: the expert cache during decode; the zeros are fields the engine keeps for the
+        line's shape)."""
         f = line.split()
         self.last = {"generated": int(f[1]), "prompt_tokens": int(f[2]), "prompt_ms": float(f[3]),
                      "decode_ms": float(f[4]), "finish": f[5]}
+        if len(f) >= 8:
+            self.last.update(drafts=int(f[6]), drafts_taken=int(f[7]))
         if len(f) >= 9:
             self.last["reused"] = int(f[8])
         if len(f) >= 11:

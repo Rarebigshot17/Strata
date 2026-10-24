@@ -9,8 +9,9 @@
 //   <- PP <done> <total> <ms> <tok/s>                prompt progress, at most 4 a second and once at the end
 //   <- HB                                            still working (a long prompt chunk): only while it progresses
 //   <- T <id>                                        a generated token (an end-of-turn id too, then DONE stop)
-//   <- DONE <generated> <prompt> <prompt ms> <decode ms> <finish> 0 0 <reused> <hits> <lookups> 0 0 0.0 <read> 0
-//                                                    hits/lookups: the expert cache during decode
+//   <- DONE <generated> <prompt> <prompt ms> <decode ms> <finish> <drafts> <taken> <reused> <hits> <lookups> 0 0 0.0
+//      <read> 0                                      hits/lookups: the expert cache during decode; drafts/taken:
+//                                                    the MTP block's drafts and those that were the next token
 //   <- ERR <reason>                                  the request is refused; no DONE follows
 //   <- ERR internal: <what>                          the engine failed; the state is discarded; no DONE follows
 //   -> STOP                                          end the last GEN's request, even still queued (finish "cancel")
@@ -27,6 +28,12 @@
 // there rather than at 0. Least recently used conversations, then old checkpoints, are dropped beyond park_bytes.
 // A request's last printed token is never taken into the state (it ended there: max_new, an end of turn, an end= id,
 // a STOP), so a prompt of the request's prompt and every token it printed continues the state.
+//
+// DRAFTS. An engine that can draft (GpuEngine with --mtp and the model's MTP block) decodes a sampled token with its
+// draft of the next one in one pass. The next token is then sampled from the pass's first row of logits, as it would
+// be from the token's own pass: when it is the draft, the second row is the logits after it, and it costs no pass of
+// its own; else the draft is taken back. Every token is sampled once, from the same logits and history as without
+// drafts, so a reply is the same token for token (the logits of a pass are bitwise one token's at a time).
 #pragma once
 
 #include "strata/glm/snapshot.hpp"
@@ -68,6 +75,12 @@ public:
     virtual size_t snapshot_bytes(bool /*full*/) const { return 0; }
     virtual std::shared_ptr<Snapshot> snapshot(bool /*full*/) { return nullptr; }
     virtual void restore(const Snapshot& /*s*/) {}
+    /// Drafting: draft(token) proposes the token after `token` (sampled, not run yet); eval_pair(a, b) runs both at
+    /// the next two positions and returns a's logits then b's (n_vocab floats each); drop_last() takes b back.
+    virtual bool can_draft() const { return false; }
+    virtual int32_t draft(int32_t /*token*/) { return -1; }
+    virtual const float* eval_pair(int32_t /*a*/, int32_t /*b*/) { return nullptr; }
+    virtual void drop_last() {}
 };
 
 #ifndef STRATA_VERSION

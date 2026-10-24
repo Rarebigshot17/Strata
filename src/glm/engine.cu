@@ -849,6 +849,26 @@ void GpuEngine::mla_decode(int64_t il, int ci, int n, int64_t t) {
             }
             gpu::topk_pools_rows(d.pscore, std::max<int64_t>(nv, 1), 1, tj, (int) P, (int) n_top,
                                  c.indexer_select_tail, (int) MS, d.sel + j * MS, d.n_sel1 + j, s);
+            if (il == c.n_layer && std::getenv("STRATA_GLM_SEL_DEBUG")) {
+                // the MTP block's selection and its best pool scores (cpu_ref.cpp prints the CPU's alike)
+                ok(cudaStreamSynchronize(d.stream), "sync");
+                int32_t ns = 0;
+                ok(cudaMemcpy(&ns, d.n_sel1 + j, sizeof ns, cudaMemcpyDeviceToHost), "selection");
+                std::vector<int32_t> sel((size_t) std::max(ns, 0));
+                ok(cudaMemcpy(sel.data(), d.sel + j * MS, sel.size() * sizeof(int32_t), cudaMemcpyDeviceToHost),
+                   "selection");
+                std::vector<float> sc((size_t) (nv > n_top ? nv : 0));
+                ok(cudaMemcpy(sc.data(), d.pscore, sc.size() * sizeof(float), cudaMemcpyDeviceToHost), "scores");
+                std::vector<int64_t> order(sc.size());
+                std::iota(order.begin(), order.end(), 0);
+                std::stable_sort(order.begin(), order.end(), [&](int64_t a, int64_t b) { return sc[a] > sc[b]; });
+                std::string line = "MTP selection at " + std::to_string(tj) + " (GPU):";
+                for (int32_t cell : sel) line += " " + std::to_string(cell);
+                line += "; best pools:";
+                for (size_t k = 0; k < std::min<size_t>(4, order.size()); ++k)
+                    line += " " + std::to_string(order[k]) + " (" + std::to_string(sc[(size_t) order[k]]) + ")";
+                std::fprintf(stderr, "%s\n", line.c_str());
+            }
         }
         d.dec_sel_have = ++I.dec_sel_version;
         I.dec_sel_ctx = ci;

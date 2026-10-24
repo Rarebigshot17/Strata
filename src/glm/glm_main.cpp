@@ -132,6 +132,10 @@ struct GpuEvaluator : strata::glm::Evaluator {
     std::shared_ptr<strata::glm::Snapshot> snapshot(bool full) override { return e.snapshot(full); }
     size_t snapshot_bytes(bool full) const override { return e.snapshot_bytes(full); }
     void restore(const strata::glm::Snapshot& s) override { e.restore(s); }
+    bool can_draft() const override { return e.mtp_ready(); }
+    int32_t draft(int32_t t) override { return e.mtp_draft(t); }
+    const float* eval_pair(int32_t a, int32_t b) override { return e.eval_pair(a, b); }
+    void drop_last() override { e.drop_last(); }
 };
 
 int usage() {
@@ -220,6 +224,16 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "warming the experts: %.1f of %.1f GB (%.0f s, %.2f GB/s)\n", done / 1e9,
                                  total / 1e9, s, s > 0 ? done / 1e9 / s : 0.0);
                 });
+            }
+            if (warm && eng.mtp_ready()) {
+                // the MTP block's experts stay in the mapped file (--pin-experts locks the trunk's), and every draft
+                // reads 8 of them: into the page cache too
+                const auto w0 = std::chrono::steady_clock::now();
+                model.warm_experts(copy_threads, [&](size_t done, size_t total) {
+                    const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - w0).count();
+                    std::fprintf(stderr, "warming the MTP block's experts: %.1f of %.1f GB (%.0f s)\n", done / 1e9,
+                                 total / 1e9, s);
+                }, true);
             }
             GpuEvaluator ev(eng);
             so.max_ctx = opt.max_ctx;
@@ -484,8 +498,8 @@ int main(int argc, char** argv) {
                     const std::vector<float>& mg = eng.mtp_logits();
                     const std::vector<float>& mc = ref->mtp_eval(next, h_prev.data());
                     const double dm = mchk.add(mc, mg);
-                    std::printf("decode %d: MTP logits relative diff %.3g, KL %.3g, top-1 %s\n", step, dm,
-                                strata::glm::kl_div(mc, mg), am(mc) == am(mg) ? "same" : "DIFFERENT");
+                    std::printf("decode %d (token %d): MTP logits relative diff %.3g, KL %.3g, top-1 %s\n", step,
+                                next, dm, strata::glm::kl_div(mc, mg), am(mc) == am(mg) ? "same" : "DIFFERENT");
                 }
                 lc = ref->eval(next);
                 h_prev = ref->h();
