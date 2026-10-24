@@ -392,10 +392,12 @@ other way. On one Q4_0 model, at position 43, the CPU had pool 5 at 0.005085 and
 and 0.004983, so the two attended different cells and the logits differed by 0.355 (`STRATA_GLM_SEL_DEBUG=1` prints
 both sides' selections). The GPU's pool scores differed from the CPU's by up to 4.0% at the positions printed. So
 check-mtp counts a position where the two took other cells, on scores the CPU had within 10% of each other, as a tie,
-prints it and leaves it out of the rule; more than a quarter of the rows as ties fails. A pass over a token and its
-draft (`--check-pairs`) is held to more than the rule: every row bitwise the same as one token at a time, with the
-expert cache warmed and then kept as it is; and `--check-generate` decodes with and without drafts and asks for the
-same tokens.
+prints it and leaves it out of the rule; more than a quarter of the rows as ties fails. The comparison of the GPU's
+MTP logits with llama.cpp's leaves the same positions out and names them: llama.cpp's CPU path selects as the CPU
+reference does (in the last check's Q4_0 model, position 19 of 40, 0.653 there and at most 0.0197 elsewhere). A pass
+over a token and its draft (`--check-pairs`) is held to more than the rule: every row bitwise the same as one token
+at a time, with the expert cache warmed and then kept as it is; and `--check-generate` decodes with and without
+drafts and asks for the same tokens.
 
 ## What to run on napster-ai
 

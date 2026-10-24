@@ -28,7 +28,8 @@
 # scores lie close together, and on quantized weights the GPU's rounding can reorder two of them: a position where
 # the block's indexer takes other cells than the CPU's, on scores the CPU had within 10%, counts as a selection tie
 # (strata-glm's check-mtp line says how many) rather than a difference (on the Q4_0 model, 2026-10-24: the CPU had
-# pool 5 at 0.005085 and pool 0 at 0.005041, the GPU 0.004979 and 0.004983).
+# pool 5 at 0.005085 and pool 0 at 0.005041, the GPU 0.004979 and 0.004983), and the comparison of the block's logits
+# with llama.cpp's leaves those positions out, naming them.
 # Last, conversation parking (tools/glm53_park_check.py), also with the latent cache in host RAM.
 #
 # The GPU quantizes activations to q8_1 like llama.cpp's CUDA backend, so on quantized weights its logits differ from
@@ -244,15 +245,20 @@ for m in glm5-next-moe v1 v1-bare q4_0 q8_0 v1-heads; do
             --rel-diff-max "$rel") || fail=1
         echo "vs llama.cpp: $(echo "$res" | tail -2 | tr '\n' ' ')"
     fi
-    # the MTP block's logits against llama.cpp's MTP head (draft-mtp's graph), by the same rule
+    # the MTP block's logits against llama.cpp's MTP head (draft-mtp's graph), by the same rule, less the positions
+    # where strata-glm found the block's selection a tie against the CPU reference (above): llama.cpp's CPU path
+    # selects as the CPU reference does, so the GPU's other cells there differ from it alike
+    mties=$(grep -oE "^position [0-9]+: the MTP block's selection is a tie" "$W/mtp_$m.txt" 2> /dev/null \
+        | awk '{print $2}' | tr -d ':' | paste -sd, -)
     if [ ! -s "$W/refmtp_$m.bin" ]; then
         echo "FAIL MTP vs llama.cpp: llama-strata-ref wrote no MTP logits:"; tail -4 "$W/ref_$m.txt"; fail=1
     elif [ ! -s "$W/mtpgpu_$m.bin" ]; then
         echo "FAIL MTP vs llama.cpp: strata-glm wrote no MTP logits (its lines above)"; fail=1
     else
         res=$(python3 "$HERE/glm53_compare.py" "$W/refmtp_$m.bin" "$W/mtpgpu_$m.bin" --kl-max 1e-5 --top1-min 0 \
-            --rel-diff-max "$rel") || fail=1
-        echo "MTP vs llama.cpp: $(echo "$res" | tail -2 | tr '\n' ' ')"
+            --rel-diff-max "$rel" ${mties:+--skip-rows "$mties"}) || fail=1
+        note=${mties:+"(left out: position $mties, a selection tie)"}
+        echo "MTP vs llama.cpp: $(echo "$res" | tail -2 | tr '\n' ' ')$note"
     fi
 done
 # conversations parked in host memory and restored (over every GPU the layers are split across), against fresh

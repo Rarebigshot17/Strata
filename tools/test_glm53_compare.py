@@ -151,6 +151,20 @@ class Compare(unittest.TestCase):
         self.assertEqual(rc, 1, out)
         self.assertIn("NaN", out)
 
+    def test_rows_left_out(self):
+        # row 12 far off (its own largest logit is 0.5): it fails, and passes only left out, which the output says
+        ref, got = rows40(), rows40()
+        got[12] = [v + (0.3 if i % 2 else -0.3) for i, v in enumerate(got[12])]
+        rc, out = self.run_compare(ref, got, "--kl-max", "1e-5", "--top1-min", "0", "--rel-diff-max", "0.05")
+        self.assertEqual(rc, 1, out)
+        rc, out = self.run_compare(ref, got, "--kl-max", "1e-5", "--top1-min", "0", "--rel-diff-max", "0.05",
+                                   "--skip-rows", "12")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("left out (--skip-rows): position 12", out)
+        self.assertIn("rows 39 (1 left out)", out)
+        # the table keeps the rows' own positions after the one left out
+        self.assertRegex(out, r"(?m)^ +39 ")
+
     def test_a_row_of_nan_is_neither_a_tie_nor_a_pass(self):
         ref, got = rows40(), rows40()
         got[9] = [math.nan] * 8

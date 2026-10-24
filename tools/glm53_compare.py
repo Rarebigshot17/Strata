@@ -65,6 +65,10 @@ def main() -> int:
     ap.add_argument("--rel-diff-max", type=float, default=None,
                     help="also fail when a row's max |logit diff| is above this times its largest |ref logit|")
     ap.add_argument("--rows", type=int, default=0, help="compare only the first N rows")
+    ap.add_argument("--skip-rows", default="",
+                    help="positions (from 0, comma separated) left out of every figure and named in the output: "
+                         "glm53_gpu_check.sh's MTP comparison leaves out the positions where strata-glm found the MTP "
+                         "block's selection a tie against the CPU reference")
     a = ap.parse_args()
 
     ref, got = load(a.ref), load(a.strata)
@@ -78,10 +82,20 @@ def main() -> int:
     if a.rows:
         n = min(n, a.rows)
     ref, got = ref[:n], got[:n]
+    pos = np.arange(n)                       # each row's position, as the tables print it
+    left = ""
+    if a.skip_rows:
+        skip = {int(x) for x in a.skip_rows.split(",") if x.strip()}
+        out = sorted(i for i in skip if i < n)
+        keep = np.array([i not in skip for i in range(n)], dtype=bool)
+        ref, got, pos = ref[keep], got[keep], pos[keep]
+        n = len(pos)
+        left = f" ({len(out)} left out)"
+        print(f"left out (--skip-rows): position{'s' if len(out) != 1 else ''} {', '.join(map(str, out))}")
 
     bad = ~np.isfinite(got).all(axis=1)
     if bad.any():
-        print(f"strata has NaN/inf in {int(bad.sum())} row(s), first at position {int(np.argmax(bad))}")
+        print(f"strata has NaN/inf in {int(bad.sum())} row(s), first at position {int(pos[np.argmax(bad)])}")
 
     lr, lg = log_softmax(ref), log_softmax(got)
     kl = (np.exp(lr) * (lr - lg)).sum(axis=1)
@@ -100,7 +114,7 @@ def main() -> int:
             mark = "" if agree[i] else f"  <- top-1 differs (gaps {gap_r[i]:.4f} ref, {gap_g[i]:.4f} strata)"
             if tie[i]:
                 mark += ": a tie"
-            print(f"{i:5d} {kl[i]:10.5f} {top_r[i]:9d} {top_g[i]:11d} {diff[i]:9.4f}{mark}")
+            print(f"{pos[i]:5d} {kl[i]:10.5f} {top_r[i]:9d} {top_g[i]:11d} {diff[i]:9.4f}{mark}")
     mean_kl = float(np.nanmean(kl))
     n_tie = int(tie.sum())
     top1 = float((agree | tie).mean())
@@ -108,7 +122,7 @@ def main() -> int:
     # each row's largest difference relative to its largest |ref logit| (NaN for a row with a NaN)
     worst_rel = float((diff / np.maximum(np.abs(ref.astype(np.float64)).max(axis=1), 1e-30)).max())
     rel = f"   worst relative diff {worst_rel:.3g}" if a.rel_diff_max is not None else ""
-    print(f"\nrows {n}   mean KL {mean_kl:.5f}   max KL {float(np.nanmax(kl)):.5f}   "
+    print(f"\nrows {n}{left}   mean KL {mean_kl:.5f}   max KL {float(np.nanmax(kl)):.5f}   "
           f"top-1 agreement {float(agree.mean()) * 100:.2f}%{ties}   max |logit diff| {float(diff.max()):.4f}{rel}")
     ok = mean_kl <= a.kl_max and top1 >= a.top1_min and not bad.any()
     # --top1-min 0 leaves top-1 agreement out of the rule (glm53_gpu_check.sh), and out of what a FAIL asks for
