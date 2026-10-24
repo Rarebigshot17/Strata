@@ -438,6 +438,9 @@ int main(int argc, char** argv) {
                 }
                 return since(a);
             };
+            // the MTP block's experts into the page cache, as --serve does before READY: the drafts read them from the
+            // mapped file, and the first ones would otherwise wait for the disk inside the timing
+            model.warm_experts(opt.cpu_threads > 0 ? std::min(opt.cpu_threads, 16) : 8, nullptr, true);
             bool same = true;
             std::vector<std::vector<int32_t>> replies;
             size_t prompt_tokens = 0;
