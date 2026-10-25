@@ -6,9 +6,12 @@
 //              [--pin-experts [--pin-keep-free GB]]
 //
 // --out writes the --dump-logits layout (tools/glm53_compare.py); with --prefill it holds one row, the logits after
-// the prompt. --check-cpu also runs the CPU reference on the same tokens and compares, per position, the residual
-// streams after every layer and the logits: the first layer where they part is where a kernel is wrong. Whether
-// the logits pass is check.hpp's rule, with the limits for the model's weights (quantized or float).
+// the prompt. --prefill --prompt-tokens P reads the first P tokens with the prompt path and the rest one token at a
+// time, as a server goes on after a long prompt: --out then holds the prompt's last row (position P - 1) and every
+// decoded token's (tools/glm53_nll.py --strata-first P - 1). --check-cpu also runs the CPU reference on the same
+// tokens and compares, per position, the residual streams after every layer and the logits: the first layer where
+// they part is where a kernel is wrong. Whether the logits pass is check.hpp's rule, with the limits for the model's
+// weights (quantized or float).
 // --pin-experts copies the routed experts into page-locked RAM before the engine starts (pinned_experts.hpp), as
 // long as MemAvailable stays above --pin-keep-free GB (16); the VRAM expert cache is filled from there.
 // --prefill-rows N: of each --prefill-chunk, the tokens run at a time outside the routed experts (default: as many
@@ -174,7 +177,8 @@ int usage() {
                  "usage: strata-glm -m MODEL.gguf --tokens-file IDS.txt [--out LOGITS.bin] [--ctx N]\n"
                  "                  [--devices 0,1,2] [--split 24,12,10] [--threads N] [--check-cpu]\n"
                  "                  [--max-tokens N] [--vram-reserve GB] [--expert-profile PATH]\n"
-                 "                  [--max-swaps N] [--cache-decay D] [--no-expert-cache] [--prefill] [--prefill-chunk N]\n"
+                 "                  [--max-swaps N] [--cache-decay D] [--no-expert-cache]\n"
+                 "                  [--prefill [--prompt-tokens P]] [--prefill-chunk N]\n"
                  "                  [--pin-experts [--pin-keep-free GB]] [--prefill-rows N] [--kv-in-ram]\n"
                  "                  [--prefill-spread] [--decode-help N] [--no-decode-graphs]\n"
                  "                  [--no-lend-prompt-buffers] [--lend-min-prompt N] [--cache-max-slots N]\n"
@@ -192,6 +196,7 @@ int main(int argc, char** argv) {
     strata::glm::EngineOptions opt;
     bool check_cpu = false, serve = false, use_prefill = false, warm = true, pin = false, check_pairs = false;
     int check_generate = 0, bench_generate = 0, bench_rounds = 2;
+    long long prompt_tokens = 0;   // --prompt-tokens: the prompt path for these, then one token at a time
     double pin_keep_gb = 16.0;
     long long max_tokens = 0;
     std::vector<int32_t> eos;
@@ -224,6 +229,7 @@ int main(int argc, char** argv) {
         else if (a == "--pin-experts") pin = true;
         else if (a == "--pin-keep-free" && (v = next())) pin_keep_gb = std::atof(v);
         else if (a == "--prefill") use_prefill = true;
+        else if (a == "--prompt-tokens" && (v = next())) prompt_tokens = std::max(1LL, std::atoll(v));
         else if (a == "--prefill-chunk" && (v = next())) opt.prefill_chunk = std::atoi(v);
         else if (a == "--prefill-rows" && (v = next())) opt.prefill_rows = std::atoi(v);
         else if (a == "--kv-in-ram") opt.kv_in_ram = true;
@@ -245,6 +251,10 @@ int main(int argc, char** argv) {
         else if (a == "--park-mib" && (v = next())) so.park_bytes = (size_t) (std::max(0.0, std::atof(v)) * 1048576.0);
         else if (a == "--checkpoint-min" && (v = next())) so.checkpoint_min = std::atoll(v);
         else return usage();
+    }
+    if (prompt_tokens > 0 && (!use_prefill || check_cpu || out_path.empty())) {
+        std::fprintf(stderr, "--prompt-tokens needs --prefill and --out, without --check-cpu\n");
+        return 2;
     }
     if (serve && !model_path.empty()) {
         strata::glm::serve_signals_starting();   // ends with its server while it starts (serve_signals.hpp)
@@ -327,8 +337,12 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "cannot write %s\n", out_path.c_str());
                 return 1;
             }
-            // the prompt path gives the logits of its last token only: one row
-            const int32_t hdr[2] = {(int32_t) c.n_vocab, use_prefill ? 1 : (int32_t) ids.size()};
+            // the prompt path gives the logits of its last token only: one row, and with --prompt-tokens one more
+            // for each token decoded after it
+            const int64_t rows = !use_prefill ? (int64_t) ids.size()
+                                 : prompt_tokens > 0 && prompt_tokens < (long long) ids.size()
+                                     ? (int64_t) ids.size() - prompt_tokens + 1 : 1;
+            const int32_t hdr[2] = {(int32_t) c.n_vocab, (int32_t) rows};
             std::fwrite(hdr, sizeof hdr, 1, out);
         }
 
@@ -579,12 +593,25 @@ int main(int argc, char** argv) {
         if (use_prefill) {
             // the prompt in chunks on the GPU, against the CPU reference token by token; then a few decoded tokens
             // on both, which checks the state the chunks left (KDA, the latent cache, the pooled keys)
+            const size_t np = prompt_tokens > 0 ? std::min(ids.size(), (size_t) prompt_tokens) : ids.size();
             const auto a = std::chrono::steady_clock::now();
-            std::vector<float> lg = eng.prefill(ids.data(), (int64_t) ids.size());
+            std::vector<float> lg = eng.prefill(ids.data(), (int64_t) np);
             const double s_pp = std::chrono::duration<double>(std::chrono::steady_clock::now() - a).count();
-            std::printf("prefill: %zu tokens in %.2f s (%.1f tokens/s)\n", ids.size(), s_pp, (double) ids.size() / s_pp);
+            std::printf("prefill: %zu tokens in %.2f s (%.1f tokens/s)\n", np, s_pp, (double) np / s_pp);
             if (out) {
                 std::fwrite(lg.data(), sizeof(float), lg.size(), out);
+                // --prompt-tokens: the rest of the tokens one at a time, each one's logits after the prompt's
+                const auto b = std::chrono::steady_clock::now();
+                for (size_t i = np; i < ids.size(); ++i) {
+                    const std::vector<float>& l = eng.eval(ids[i]);
+                    std::fwrite(l.data(), sizeof(float), l.size(), out);
+                    if ((i + 1 - np) % 1024 == 0) std::printf("decoded %zu/%zu\n", i + 1 - np, ids.size() - np);
+                }
+                if (np < ids.size()) {
+                    const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - b).count();
+                    std::printf("decoded %zu tokens after the prompt in %.1f s (%.2f tokens/s)\n", ids.size() - np, s,
+                                (double) (ids.size() - np) / s);
+                }
                 std::fclose(out);
             }
             if (!check_cpu) {

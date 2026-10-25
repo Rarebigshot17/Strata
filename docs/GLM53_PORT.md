@@ -553,6 +553,33 @@ from the Strata folder.
    This compares one token at a time. The VRAM expert cache starts empty and fills from what the text uses, so the
    first run is the slowest; `--expert-profile` saves the use counts for the next start.
 
+   **Past the indexer's dense range.** Up to 2,051 tokens of context the indexer attends to every pool, so the text
+   above never reaches its selection. `tools/glm53_ref/long.txt` (59,944 bytes: the start of `docs/DETAILS.md` at
+   `9b0cced`, about 16,700 tokens) does. The same comparison, from position 2051 on, the first with more than 2,051
+   tokens of context; and once more with the prompt path reading the first 12,288 tokens, as the server reads a long
+   prompt, then one token at a time, compared from position 12,287 on (the prompt's last row). The live flags, a copy
+   of the live expert profile (the engine writes it back when it ends), the Qwen service stopped, and about 24 GB of
+   logit files (calculated: 16,700, 16,700 and 4,400 rows of 154,880 floats):
+
+   ```bash
+   CUDA_VISIBLE_DEVICES= ~/llama.cpp/build/bin/llama-strata-ref -m ~/models/glm53/<first shard> \
+       -f tools/glm53_ref/long.txt -c 20480 -b 256 -ub 256 \
+       --out ~/glm53-ref/long-ref.bin --ids-out ~/glm53-ref/long-ids.txt
+   build/strata-glm -m ~/models/glm53/<first shard> --tokens-file ~/glm53-ref/long-ids.txt --ctx 20480 \
+       --pin-experts --kv-in-ram --expert-profile ~/glm53-ref/profile-long.bin --out ~/glm53-ref/long-strata.bin
+   build/strata-glm -m ~/models/glm53/<first shard> --tokens-file ~/glm53-ref/long-ids.txt --ctx 20480 \
+       --pin-experts --kv-in-ram --prefill-spread --prefill --prefill-chunk 4096 --prompt-tokens 12288 \
+       --expert-profile ~/glm53-ref/profile-long.bin --out ~/glm53-ref/long-strata-pp.bin
+   python tools/glm53_nll.py ~/glm53-ref/long-ids.txt ~/glm53-ref/long-ref.bin ~/glm53-ref/long-strata.bin
+   python tools/glm53_nll.py ~/glm53-ref/long-ids.txt ~/glm53-ref/long-ref.bin ~/glm53-ref/long-strata.bin \
+       --from 2051
+   python tools/glm53_nll.py ~/glm53-ref/long-ids.txt ~/glm53-ref/long-ref.bin ~/glm53-ref/long-strata-pp.bin \
+       --strata-first 12287
+   ```
+
+   Each passes by step 7's rule. The first comparison, over every position, is also the GPU engine's first full run
+   of step 7's kind: on step 7's own text it has run 205 tokens only.
+
 8. **The server**, once step 7 passes. Setup writes the run config and the start script for the
    shards step 5 downloaded (`--gguf-dir` finds them by their quantization's name, so nothing is downloaded
    again), compiles the engine into `build/` with its own settings (it records the build in `build/BUILD.json`),

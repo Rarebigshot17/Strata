@@ -68,6 +68,33 @@ class Nll(unittest.TestCase):
         self.assertEqual(rc, 1, out)
         self.assertIn("FAIL", out)
 
+    def test_from_scores_only_the_positions_past_it(self):
+        # worse only before position 600: it fails over the whole text and passes from 600 on
+        worse = self.ref.copy()
+        for i in range(600):
+            worse[i, self.ids[i + 1]] -= 2.0
+        rc, out = self.run_tool(worse)
+        self.assertEqual(rc, 1, out)
+        rc, out = self.run_tool(worse, "--from", "600")
+        self.assertEqual(rc, 0, out)
+        self.assertIn(f"tokens {ROWS - 1 - 600} (positions 600 to {ROWS - 2})", out)
+        self.assertIn("strata - ref: +0.0000", out)
+
+    def test_strata_first_reads_a_file_that_starts_later(self):
+        # strata-glm --prefill --prompt-tokens 601: its rows are positions 600 on
+        rc, out = self.run_tool(self.ref[600:], "--strata-first", "600")
+        self.assertEqual(rc, 0, out)
+        self.assertIn(f"tokens {ROWS - 1 - 600} (positions 600 to {ROWS - 2})", out)
+        self.assertIn("strata - ref: +0.0000", out)
+        # read as position 0 instead, every row is matched with the wrong next token
+        rc, out = self.run_tool(self.ref[600:])
+        self.assertEqual(rc, 1, out)
+        # --from past the first row: both files from there
+        rc, out = self.run_tool(self.ref[600:], "--strata-first", "600", "--from", "1000")
+        self.assertEqual(rc, 0, out)
+        self.assertIn(f"tokens {ROWS - 1 - 1000} (positions 1000 to {ROWS - 2})", out)
+        self.assertIn("strata - ref: +0.0000", out)
+
     def test_a_short_text_says_its_interval_is_wide(self):
         noise = np.random.default_rng(3).normal(0, 1.0, self.ref.shape).astype(np.float32)
         write(self.tmp / "ref.bin", self.ref[:40])
