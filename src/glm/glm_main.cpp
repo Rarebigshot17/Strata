@@ -281,6 +281,7 @@ int main(int argc, char** argv) {
             so.info.push_back("backend=cuda");
             so.info.push_back("expert_slots=" + std::to_string(eng.cache_slots()));
             so.info.push_back("expert_cache_mib=" + std::to_string(eng.cache_bytes() >> 20));
+            if (eng.mtp_ready()) so.info.push_back("mtp=1");   // it drafts (the server's /metrics: spec_decode)
             strata::glm::serve_signals_serving();   // the server ends it with QUIT, which saves the profile below
             const int rc = strata::glm::serve_loop(ev, so);
             eng.save_profile();

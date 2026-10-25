@@ -71,7 +71,25 @@ class Units(unittest.TestCase):
         self.assertEqual(got[("vllm:kv_cache_usage_perc", lab)], 0.5)
         self.assertEqual(got[("vllm:prefix_cache_hits_total", lab)], 600)
         self.assertEqual(got[("vllm:time_to_first_token_seconds_count", lab)], 0)
-        self.assertFalse([k for k in got if "spec_decode" in k[0]])         # the engine writes no drafts
+        self.assertFalse([k for k in got if "spec_decode" in k[0]])         # the engine does not draft
+
+    def test_drafts_under_vllms_spec_decode_names(self):
+        # strata-glm --mtp says mtp=1 in its INFO line: vLLM's four counters, from the start (0) as vLLM has them
+        m = {"engine": {"model": "m", "mtp": 1}, "live": {"state": "idle"}, "totals": {"requests": 0}}
+        got = parse(render(m, Latencies().snapshot()))
+        lab = 'model_name="m"'
+        self.assertEqual(got[("vllm:spec_decode_num_drafts_total", lab)], 0)
+        m["totals"] = {"requests": 2, "drafts": 17, "drafts_taken": 15}
+        got = parse(render(m, Latencies().snapshot()))
+        # one token a draft: as many draft tokens as drafts, and every accepted one at position 0
+        self.assertEqual(got[("vllm:spec_decode_num_drafts_total", lab)], 17)
+        self.assertEqual(got[("vllm:spec_decode_num_draft_tokens_total", lab)], 17)
+        self.assertEqual(got[("vllm:spec_decode_num_accepted_tokens_total", lab)], 15)
+        self.assertEqual(got[("vllm:spec_decode_num_accepted_tokens_per_pos_total", lab + ',position="0"')], 15)
+        # unloaded since (no INFO now): the counts it has stay
+        m["engine"] = {"model": "m"}
+        got = parse(render(m, Latencies().snapshot()))
+        self.assertEqual(got[("vllm:spec_decode_num_accepted_tokens_total", lab)], 15)
 
     def test_strata_names_follow_the_json(self):
         m = {"engine": {"model": "m", "max_context": 1000},

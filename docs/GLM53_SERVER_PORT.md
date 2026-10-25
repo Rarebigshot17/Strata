@@ -50,7 +50,8 @@ Behaviour the port and its review (D1) settled:
 
 ```
 start   <- INFO engine=<version> eos=<number of --eos-ids> park_mib=<int> logit_bias=1 backend=cuda|cpu-reference
-               [expert_slots=<n> expert_cache_mib=<int>]        (strata-glm: the warm-up's lines on stderr first)
+               [expert_slots=<n> expert_cache_mib=<int>] [mtp=1]   (strata-glm: the warm-up's lines on stderr
+                                         first; mtp=1: it drafts with the model's MTP block, --mtp)
         <- READY <ctx> stop
 request -> GEN <max_new> [cp=<n>] [end=<id,...>] [logit_bias=id:bias,...] [temperature= top_p= top_k= min_p=
                penalty_repeat= penalty_freq= penalty_present= penalty_last_n= seed= drawn=] <id,id,...>

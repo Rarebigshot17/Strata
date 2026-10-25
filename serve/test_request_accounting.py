@@ -64,7 +64,8 @@ class ClockedThinkingEngine(ThinkingEngine):
             self.last = dict(prompt_tokens=len(ids), generated=generated, reused=reused,
                              prompt_read=len(ids) - reused, finish="stop" if stopped else "cancel",
                              prompt_ms=40.0 if first else 7.0, decode_ms=200.0 if first else 80.0,
-                             hits=9 if first else 7, lookups=10 if first else 8)
+                             hits=9 if first else 7, lookups=10 if first else 8,
+                             drafts=6 if first else 3, drafts_taken=5 if first else 2)
             self.done.append(dict(self.last))
 
 
@@ -131,6 +132,13 @@ class RequestAccounting(unittest.TestCase):
         self.assertEqual((totals["requests"], totals["prompt_tokens"], totals["reused"]), (1, original, 5))
         self.assertEqual((totals["prompt_ms"], totals["decode_ms"]), (47.0, 280.0))
         self.assertEqual((totals["hits"], totals["lookups"]), (16, 18))
+        # --mtp's drafts, summed over the request's passes like the rest of its work
+        self.assertEqual((row["drafts"], row["drafts_taken"]), (9, 7))
+        self.assertEqual((totals["drafts"], totals["drafts_taken"]), (9, 7))
+        code, raw = self.request("/metrics?format=prometheus")
+        self.assertEqual(code, 200)
+        self.assertRegex(raw, r'(?m)^vllm:spec_decode_num_drafts_total\{model_name="[^"]*"\} 9$')
+        self.assertRegex(raw, r'(?m)^vllm:spec_decode_num_accepted_tokens_total\{model_name="[^"]*"\} 7$')
         code, raw = self.request("/v1/status")
         self.assertEqual(code, 200)
         last = json.loads(raw)["last_timings"]

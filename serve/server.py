@@ -1613,7 +1613,7 @@ class Service:
         self.history = collections.deque(maxlen=500)    # the last finished requests, newest last (GET /metrics)
         # since the server started (the Monitor's totals, issue #35)
         self.totals = {"since": time.time(), "requests": 0, "prompt_tokens": 0, "reused": 0, "output_tokens": 0,
-                       "prompt_ms": 0.0, "decode_ms": 0.0, "hits": 0, "lookups": 0}
+                       "prompt_ms": 0.0, "decode_ms": 0.0, "hits": 0, "lookups": 0, "drafts": 0, "drafts_taken": 0}
         self.last_timings = None                         # the last finished request's, llama.cpp's names (/v1/status)
         from serve.prometheus import Latencies
         self.latencies = Latencies()                     # GET /metrics in Prometheus text: the latency histograms
@@ -2655,7 +2655,9 @@ class Service:
             "prompt_ms": last.get("prompt_ms"), "decode_ms": last.get("decode_ms"),
             "decode_tok_s": round(last["generated"] / (last["decode_ms"] / 1000), 1)
             if n and last.get("generated") and last.get("decode_ms") else None,
-            "hit_rate": hit_rate, "hits": last.get("hits"), "lookups": last.get("lookups")})
+            "hit_rate": hit_rate, "hits": last.get("hits"), "lookups": last.get("lookups"),
+            # --mtp: the MTP block's drafts, and those that were the next token (None from an engine without them)
+            "drafts": last.get("drafts"), "drafts_taken": last.get("drafts_taken")})
         t = self.totals
         t["requests"] += 1
         t["prompt_tokens"] += seen
@@ -2665,6 +2667,8 @@ class Service:
         t["decode_ms"] += last.get("decode_ms") or 0.0
         t["hits"] += last.get("hits") or 0              # the expert cache's, summed: the Monitor's overall hit rate
         t["lookups"] += last.get("lookups") or 0
+        t["drafts"] += last.get("drafts") or 0
+        t["drafts_taken"] += last.get("drafts_taken") or 0
         ft = st.get("first_token")
         self.latencies.observe(ft - started if ft else None, n, (last.get("decode_ms") or 0.0) / 1000,
                                time.time() - started)
@@ -2734,7 +2738,7 @@ def request_stats(segments: list[dict]) -> dict:
             result[key] = segments[0][key]
         else:
             result.pop(key, None)
-    for key in ("prompt_ms", "decode_ms", "generated", "hits", "lookups"):
+    for key in ("prompt_ms", "decode_ms", "generated", "hits", "lookups", "drafts", "drafts_taken"):
         if any(segment.get(key) is not None for segment in segments):
             result[key] = sum(segment.get(key) or 0 for segment in segments)
     return result

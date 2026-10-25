@@ -748,15 +748,16 @@ them), or the first card only when `CUDA_VISIBLE_DEVICES` is set in the server's
 
 | Key | What it holds |
 | --- | --- |
-| `engine` | `model`, `max_context`, and the engine's `INFO` line: `version`, `backend` (`cuda` or `cpu-reference`), `park_mib`, `logit_bias`, `expert_slots`, `expert_cache_mib` |
+| `engine` | `model`, `max_context`, and the engine's `INFO` line: `version`, `backend` (`cuda` or `cpu-reference`), `park_mib`, `logit_bias`, `expert_slots`, `expert_cache_mib`, and `mtp` (1 when the engine drafts with the model's MTP layer, `--mtp`) |
 | `live` | `state` (`unloaded`, `idle`, `reading`, `generating`), `queued`, `phase`, `prompt_tokens`, `prompt_read` / `prompt_total` while reading, `generated`, `max_tokens`, `elapsed_s`, `tok_s` (over the last 2 s), `tok_s_mean`, `prefill_tok_s_mean` |
-| `requests` | The last 12 finished requests, newest first (`?requests=all`: every one kept, up to 500): `time`, `duration_s`, `finish`, `prompt_tokens`, `reused`, `prompt_read`, `output_tokens`, `prompt_ms`, `decode_ms`, `decode_tok_s`, `hit_rate`, `hits`, `lookups`, `reasoning_repeat_coverage` |
-| `totals` | Since the server started: `requests`, `prompt_tokens`, `reused`, `output_tokens`, `prompt_ms`, `decode_ms`, `hits`, `lookups` |
+| `requests` | The last 12 finished requests, newest first (`?requests=all`: every one kept, up to 500): `time`, `duration_s`, `finish`, `prompt_tokens`, `reused`, `prompt_read`, `output_tokens`, `prompt_ms`, `decode_ms`, `decode_tok_s`, `hit_rate`, `hits`, `lookups`, `drafts`, `drafts_taken`, `reasoning_repeat_coverage` |
+| `totals` | Since the server started: `requests`, `prompt_tokens`, `reused`, `output_tokens`, `prompt_ms`, `decode_ms`, `hits`, `lookups`, `drafts`, `drafts_taken` |
 | `conversation_cache` | `enabled`, `budget_mib`, `parked`, `checkpoints`, `bytes`, `parks`, `restores`, `evictions`, `last_event`, `last_tokens`, `requests`, `requests_reused`, `reused_tokens`, `prompt_tokens`, `last_reused`, `last_prompt` |
 | `hardware`, `hardware_static`, `history` | The latest readings (`gpu_util`, `gpu_mem_used`, `gpu_temp`, `gpu_power`, `gpu_pcie_*`, `gpus` per card, `cpu`, `ram_used`, `ram_total`, `disk_read_mb`, ...), the fixed facts (GPU and CPU names, cores), and 60 readings per series |
 
 `hit_rate` is the share of expert lookups that found the expert in the VRAM cache while the reply was written (the
-engine counts decode only).
+engine counts decode only). `drafts` are the tokens the MTP layer drafted (`--mtp`) and `drafts_taken` those that
+were the next token, over all of a request's passes; both stay 0 without `--mtp`.
 
 ### Prometheus
 
@@ -778,6 +779,12 @@ every sample has the label `model_name` (`serve/prometheus.py`):
 | `vllm:time_to_first_token_seconds` | histogram | Time to the first token |
 | `vllm:inter_token_latency_seconds` | histogram | Time between tokens: each request's mean gap, once per gap |
 | `vllm:e2e_request_latency_seconds` | histogram | A request from start to end |
+| `vllm:spec_decode_num_drafts_total`, `vllm:spec_decode_num_draft_tokens_total` | counter | With `--mtp`: the MTP layer's drafts (`totals.drafts`; one token each, so the two are the same) |
+| `vllm:spec_decode_num_accepted_tokens_total`, `vllm:spec_decode_num_accepted_tokens_per_pos_total{position="0"}` | counter | With `--mtp`: the drafts that were the next token (`totals.drafts_taken`) |
+
+As in vLLM, the `spec_decode` counters are there only when the engine drafts: its INFO line says `mtp=1`, or it has
+drafted since the server started. The share of drafts taken is
+`rate(vllm:spec_decode_num_accepted_tokens_total[5m]) / rate(vllm:spec_decode_num_draft_tokens_total[5m])`.
 
 The facts vLLM has no name for come in the same scrape under `strata:`, named after their JSON key, and a value the
 server does not have (no GPU telemetry) has no sample rather than a zero: `strata:live_state{state="..."}` (1 for the

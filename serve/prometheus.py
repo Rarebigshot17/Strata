@@ -62,7 +62,8 @@ def _num(v, default=0):
 
 def render(m: dict, lat: dict) -> str:
     """The text for one scrape.  `m` is Service.metrics(), `lat` Latencies.snapshot()."""
-    model = str((m.get("engine") or {}).get("model") or "strata").replace("\\", "\\\\").replace('"', '\\"')
+    eng = m.get("engine") or {}
+    model = str(eng.get("model") or "strata").replace("\\", "\\\\").replace('"', '\\"')
     lab = f'model_name="{model}"'
     live, totals = m.get("live") or {}, m.get("totals") or {}
     out = []
@@ -71,7 +72,7 @@ def render(m: dict, lat: dict) -> str:
         out.append(f"# HELP {name} {help_}\n# TYPE {name} {kind}\n{name}{{{lab}}} {value}")
 
     busy = live.get("state") in ("reading", "generating")
-    ctx = _num((m.get("engine") or {}).get("max_context"), 0)
+    ctx = _num(eng.get("max_context"), 0)
     used = _num(live.get("prompt_tokens")) + _num(live.get("generated")) if busy else 0
     # one request runs at a time; the others wait for their turn (live.queued)
     metric("vllm:num_requests_running", "gauge", "Requests reading their prompt or generating.", int(busy))
@@ -87,6 +88,16 @@ def render(m: dict, lat: dict) -> str:
     metric("vllm:prefix_cache_hits_total", "counter", "Prompt tokens the prompt cache already held.",
            _num(totals.get("reused")))
     metric("vllm:num_preemptions_total", "counter", "Preempted requests (Strata does not preempt).", 0)
+    drafts, taken = _num(totals.get("drafts")), _num(totals.get("drafts_taken"))
+    if eng.get("mtp") or drafts:
+        # as vLLM, only where the engine drafts (its INFO says mtp=1; or it has, and is unloaded now). The MTP layer
+        # drafts one token at a time: the drafts are the draft tokens, and every accepted one is at position 0
+        metric("vllm:spec_decode_num_drafts_total", "counter", "Number of spec decoding drafts.", drafts)
+        metric("vllm:spec_decode_num_draft_tokens_total", "counter", "Number of draft tokens.", drafts)
+        metric("vllm:spec_decode_num_accepted_tokens_total", "counter", "Number of accepted tokens.", taken)
+        name = "vllm:spec_decode_num_accepted_tokens_per_pos_total"
+        out.append(f'# HELP {name} Accepted tokens per draft position.\n# TYPE {name} counter\n'
+                   f'{name}{{{lab},position="0"}} {taken}')
     for name, key, help_ in (("vllm:time_to_first_token_seconds", "ttft", "Time to the first token."),
                              ("vllm:inter_token_latency_seconds", "itl", "Time between two tokens."),
                              ("vllm:e2e_request_latency_seconds", "e2e", "A request from start to end.")):
